@@ -1,0 +1,46 @@
+# Credentials & Tokens
+credentials.json
+backend/credentials.json
+token.pickle
+backend/token.pickle
+*.json
+!frontend/package.json
+!frontend/tsconfig.json
+!frontend/package-lock.json
+!backend/app_bandit.json
+!backend/scratch_bandit.json
+
+# Binaries & Large Executables
+cloudflared.exe
+*.exe
+*.dll
+
+# Certificates
+certs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+*.db
+*.sqlite3
+
+# Node & Build
+node_modules/
+dist/
+.output/
+.vite/
+
+# Logs & Tunnels
+*.log
+cf_tunnel.log
+cf_tunnel_err.log
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

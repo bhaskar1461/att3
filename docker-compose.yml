@@ -1,0 +1,41 @@
+# Podman / Podman Compose Container Specifications
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: attendance_backend
+    restart: always
+    ports:
+      - "8008:8000"
+    environment:
+      - SECRET_KEY=8f3b2a19e5d4c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2
+      - QR_SECRET_KEY=a1b2c3d4e5f678901234567890abcdef1234567890abcdef1234567890abcdef
+      - DATABASE_URL=${DATABASE_URL:-mysql+pymysql://db_user:db_password@seg-demo-mysql.internal:3306/attendance_db}
+    volumes:
+      - ./backend/data:/app/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: attendance_frontend_pwa
+    restart: always
+    ports:
+      - "8088:80"
+      - "443:443"
+      - "8443:443"
+    volumes:
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - backend
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: attendance_cloudflare_tunnel
+    restart: always
+    command: tunnel --no-autoupdate --url http://frontend:80
+    depends_on:
+      - frontend
