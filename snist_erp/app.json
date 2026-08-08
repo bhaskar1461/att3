@@ -1,0 +1,11 @@
+{
+  "app_name": "snist_erp",
+  "app_title": "SNIST Student ERP",
+  "app_publisher": "SNIST Core Team",
+  "app_description": "Frappe Education Extension and Custom DocTypes for SNIST Student ERP",
+  "app_icon": "octicon octicon-book",
+  "app_color": "#15347e",
+  "app_email": "admin@sreenidhi.edu.in",
+  "app_license": "MIT",
+  "required_apps": ["frappe", "education"]
+}

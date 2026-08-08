@@ -1,0 +1,28 @@
+[
+  {
+    "dt": "Student Attendance",
+    "fieldname": "custom_student_sap_id",
+    "label": "Student SAP ID",
+    "fieldtype": "Data",
+    "in_list_view": 1,
+    "insert_after": "student"
+  },
+  {
+    "dt": "Student Attendance",
+    "fieldname": "custom_scan_mode",
+    "label": "Scan / Entry Mode",
+    "fieldtype": "Select",
+    "options": "STUDENT_QR_SCAN\nTEACHER_MANUAL",
+    "default": "STUDENT_QR_SCAN",
+    "in_list_view": 1,
+    "insert_after": "status"
+  },
+  {
+    "dt": "Student Attendance",
+    "fieldname": "custom_attendance_session",
+    "label": "Attendance Session",
+    "fieldtype": "Link",
+    "options": "SNIST Attendance Session",
+    "insert_after": "custom_scan_mode"
+  }
+]

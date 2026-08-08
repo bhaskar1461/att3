@@ -46,6 +46,8 @@ try:
         to_encode = data.copy()
         if expires_delta:
             expire = datetime.utcnow() + expires_delta
+        elif data.get("role") == "STUDENT":
+            expire = datetime.utcnow() + timedelta(seconds=getattr(settings, "STUDENT_TOKEN_EXPIRE_SECONDS", 30))
         else:
             expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         to_encode.update({"exp": expire})
@@ -61,7 +63,12 @@ except ImportError:
     def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
         header = base64.b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()).decode()
         payload = data.copy()
-        payload["exp"] = int(time.time()) + (settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+        if expires_delta:
+            payload["exp"] = int(time.time()) + int(expires_delta.total_seconds())
+        elif data.get("role") == "STUDENT":
+            payload["exp"] = int(time.time()) + getattr(settings, "STUDENT_TOKEN_EXPIRE_SECONDS", 30)
+        else:
+            payload["exp"] = int(time.time()) + (settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
         payload_b64 = base64.b64encode(json.dumps(payload).encode()).decode()
         signature_raw = f"{header}.{payload_b64}"
         signature = hmac.new(settings.SECRET_KEY.encode(), signature_raw.encode(), hashlib.sha256).hexdigest()
@@ -167,52 +174,55 @@ def decrypt_and_validate_qr_payload(qr_string: str) -> Dict[str, Any]:
     Supports V2 compact format (V2|...), V1 pipe format (SNIST|...), and legacy JSON payloads.
     """
     try:
-        raw = str(qr_string).strip()
-        
-        # 1. Handle V2 Payload format
-        if raw.startswith("V2|"):
-            parts = raw.split("|")
-            if len(parts) != 5:
-                raise ValueError("Invalid V2 payload format")
-            
-            _, sid_b36, exp_b36, nonce, mac = parts
-            base_str = f"V2|{sid_b36}|{exp_b36}|{nonce}"
-            key = get_aes_key()
-            expected_mac = hmac.new(key, base_str.encode('utf-8'), hashlib.sha256).hexdigest()[:16]
-            
-            if not hmac.compare_digest(mac, expected_mac):
-                raise ValueError("Tampered V2 QR payload (Checksum failure)")
-                
-            student_id = _base36_to_int(sid_b36)
-            expires_at = _base36_to_int(exp_b36)
-            
-            if expires_at and time.time() > expires_at:
-                raise ValueError("Expired QR Code")
-                
-            return {
-                "studentId": student_id,
-                "rollNumber": "", # Resolved downstream by DB query
-                "expiresAt": expires_at,
-                "version": 2
-            }
-            
-        # 2. Handle V1 Pipe Delimited payload format
-        if raw.startswith("SNIST|"):
-            parts = raw.split("|")
-            if len(parts) == 6:
-                payload = {
-                    "studentId": int(parts[1]),
-                    "rollNumber": parts[2],
-                    "encryptedToken": parts[3],
-                    "checksum": parts[4],
-                    "t": int(parts[5])
-                }
-            else:
-                raise ValueError("Invalid SNIST V1 compact payload structure")
-        elif raw.startswith("{"):
-            payload = json.loads(raw)
+        if isinstance(qr_string, dict):
+            payload = qr_string
         else:
-            payload = json.loads(raw)
+            raw = str(qr_string).strip()
+            
+            # 1. Handle V2 Payload format
+            if raw.startswith("V2|"):
+                parts = raw.split("|")
+                if len(parts) != 5:
+                    raise ValueError("Invalid V2 payload format")
+                
+                _, sid_b36, exp_b36, nonce, mac = parts
+                base_str = f"V2|{sid_b36}|{exp_b36}|{nonce}"
+                key = get_aes_key()
+                expected_mac = hmac.new(key, base_str.encode('utf-8'), hashlib.sha256).hexdigest()[:16]
+                
+                if not hmac.compare_digest(mac, expected_mac):
+                    raise ValueError("Tampered V2 QR payload (Checksum failure)")
+                    
+                student_id = _base36_to_int(sid_b36)
+                expires_at = _base36_to_int(exp_b36)
+                
+                if expires_at and time.time() > expires_at:
+                    raise ValueError("Expired QR Code")
+                    
+                return {
+                    "studentId": student_id,
+                    "rollNumber": "", # Resolved downstream by DB query
+                    "expiresAt": expires_at,
+                    "version": 2
+                }
+                
+            # 2. Handle V1 Pipe Delimited payload format
+            if raw.startswith("SNIST|"):
+                parts = raw.split("|")
+                if len(parts) == 6:
+                    payload = {
+                        "studentId": int(parts[1]),
+                        "rollNumber": parts[2],
+                        "encryptedToken": parts[3],
+                        "checksum": parts[4],
+                        "t": int(parts[5])
+                    }
+                else:
+                    raise ValueError("Invalid SNIST V1 compact payload structure")
+            elif raw.startswith("{"):
+                payload = json.loads(raw)
+            else:
+                payload = json.loads(raw)
             
         student_id = payload.get("studentId")
         roll_number = payload.get("rollNumber")

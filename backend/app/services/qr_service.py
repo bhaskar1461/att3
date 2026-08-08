@@ -1,6 +1,7 @@
 import io
 import os
 import json
+import math
 import base64
 import zipfile
 import qrcode
@@ -85,6 +86,82 @@ class QRService:
         return qr_rgba.convert("RGB")
 
     @staticmethod
+    def _draw_snist_shield_exact(draw: ImageDraw.ImageDraw, bbox: tuple, fill_color=(228, 85, 14), flame_color=(255, 255, 255)):
+        x0, y0, x1, y1 = bbox
+        w = x1 - x0
+        h = y1 - y0
+        cx = x0 + w / 2
+
+        r = w * 0.22
+        shield_pts = [
+            (x0 + r, y0),
+            (x1 - r, y0),
+            (x1, y0 + r),
+            (x1, y0 + h * 0.58),
+            (cx, y1),
+            (x0, y0 + h * 0.58),
+            (x0, y0 + r),
+        ]
+        draw.polygon(shield_pts, fill=fill_color)
+
+        f1 = [
+            (x0 + w * 0.26, y0 + h * 0.62),
+            (x0 + w * 0.38, y0 + h * 0.40),
+            (x0 + w * 0.46, y0 + h * 0.28),
+            (x0 + w * 0.40, y0 + h * 0.46),
+            (x0 + w * 0.32, y0 + h * 0.68),
+        ]
+        f2 = [
+            (x0 + w * 0.42, y0 + h * 0.72),
+            (x0 + w * 0.56, y0 + h * 0.35),
+            (x0 + w * 0.64, y0 + h * 0.18),
+            (x0 + w * 0.58, y0 + h * 0.38),
+            (x0 + w * 0.48, y0 + h * 0.76),
+        ]
+        f3 = [
+            (x0 + w * 0.58, y0 + h * 0.75),
+            (x0 + w * 0.72, y0 + h * 0.42),
+            (x0 + w * 0.78, y0 + h * 0.32),
+            (x0 + w * 0.74, y0 + h * 0.46),
+            (x0 + w * 0.64, y0 + h * 0.78),
+        ]
+        draw.polygon(f1, fill=flame_color)
+        draw.polygon(f2, fill=flame_color)
+        draw.polygon(f3, fill=flame_color)
+
+    @staticmethod
+    def _draw_pillar_icon(draw: ImageDraw.ImageDraw, center_x: float, center_y: float, pillar_index: int, color=(228, 85, 14)):
+        cx, cy = center_x, center_y
+        r = 18
+        draw.ellipse([(cx - r - 6, cy - r - 6), (cx + r + 6, cy + r + 6)], outline=color, width=2)
+
+        if pillar_index == 0:
+            draw.ellipse([(cx - 10, cy - 10), (cx + 10, cy + 10)], outline=color, width=2)
+            draw.ellipse([(cx - 4, cy - 4), (cx + 4, cy + 4)], fill=color)
+            for angle in range(0, 360, 45):
+                rad = math.radians(angle)
+                x_out = cx + math.cos(rad) * 15
+                y_out = cy + math.sin(rad) * 15
+                draw.line([(cx, cy), (x_out, y_out)], fill=color, width=3)
+        elif pillar_index == 1:
+            draw.ellipse([(cx - 8, cy - 10), (cx + 8, cy + 4)], outline=color, width=2)
+            draw.line([(cx - 5, cy + 8), (cx + 5, cy + 8)], fill=color, width=2)
+            draw.line([(cx - 3, cy + 12), (cx + 3, cy + 12)], fill=color, width=2)
+            draw.line([(cx, cy - 14), (cx, cy - 10)], fill=color, width=2)
+        elif pillar_index == 2:
+            cap_pts = [(cx, cy - 10), (cx + 14, cy - 2), (cx, cy + 6), (cx - 14, cy - 2)]
+            draw.polygon(cap_pts, outline=color, fill=(254, 243, 235), width=2)
+            draw.line([(cx - 8, cy + 2), (cx - 8, cy + 10), (cx + 8, cy + 10), (cx + 8, cy + 2)], fill=color, width=2)
+            draw.line([(cx + 14, cy - 2), (cx + 14, cy + 8)], fill=color, width=2)
+        elif pillar_index == 3:
+            draw.ellipse([(cx - 8 - 3, cy - 6), (cx - 8 + 3, cy)], outline=color, width=2)
+            draw.ellipse([(cx + 8 - 3, cy - 6), (cx + 8 + 3, cy)], outline=color, width=2)
+            draw.ellipse([(cx - 3, cy - 10), (cx + 3, cy - 4)], outline=color, width=2)
+            draw.line([(cx - 12, cy + 10), (cx - 12, cy + 4), (cx - 4, cy + 4)], fill=color, width=2)
+            draw.line([(cx + 12, cy + 10), (cx + 12, cy + 4), (cx + 4, cy + 4)], fill=color, width=2)
+            draw.line([(cx - 6, cy + 10), (cx - 6, cy + 2), (cx + 6, cy + 2), (cx + 6, cy + 10)], fill=color, width=2)
+
+    @staticmethod
     def generate_student_qr_code(
         student_id: int, 
         roll_number: str, 
@@ -94,8 +171,8 @@ class QRService:
         as_base64: bool = True
     ) -> str:
         """
-        Generates ultra-compact V2 payload, applies High Error Correction (Level H), 
-        embeds SNIST center branding, and renders a high-res 600x750 student pass card.
+        Generates official SNIST QR poster card with ultra-compact V2 encrypted payload,
+        customized orange finder patterns, center SNIST flame logo, and bottom institutional pillars.
         """
         if use_v2:
             qr_payload = generate_encrypted_qr_payload_v2(student_id, roll_number)
@@ -103,66 +180,220 @@ class QRService:
             payload_dict = generate_encrypted_qr_payload(student_id, roll_number)
             qr_payload = QRService._compact_payload(payload_dict)
 
-        # Generate QR matrix with ERROR_CORRECT_H (30% error correction capacity)
+        W, H = 1000, 1000
+        canvas = Image.new("RGB", (W, H), (255, 255, 255))
+        draw = ImageDraw.Draw(canvas)
+
+        ORANGE = (228, 85, 14)
+        DARK_BG = (26, 26, 26)
+        BLACK = (12, 12, 12)
+        WHITE = (255, 255, 255)
+        LIGHT_BG = (253, 240, 233)
+
+        # 1. Corner Tech Slash Accents
+        draw.polygon([(0, 0), (240, 0), (0, 240)], fill=LIGHT_BG)
+        draw.line([(0, 240), (240, 0)], fill=ORANGE, width=4)
+        draw.line([(0, 210), (210, 0)], fill=ORANGE, width=2)
+        
+        draw.polygon([(W, H - 280), (W, H), (W - 280, H)], fill=LIGHT_BG)
+        draw.line([(W - 280, H), (W, H - 280)], fill=ORANGE, width=4)
+        draw.line([(W - 250, H), (W, H - 250)], fill=ORANGE, width=2)
+
+        # Circuit node decor
+        draw.line([(W - 180, 40), (W - 40, 40)], fill=(230, 230, 230), width=2)
+        draw.line([(W - 120, 40), (W - 80, 80), (W - 20, 80)], fill=(230, 230, 230), width=2)
+        draw.ellipse([(W - 44, 36), (W - 36, 44)], fill=ORANGE)
+        draw.ellipse([(W - 24, 76), (W - 16, 84)], fill=ORANGE)
+
+        # 2. Typography
+        try:
+            font_title = ImageFont.truetype("arialbd.ttf", 52)
+            font_sub1 = ImageFont.truetype("arialbd.ttf", 16)
+            font_sub2 = ImageFont.truetype("arialbd.ttf", 16)
+            font_url = ImageFont.truetype("arialbd.ttf", 32)
+            font_footer1 = ImageFont.truetype("arialbd.ttf", 13)
+            font_footer2 = ImageFont.truetype("arialbd.ttf", 13)
+            font_bar = ImageFont.truetype("arialbd.ttf", 20)
+        except IOError:
+            font_title = ImageFont.load_default()
+            font_sub1 = ImageFont.load_default()
+            font_sub2 = ImageFont.load_default()
+            font_url = ImageFont.load_default()
+            font_footer1 = ImageFont.load_default()
+            font_footer2 = ImageFont.load_default()
+            font_bar = ImageFont.load_default()
+
+        # Center Brand Header Block
+        start_x = (W - 410) // 2
+        shield_box = (start_x, 26, start_x + 85, 118)
+        QRService._draw_snist_shield_exact(draw, shield_box, fill_color=ORANGE, flame_color=WHITE)
+
+        text_x = start_x + 102
+        draw.text((text_x, 44), "SNIST", fill=BLACK, font=font_title, anchor="lm")
+        draw.text((text_x, 86), "SREENIDHI INSTITUTE OF", fill=ORANGE, font=font_sub1, anchor="lm")
+        draw.text((text_x, 106), "SCIENCE AND TECHNOLOGY", fill=ORANGE, font=font_sub2, anchor="lm")
+
+        # 3. Main QR Container Card
+        card_margin = 170
+        card_top = 145
+        card_width = 660
+        card_height = 660
+        card_bbox = [(card_margin, card_top), (card_margin + card_width, card_top + card_height)]
+
+        shadow_box = [(card_margin + 4, card_top + 6), (card_margin + card_width + 4, card_top + card_height + 6)]
+        draw.rounded_rectangle(shadow_box, radius=40, fill=(215, 215, 215))
+        draw.rounded_rectangle(card_bbox, radius=40, fill=WHITE, outline=ORANGE, width=10)
+
+        # 4. QR Code Matrix Generation
         qr = qrcode.QRCode(
             version=None,
             error_correction=qrcode.constants.ERROR_CORRECT_H,
-            box_size=14,
-            border=3,
+            box_size=1,
+            border=0
         )
         qr.add_data(qr_payload)
         qr.make(fit=True)
 
-        qr_raw_img = qr.make_image(fill_color="#15347e", back_color="white").convert('RGB')
-        qr_branded_img = QRService._add_center_snist_badge(qr_raw_img)
+        matrix = qr.get_matrix()
+        modules_count = len(matrix)
 
-        # Build Premium Student Pass Card Canvas (600 x 750 px)
-        card_width = 600
-        card_height = 750
-        card = Image.new('RGB', (card_width, card_height), color=(255, 255, 255))
-        draw = ImageDraw.Draw(card)
+        qr_render_size = 520
+        module_size = qr_render_size / modules_count
 
-        # Top Header Banner - SNIST Deep Navy
-        draw.rectangle([(0, 0), (card_width, 85)], fill=(21, 52, 126))
-        draw.rectangle([(0, 85), (card_width, 90)], fill=(234, 88, 12)) # Orange Accent Bar
+        qr_img = Image.new("RGBA", (qr_render_size, qr_render_size), (255, 255, 255, 0))
+        qr_draw = ImageDraw.Draw(qr_img)
 
-        try:
-            font_header = ImageFont.truetype("arialbd.ttf", 20)
-            font_sub_header = ImageFont.truetype("arial.ttf", 13)
-            font_title = ImageFont.truetype("arialbd.ttf", 22)
-            font_sub = ImageFont.truetype("arial.ttf", 15)
-        except IOError:
-            font_header = ImageFont.load_default()
-            font_sub_header = ImageFont.load_default()
-            font_title = ImageFont.load_default()
-            font_sub = ImageFont.load_default()
+        center_mod_size = int(modules_count * 0.22)
+        mod_start = (modules_count - center_mod_size) // 2
+        mod_end = mod_start + center_mod_size
 
-        draw.text((card_width // 2, 30), "SREENIDHI INSTITUTE OF SCIENCE & TECH", fill=(255, 255, 255), font=font_header, anchor="mm")
-        draw.text((card_width // 2, 60), "OFFICIAL DIGITAL ATTENDANCE PASS", fill=(254, 215, 170), font=font_sub_header, anchor="mm")
+        def is_finder(r, c):
+            if r < 7 and c < 7: return True
+            if r < 7 and c >= modules_count - 7: return True
+            if r >= modules_count - 7 and c < 7: return True
+            return False
 
-        # QR Code Frame (occupies ~80% of card width = 480x480)
-        qr_display_size = 480
-        qr_resized = qr_branded_img.resize((qr_display_size, qr_display_size), Image.Resampling.NEAREST)
-        x_offset = (card_width - qr_display_size) // 2
-        card.paste(qr_resized, (x_offset, 110))
+        for r in range(modules_count):
+            for c in range(modules_count):
+                if is_finder(r, c):
+                    continue
+                if mod_start <= r < mod_end and mod_start <= c < mod_end:
+                    continue
 
-        # Bottom Info Box
-        banner_y = 605
-        draw.rounded_rectangle([(25, banner_y), (card_width - 25, card_height - 25)], radius=14, outline=(226, 232, 240), fill=(248, 250, 252), width=2)
-        
-        draw.text((45, banner_y + 18), f"ROLL NO: {roll_number.upper()}", fill=(15, 23, 42), font=font_title)
-        if student_name:
-            draw.text((45, banner_y + 52), f"STUDENT: {student_name[:32]}", fill=(51, 65, 85), font=font_sub)
-        if department:
-            draw.text((45, banner_y + 78), f"DEPT: {department.upper()}", fill=(71, 85, 105), font=font_sub)
-        
-        # Security Verification Badge
-        draw.rectangle([(card_width - 220, banner_y + 75), (card_width - 45, banner_y + 105)], fill=(234, 88, 12))
-        draw.text((card_width - 132, banner_y + 90), "V2 SECURE ENCRYPTED", fill=(255, 255, 255), font=font_sub_header, anchor="mm")
+                if matrix[r][c]:
+                    mx0 = c * module_size
+                    my0 = r * module_size
+                    mx1 = mx0 + module_size
+                    my1 = my0 + module_size
+                    qr_draw.rounded_rectangle([(mx0 + 0.5, my0 + 0.5), (mx1 - 0.5, my1 - 0.5)], radius=module_size * 0.35, fill=BLACK)
+
+        finder_coords = [
+            (0, 0),
+            (0, modules_count - 7),
+            (modules_count - 7, 0)
+        ]
+
+        for fr, fc in finder_coords:
+            fx0 = fc * module_size
+            fy0 = fr * module_size
+            fx1 = fx0 + 7 * module_size
+            fy1 = fy0 + 7 * module_size
+
+            qr_draw.rounded_rectangle([(fx0, fy0), (fx1, fy1)], radius=module_size * 2.0, fill=ORANGE)
+
+            ix0 = fx0 + module_size
+            iy0 = fy0 + module_size
+            ix1 = fx1 - module_size
+            iy1 = fy1 - module_size
+            qr_draw.rounded_rectangle([(ix0, iy0), (ix1, iy1)], radius=module_size * 1.4, fill=WHITE)
+
+            cx0 = fx0 + 2 * module_size
+            cy0 = fy0 + 2 * module_size
+            cx1 = fx1 - 2 * module_size
+            cy1 = fy1 - 2 * module_size
+            qr_draw.rounded_rectangle([(cx0, cy0), (cx1, cy1)], radius=module_size * 0.9, fill=BLACK)
+
+        center_px = mod_start * module_size
+        center_size_px = center_mod_size * module_size
+        c_box = [(center_px, center_px), (center_px + center_size_px, center_px + center_size_px)]
+
+        qr_draw.rounded_rectangle(c_box, radius=18, fill=WHITE, outline=(235, 235, 235), width=2)
+
+        inner_shield = [
+            center_px + center_size_px * 0.20,
+            center_px + center_size_px * 0.16,
+            center_px + center_size_px * 0.80,
+            center_px + center_size_px * 0.84
+        ]
+        QRService._draw_snist_shield_exact(
+            qr_draw,
+            (inner_shield[0], inner_shield[1], inner_shield[2], inner_shield[3]),
+            fill_color=ORANGE,
+            flame_color=WHITE
+        )
+
+        qr_x = card_margin + (card_width - qr_render_size) // 2
+        qr_y = card_top + 25
+        canvas.paste(qr_img, (qr_x, qr_y), qr_img)
+
+        # 5. Bottom Dark Pill Banner inside QR Card Container
+        banner_y = card_top + card_height - 86
+        banner_h = 76
+
+        pill_box = [(card_margin + 12, banner_y), (card_margin + card_width - 100, banner_y + banner_h)]
+        draw.rounded_rectangle(pill_box, radius=38, fill=DARK_BG)
+
+        globe_cx = card_margin + 54
+        globe_cy = banner_y + banner_h / 2
+        draw.ellipse([(globe_cx - 24, globe_cy - 24), (globe_cx + 24, globe_cy + 24)], fill=ORANGE)
+        draw.ellipse([(globe_cx - 15, globe_cy - 15), (globe_cx + 15, globe_cy + 15)], outline=WHITE, width=2)
+        draw.line([(globe_cx - 15, globe_cy), (globe_cx + 15, globe_cy)], fill=WHITE, width=2)
+        draw.line([(globe_cx, globe_cy - 15), (globe_cx, globe_cy + 15)], fill=WHITE, width=2)
+
+        draw.text((card_margin + 94, banner_y + banner_h / 2), "sreenidhi.edu.in", fill=WHITE, font=font_url, anchor="lm")
+
+        chev_pts = [
+            (card_margin + card_width - 110, banner_y),
+            (card_margin + card_width - 10, banner_y),
+            (card_margin + card_width - 10, banner_y + banner_h),
+            (card_margin + card_width - 145, banner_y + banner_h),
+        ]
+        draw.polygon(chev_pts, fill=ORANGE)
+
+        arr_cx = card_margin + card_width - 52
+        arr_cy = banner_y + banner_h / 2
+        draw.line([(arr_cx - 8, arr_cy - 12), (arr_cx + 6, arr_cy), (arr_cx - 8, arr_cy + 12)], fill=WHITE, width=5)
+
+        # 6. Bottom Institutional 4 Pillars Section
+        p_y = card_top + card_height + 25
+        pillar_w = W / 4
+
+        pillars = [
+            ("ENGINEERING", "EXCELLENCE"),
+            ("INNOVATION", "& RESEARCH"),
+            ("ACADEMIC", "EXCELLENCE"),
+            ("NURTURING", "TOMORROW")
+        ]
+
+        for idx, (line1, line2) in enumerate(pillars):
+            px = idx * pillar_w + pillar_w / 2
+            QRService._draw_pillar_icon(draw, px, p_y + 22, idx, color=ORANGE)
+
+            draw.text((px, p_y + 54), line1, fill=BLACK, font=font_footer1, anchor="mm")
+            draw.text((px, p_y + 70), line2, fill=BLACK, font=font_footer2, anchor="mm")
+
+            if idx < 3:
+                div_x = (idx + 1) * pillar_w
+                draw.line([(div_x, p_y + 10), (div_x, p_y + 70)], fill=(225, 225, 225), width=1)
+
+        # 7. Bottom Solid Orange Bar
+        bar_y = H - 55
+        draw.rectangle([(0, bar_y), (W, H)], fill=ORANGE)
+        draw.text((W // 2, bar_y + 28), "///   LEARN   •   INNOVATE   •   EXCEL   ///", fill=WHITE, font=font_bar, anchor="mm")
 
         # Output to buffer
         buffer = io.BytesIO()
-        card.save(buffer, format="PNG", quality=95)
+        canvas.save(buffer, format="PNG", quality=95)
         buffer.seek(0)
         img_bytes = buffer.getvalue()
 

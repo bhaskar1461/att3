@@ -124,6 +124,23 @@ def process_qr_scan(
     if not student:
         raise HTTPException(status_code=400, detail="Invalid QR Code: Student record not found")
 
+    # Enforce Security Rule: Student user cannot submit attendance for a different student!
+    if current_user.role == UserRole.STUDENT and current_user.student_profile:
+        if current_user.student_profile.id != student.id:
+            from app.core.device_security import log_security_audit_event, SecurityEventType
+            log_security_audit_event(
+                db=db,
+                event_type=SecurityEventType.ATTENDANCE_REJECTED,
+                action="ATTENDANCE_REJECTED",
+                details=f"Student {current_user.student_profile.roll_number} attempted submit for {student.roll_number}",
+                user_id=current_user.id,
+                roll_number=current_user.student_profile.roll_number
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Attendance submission rejected: You cannot submit attendance for another student account."
+            )
+
     roll_number = student.roll_number
 
     # 4. Clamp period_count to 1-8

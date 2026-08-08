@@ -18,7 +18,10 @@ class Settings:
     SECRET_KEY: str = os.getenv("SECRET_KEY", "8f3b2a19e5d4c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2")
     QR_SECRET_KEY: str = os.getenv("QR_SECRET_KEY", "a1b2c3d4e5f678901234567890abcdef1234567890abcdef1234567890abcdef") # 32 bytes hex for AES
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days for staff/admin
+    STUDENT_TOKEN_EXPIRE_SECONDS: int = 30  # 30 seconds for student session tokens
+    DEVICE_BINDING_MINUTES: int = 30  # 30 minutes server device lock
+    MAX_BINDING_AUTH_ATTEMPTS: int = 5  # Max 5 attempts per binding window
     
     # Database
     # config.py is at backend/app/core/config.py -> 3 dirnames = backend, 4 dirnames = project root

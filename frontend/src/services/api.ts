@@ -1,9 +1,46 @@
+import { getDeviceHeaders } from './deviceCredential';
+
 const API_BASE = '/api/v1';
+let refreshTimer: any = null;
+
+export function scheduleTokenAutoRefresh() {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+
+  const token = localStorage.getItem('token');
+  const userStr = localStorage.getItem('user');
+  if (!token || !userStr) return;
+
+  try {
+    const user = JSON.parse(userStr);
+    if (user.role === 'STUDENT') {
+      // Schedule silent background token refresh every 20 seconds (before 30-sec expiry)
+      refreshTimer = setTimeout(async () => {
+        try {
+          const res = await apiRequest<{ access_token: string }>('/auth/refresh', { method: 'POST' });
+          if (res && res.access_token) {
+            localStorage.setItem('token', res.access_token);
+            scheduleTokenAutoRefresh();
+          }
+        } catch (err) {
+          console.warn('Silent token refresh warning:', err);
+        }
+      }, 20000);
+    }
+  } catch (err) {
+    console.warn('Error scheduling token refresh:', err);
+  }
+}
 
 export async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem('token');
+  const deviceHeaders = getDeviceHeaders();
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    ...deviceHeaders,
     ...(options.headers as Record<string, string> || {}),
   };
 
@@ -18,7 +55,7 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
       headers,
     });
 
-    if (response.status === 401) {
+    if (response.status === 401 && endpoint !== '/auth/refresh') {
       localStorage.removeItem('token');
       localStorage.removeItem('user');
       if (window.location.pathname !== '/login') {
@@ -49,7 +86,9 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
     }
 
     try {
-      return JSON.parse(text) as T;
+      const data = JSON.parse(text) as T;
+      scheduleTokenAutoRefresh();
+      return data;
     } catch {
       throw new Error('Server returned invalid data format. Please refresh and try again.');
     }

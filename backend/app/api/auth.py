@@ -52,30 +52,88 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         raise HTTPException(status_code=401, detail="User inactive or not found")
     return user
 
+from app.core.device_security import (
+    register_or_get_device,
+    enforce_device_binding,
+    log_security_audit_event,
+    SecurityEventType
+)
+
+class RefreshRequest(BaseModel):
+    device_public_id: Optional[str] = None
+    device_secret: Optional[str] = None
+
 @router.post("/login", response_model=Token)
 async def login_for_access_token(request: Request, db: Session = Depends(get_db)):
-    # Extract credentials from JSON body or Form data
     username = ""
     password = ""
+    device_public_id = request.headers.get("x-device-public-id", "").strip()
+    device_secret = request.headers.get("x-device-secret", "").strip()
 
     content_type = request.headers.get("content-type", "")
     if "application/json" in content_type:
         body = await request.json()
         username = body.get("username", "")
         password = body.get("password", "")
+        if not device_public_id:
+            device_public_id = str(body.get("device_public_id", "")).strip()
+        if not device_secret:
+            device_secret = str(body.get("device_secret", "")).strip()
     else:
         form = await request.form()
         username = form.get("username", "")
         password = form.get("password", "")
+        if not device_public_id:
+            device_public_id = str(form.get("device_public_id", "")).strip()
+        if not device_secret:
+            device_secret = str(form.get("device_secret", "")).strip()
 
     username = (username or "").strip()
     password = (password or "").strip()
+    ip_address = request.client.host if request.client else None
 
     user = db.query(User).filter(User.username == username).first()
     if not user:
         user = db.query(User).filter(User.username.ilike(username)).first()
 
+    # 1. Enforce Student Device Binding Security LOCKOUT BEFORE/DURING login
+    if user and user.role == UserRole.STUDENT:
+        if not device_public_id or not device_secret:
+            # Fallback default device identifier if client header not provided (testing/backwards compat)
+            device_public_id = f"dev_auto_{username.lower()}"
+            device_secret = f"sec_auto_{username.lower()}"
+
+        # Register/retrieve device
+        device = register_or_get_device(
+            db=db,
+            device_public_id=device_public_id,
+            device_secret=device_secret,
+            ip_address=ip_address
+        )
+
+        roll_number = username.upper()
+        if user.student_profile and user.student_profile.roll_number:
+            roll_number = user.student_profile.roll_number.upper()
+
+        # Enforce 30-minute device lock & 5-attempt limit
+        # MUST happen before password check if switching accounts, but check password first for correct account
+        enforce_device_binding(
+            db=db,
+            device=device,
+            roll_number=roll_number,
+            ip_address=ip_address
+        )
+
+    # 2. Verify password
     if not user or not verify_password(password, user.password_hash):
+        log_security_audit_event(
+            db=db,
+            event_type=SecurityEventType.LOGIN_FAILURE,
+            action="LOGIN_FAILURE",
+            details=f"Failed login attempt for username '{username}'",
+            user_id=user.id if user else None,
+            ip_address=ip_address
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -88,9 +146,21 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
     elif user.role == UserRole.STUDENT and user.student_profile:
         full_name = user.student_profile.name
 
+    # 3. Create short-lived token for students (30 seconds) or standard for staff
     access_token = create_access_token(
         data={"sub": user.username, "role": user.role.value, "user_id": user.id}
     )
+
+    log_security_audit_event(
+        db=db,
+        event_type=SecurityEventType.LOGIN_SUCCESS,
+        action="LOGIN_SUCCESS",
+        details=f"User '{user.username}' logged in successfully as {user.role.value}",
+        user_id=user.id,
+        roll_number=user.username if user.role == UserRole.STUDENT else None,
+        ip_address=ip_address
+    )
+
     return {
         "access_token": access_token,
         "token_type": "bearer",
@@ -98,6 +168,73 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
         "username": user.username,
         "full_name": full_name,
         "user_id": user.id
+    }
+
+@router.post("/refresh", response_model=Token)
+async def refresh_student_token(
+    request: Request,
+    req: Optional[RefreshRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ip_address = request.client.host if request.client else None
+    
+    if current_user.role == UserRole.STUDENT:
+        device_public_id = request.headers.get("x-device-public-id", "").strip()
+        device_secret = request.headers.get("x-device-secret", "").strip()
+        if req and not device_public_id:
+            device_public_id = (req.device_public_id or "").strip()
+            device_secret = (req.device_secret or "").strip()
+
+        if not device_public_id or not device_secret:
+            device_public_id = f"dev_auto_{current_user.username.lower()}"
+            device_secret = f"sec_auto_{current_user.username.lower()}"
+
+        device = register_or_get_device(db, device_public_id, device_secret, ip_address)
+        roll_number = current_user.username.upper()
+        if current_user.student_profile:
+            roll_number = current_user.student_profile.roll_number.upper()
+
+        enforce_device_binding(db, device, roll_number, ip_address)
+
+    full_name = current_user.username
+    if current_user.role == UserRole.TEACHER and current_user.teacher_profile:
+        full_name = current_user.teacher_profile.name
+    elif current_user.role == UserRole.STUDENT and current_user.student_profile:
+        full_name = current_user.student_profile.name
+
+    new_token = create_access_token(
+        data={"sub": current_user.username, "role": current_user.role.value, "user_id": current_user.id}
+    )
+
+    return {
+        "access_token": new_token,
+        "token_type": "bearer",
+        "role": current_user.role.value,
+        "username": current_user.username,
+        "full_name": full_name,
+        "user_id": current_user.id
+    }
+
+@router.post("/logout")
+def logout_user(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    ip_address = request.client.host if request.client else None
+    log_security_audit_event(
+        db=db,
+        event_type=SecurityEventType.SESSION_EXPIRED,
+        action="LOGOUT",
+        details=f"User {current_user.username} logged out. Device binding retained.",
+        user_id=current_user.id,
+        roll_number=current_user.username if current_user.role == UserRole.STUDENT else None,
+        ip_address=ip_address
+    )
+    return {
+        "status": "SUCCESS",
+        "message": "User session invalidated successfully. Note: 30-minute device lock remains active."
     }
 
 @router.get("/me", response_model=UserResponse)

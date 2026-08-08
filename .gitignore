@@ -9,6 +9,8 @@ backend/token.pickle
 !frontend/package-lock.json
 !backend/app_bandit.json
 !backend/scratch_bandit.json
+!snist_erp/**/*.json
+!keycloak/*.json
 
 # Binaries & Large Executables
 cloudflared.exe

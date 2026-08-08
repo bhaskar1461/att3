@@ -95,7 +95,7 @@ export const StudentPortal: React.FC = () => {
           
           {qrCodeUrl ? (
             <div className="p-3 bg-white border border-slate-200 rounded-2xl shadow-lg">
-              <img src={qrCodeUrl} alt="Student Encrypted QR" className="w-64 h-64 object-contain" />
+              <img src={qrCodeUrl} alt="SNIST Encrypted Attendance Poster QR" className="w-72 sm:w-96 h-auto object-contain rounded-xl" />
             </div>
           ) : (
             <div className="w-64 h-64 bg-slate-100 rounded-2xl flex items-center justify-center text-slate-400">

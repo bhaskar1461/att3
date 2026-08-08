@@ -18,6 +18,25 @@ class SessionStatus(str, enum.Enum):
     OPEN = "OPEN"
     LOCKED = "LOCKED"
 
+class BindingStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    EXPIRED = "EXPIRED"
+    REVOKED = "REVOKED"
+    LOCKED = "LOCKED"
+
+class SecurityEventType(str, enum.Enum):
+    LOGIN_SUCCESS = "LOGIN_SUCCESS"
+    LOGIN_FAILURE = "LOGIN_FAILURE"
+    DEVICE_REGISTERED = "DEVICE_REGISTERED"
+    DEVICE_BOUND = "DEVICE_BOUND"
+    ACCOUNT_SWITCH_ATTEMPT = "ACCOUNT_SWITCH_ATTEMPT"
+    BINDING_EXPIRED = "BINDING_EXPIRED"
+    AUTH_ATTEMPT_LIMIT_REACHED = "AUTH_ATTEMPT_LIMIT_REACHED"
+    SESSION_EXPIRED = "SESSION_EXPIRED"
+    DEVICE_REVOKED = "DEVICE_REVOKED"
+    ATTENDANCE_SUBMITTED = "ATTENDANCE_SUBMITTED"
+    ATTENDANCE_REJECTED = "ATTENDANCE_REJECTED"
+
 class User(Base):
     __tablename__ = "qr_users"
 
@@ -185,14 +204,48 @@ class SystemSettings(Base):
     description = Column(String(255), nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+class DeviceRegistration(Base):
+    __tablename__ = "qr_device_registrations"
+
+    id = Column(Integer, primary_key=True)
+    device_public_id = Column(String(100), unique=True, nullable=False, index=True)
+    device_credential_hash = Column(String(255), nullable=False)
+    first_registered_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    bindings = relationship("DeviceAccountBinding", primaryjoin="DeviceRegistration.id==DeviceAccountBinding.device_id", foreign_keys="[DeviceAccountBinding.device_id]")
+
+class DeviceAccountBinding(Base):
+    __tablename__ = "qr_device_account_bindings"
+
+    id = Column(Integer, primary_key=True)
+    device_id = Column(Integer, nullable=False, index=True)
+    roll_number = Column(String(50), nullable=False, index=True)
+    bound_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    attempt_count = Column(Integer, default=1, nullable=False)
+    last_authentication_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(SQLEnum(BindingStatus), default=BindingStatus.ACTIVE, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    device = relationship("DeviceRegistration", primaryjoin="DeviceAccountBinding.device_id==DeviceRegistration.id", foreign_keys="[DeviceAccountBinding.device_id]", back_populates="bindings")
+
 class AuditLog(Base):
     __tablename__ = "qr_audit_logs"
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, nullable=True)
+    roll_number = Column(String(50), nullable=True)
+    device_id = Column(Integer, nullable=True)
+    event_type = Column(String(50), nullable=True)
     action = Column(String(100), nullable=False)
     details = Column(Text, nullable=True)
     ip_address = Column(String(50), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", primaryjoin="AuditLog.user_id==User.id", foreign_keys="[AuditLog.user_id]", back_populates="audit_logs")
+
