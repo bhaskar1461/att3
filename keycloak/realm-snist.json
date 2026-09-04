@@ -1,0 +1,88 @@
+{
+  "realm": "snist-erp-realm",
+  "displayName": "SNIST Institutional Single Sign-On",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "rememberMe": true,
+  "verifyEmail": true,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "roles": {
+    "realm": [
+      {
+        "name": "SUPER_ADMIN",
+        "description": "SNIST ERP Super Administrator"
+      },
+      {
+        "name": "TEACHER",
+        "description": "Faculty and Instructor Role"
+      },
+      {
+        "name": "STUDENT",
+        "description": "Enrolled Student Role"
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "frappe-erp",
+      "name": "Frappe Education ERP Service",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "frappe_oidc_secret_key_snist_2026",
+      "redirectUris": ["http://localhost:8000/*", "http://127.0.0.1:8000/*"],
+      "webOrigins": ["http://localhost:8000"],
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "attendance-pwa",
+      "name": "SNIST QR Attendance PWA",
+      "enabled": true,
+      "publicClient": true,
+      "redirectUris": ["https://localhost:3000/*", "https://192.168.0.8:3000/*"],
+      "webOrigins": ["https://localhost:3000", "https://192.168.0.8:3000"],
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "snist-helpdesk",
+      "name": "SNIST Integrated Helpdesk",
+      "enabled": true,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "helpdesk_oidc_secret_key_snist_2026",
+      "redirectUris": ["http://localhost:5000/*"],
+      "webOrigins": ["http://localhost:5000"],
+      "protocol": "openid-connect"
+    }
+  ],
+  "protocolMappers": [
+    {
+      "name": "sap_id_mapper",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-usermodel-attribute-mapper",
+      "config": {
+        "user.attribute": "custom_sap_id",
+        "claim.name": "sap_id",
+        "jsonType.label": "String",
+        "id.token.claim": "true",
+        "access.token.claim": "true",
+        "userinfo.token.claim": "true"
+      }
+    },
+    {
+      "name": "roll_number_mapper",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-usermodel-attribute-mapper",
+      "config": {
+        "user.attribute": "custom_roll_number",
+        "claim.name": "roll_number",
+        "jsonType.label": "String",
+        "id.token.claim": "true",
+        "access.token.claim": "true",
+        "userinfo.token.claim": "true"
+      }
+    }
+  ]
+}

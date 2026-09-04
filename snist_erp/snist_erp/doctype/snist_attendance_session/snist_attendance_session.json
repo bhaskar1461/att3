@@ -1,0 +1,125 @@
+{
+  "actions": [],
+  "allow_rename": 1,
+  "creation": "2026-08-08 23:00:00.000000",
+  "doctype": "DocType",
+  "engine": "InnoDB",
+  "field_order": [
+    "teaching_assignment",
+    "session_date",
+    "period",
+    "status",
+    "column_break_1",
+    "session_type",
+    "created_by_sap_id",
+    "created_at_ist",
+    "locked_at_ist",
+    "synced_attendance_count"
+  ],
+  "fields": [
+    {
+      "fieldname": "teaching_assignment",
+      "fieldtype": "Link",
+      "label": "Teaching Assignment",
+      "options": "SNIST Teaching Assignment",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "session_date",
+      "fieldtype": "Date",
+      "label": "Session Date",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "period",
+      "fieldtype": "Link",
+      "label": "Period",
+      "options": "SNIST Period",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "default": "OPEN",
+      "fieldname": "status",
+      "fieldtype": "Select",
+      "label": "Status",
+      "options": "OPEN\nLOCKED",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "column_break_1",
+      "fieldtype": "Column Break"
+    },
+    {
+      "default": "SCHEDULED",
+      "fieldname": "session_type",
+      "fieldtype": "Select",
+      "label": "Session Type",
+      "options": "SCHEDULED\nPREVIOUS",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "created_by_sap_id",
+      "fieldtype": "Data",
+      "label": "Created By SAP ID",
+      "reqd": 1
+    },
+    {
+      "fieldname": "created_at_ist",
+      "fieldtype": "Datetime",
+      "label": "Created At (IST)"
+    },
+    {
+      "fieldname": "locked_at_ist",
+      "fieldtype": "Datetime",
+      "label": "Locked At (IST)"
+    },
+    {
+      "default": "0",
+      "fieldname": "synced_attendance_count",
+      "fieldtype": "Int",
+      "label": "Synced Attendance Count",
+      "read_only": 1
+    }
+  ],
+  "links": [],
+  "modified": "2026-08-08 23:00:00.000000",
+  "modified_by": "Administrator",
+  "module": "snist_erp",
+  "name": "SNIST Attendance Session",
+  "naming_rule": "Expression",
+  "autoname": "format:SAS-{session_date}-{period}-{teaching_assignment}",
+  "owner": "Administrator",
+  "permissions": [
+    {
+      "create": 1,
+      "delete": 1,
+      "email": 1,
+      "export": 1,
+      "print": 1,
+      "read": 1,
+      "report": 1,
+      "role": "System Manager",
+      "share": 1,
+      "write": 1
+    },
+    {
+      "read": 1,
+      "role": "Education Manager"
+    },
+    {
+      "create": 1,
+      "read": 1,
+      "write": 1,
+      "role": "Instructor"
+    }
+  ],
+  "sort_field": "session_date",
+  "sort_order": "DESC",
+  "title_field": "teaching_assignment",
+  "track_changes": 1
+}

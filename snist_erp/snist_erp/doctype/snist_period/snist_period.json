@@ -1,0 +1,85 @@
+{
+  "actions": [],
+  "allow_rename": 1,
+  "creation": "2026-08-08 23:00:00.000000",
+  "doctype": "DocType",
+  "engine": "InnoDB",
+  "field_order": [
+    "period_number",
+    "period_name",
+    "from_time",
+    "to_time",
+    "is_active"
+  ],
+  "fields": [
+    {
+      "fieldname": "period_number",
+      "fieldtype": "Int",
+      "label": "Period Number",
+      "reqd": 1,
+      "unique": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "period_name",
+      "fieldtype": "Data",
+      "label": "Period Name",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "from_time",
+      "fieldtype": "Time",
+      "label": "From Time",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "fieldname": "to_time",
+      "fieldtype": "Time",
+      "label": "To Time",
+      "reqd": 1,
+      "in_list_view": 1
+    },
+    {
+      "default": "1",
+      "fieldname": "is_active",
+      "fieldtype": "Check",
+      "label": "Is Active"
+    }
+  ],
+  "links": [],
+  "modified": "2026-08-08 23:00:00.000000",
+  "modified_by": "Administrator",
+  "module": "snist_erp",
+  "name": "SNIST Period",
+  "naming_rule": "Expression",
+  "autoname": "format:PERIOD-{period_number}",
+  "owner": "Administrator",
+  "permissions": [
+    {
+      "create": 1,
+      "delete": 1,
+      "email": 1,
+      "export": 1,
+      "print": 1,
+      "read": 1,
+      "report": 1,
+      "role": "System Manager",
+      "share": 1,
+      "write": 1
+    },
+    {
+      "read": 1,
+      "role": "Education Manager"
+    },
+    {
+      "read": 1,
+      "role": "Instructor"
+    }
+  ],
+  "sort_field": "period_number",
+  "sort_order": "ASC",
+  "title_field": "period_name",
+  "track_changes": 1
+}
