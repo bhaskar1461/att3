@@ -22,20 +22,36 @@ export const Reports: React.FC = () => {
     }
   };
 
-  const handleExport = (format: 'excel' | 'csv' | 'pdf') => {
+  const handleExport = async (format: 'excel' | 'csv' | 'pdf') => {
     const token = localStorage.getItem('token');
     const params = new URLSearchParams();
     if (startDate) params.append('start_date', startDate);
     if (endDate) params.append('end_date', endDate);
+    if (token) params.append('token', token);
 
-    const url = `/api/v1/reports/export/${format}?${params.toString()}`;
-    
-    // Trigger download
-    const a = document.createElement('a');
-    a.href = url;
-    a.target = '_blank';
-    a.click();
-    setToast({ message: `Exporting ${format.toUpperCase()} report...`, type: 'success' });
+    setToast({ message: `Generating ${format.toUpperCase()} report...`, type: 'success' });
+    try {
+      const url = `/api/v1/reports/export/${format}?${params.toString()}`;
+      const response = await fetch(url, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (!response.ok) {
+        throw new Error(`Export failed with HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      const ext = format === 'excel' ? 'xlsx' : format;
+      a.download = `Attendance_Report_${new Date().toISOString().slice(0, 10)}.${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+      setToast({ message: `${format.toUpperCase()} report downloaded successfully!`, type: 'success' });
+    } catch (err: any) {
+      setToast({ message: err.message || `Failed to download ${format.toUpperCase()} report`, type: 'error' });
+    }
   };
 
   return (

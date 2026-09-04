@@ -46,6 +46,8 @@ export interface Teacher {
   department_id: number;
   mobile?: string;
   username: string;
+  google_sheet_id?: string;
+  google_sheet_url?: string;
 }
 
 export interface Student {
@@ -73,6 +75,7 @@ export interface TeacherAssignment {
 
 export interface AttendanceSession {
   session_id: number;
+  section_id?: number;
   subject_name: string;
   section_name: string;
   period: string;
@@ -101,3 +104,20 @@ export interface DashboardStats {
   attendance_percentage: number;
   active_live_classes: number;
 }
+
+export interface HistoricalAttendanceSession {
+  session_id: number;
+  subject_id: number;
+  subject_name: string;
+  subject_code: string;
+  section_id: number;
+  section_name: string;
+  period: string;
+  session_date: string;
+  status: 'OPEN' | 'LOCKED';
+  total_students: number;
+  present_count: number;
+  absent_count: number;
+  created_at?: string;
+}
+

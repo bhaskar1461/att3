@@ -521,18 +521,32 @@ class GoogleSheetsService:
                     date_col_idx = c_idx + 1  # 1-based column
                     break
 
-            # If date column not found, append a new date column at the end
+            # If date column not found, append a new date column at the end using a single atomic update
             if date_col_idx == -1:
-                date_col_idx = max(len(row5) + 1, 5)
-                formatted_d = target_date_norm
-                worksheet.update_cell(5, date_col_idx, formatted_d)
-                worksheet.update_cell(6, date_col_idx, period_total)
-                # Fill all existing student rows with "A" by default for this new date
-                for r_i in range(7, len(vals) + 1):
-                    worksheet.update_cell(r_i, date_col_idx, "A")
+                col_0 = max(len(row5), 4)
+                date_col_idx = col_0 + 1
+                for r_i in range(len(vals)):
+                    while len(vals[r_i]) <= col_0:
+                        vals[r_i].append("")
+                vals[4][col_0] = target_date_norm
+                vals[5][col_0] = period_total
+                for r_i in range(6, len(vals)):
+                    vals[r_i][col_0] = "A"
 
-                # Re-apply batch formatting so new column is styled and headers remain aligned
-                cls._apply_sheet_formatting(spreadsheet, worksheet, len(vals), date_col_idx)
+                # Find student row and set target status
+                for r_idx in range(6, len(vals)):
+                    row_roll = str(vals[r_idx][1]).strip().upper() if len(vals[r_idx]) > 1 else ""
+                    if row_roll == target_roll:
+                        vals[r_idx][col_0] = status_code
+                        break
+
+                worksheet.update(values=vals, range_name="A1")
+                try:
+                    cls._apply_sheet_formatting(spreadsheet, worksheet, len(vals), date_col_idx)
+                except Exception:
+                    pass
+                logger.info(f"[GSheets Sync] New date column {target_date_norm} added and marked '{status_code}' for {target_roll} via single atomic update.")
+                return True
 
             # Locate student row by Roll Number in Col B (index 1)
             student_row_idx = -1

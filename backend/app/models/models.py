@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, Enum as SQLEnum, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -82,8 +82,8 @@ class Section(Base):
     department_id = Column(Integer, nullable=False)
     academic_year_id = Column(Integer, nullable=False)
 
-    department = relationship("Department", primaryjoin="Section.department_id==Department.id", foreign_keys="[Section.department_id]")
-    academic_year = relationship("AcademicYear", primaryjoin="Section.academic_year_id==AcademicYear.id", foreign_keys="[Section.academic_year_id]")
+    department = relationship("Department", primaryjoin="Section.department_id==Department.id", foreign_keys="[Section.department_id]", overlaps="sections")
+    academic_year = relationship("AcademicYear", primaryjoin="Section.academic_year_id==AcademicYear.id", foreign_keys="[Section.academic_year_id]", overlaps="sections")
     students = relationship("Student", primaryjoin="Section.id==Student.section_id", foreign_keys="[Student.section_id]")
     assignments = relationship("TeacherAssignment", primaryjoin="Section.id==TeacherAssignment.section_id", foreign_keys="[TeacherAssignment.section_id]")
 
@@ -96,8 +96,8 @@ class Subject(Base):
     department_id = Column(Integer, nullable=False)
     academic_year_id = Column(Integer, nullable=False)
 
-    department = relationship("Department", primaryjoin="Subject.department_id==Department.id", foreign_keys="[Subject.department_id]")
-    academic_year = relationship("AcademicYear", primaryjoin="Subject.academic_year_id==AcademicYear.id", foreign_keys="[Subject.academic_year_id]")
+    department = relationship("Department", primaryjoin="Subject.department_id==Department.id", foreign_keys="[Subject.department_id]", overlaps="subjects")
+    academic_year = relationship("AcademicYear", primaryjoin="Subject.academic_year_id==AcademicYear.id", foreign_keys="[Subject.academic_year_id]", overlaps="subjects")
     assignments = relationship("TeacherAssignment", primaryjoin="Subject.id==TeacherAssignment.subject_id", foreign_keys="[TeacherAssignment.subject_id]")
 
 class Teacher(Base):
@@ -109,6 +109,7 @@ class Teacher(Base):
     name = Column(String(100), nullable=False)
     department_id = Column(Integer, nullable=False)
     mobile = Column(String(20), nullable=True)
+    google_sheet_id = Column(String(255), nullable=True)
 
     user = relationship("User", primaryjoin="Teacher.user_id==User.id", foreign_keys="[Teacher.user_id]", back_populates="teacher_profile")
     department = relationship("Department", primaryjoin="Teacher.department_id==Department.id", foreign_keys="[Teacher.department_id]", back_populates="teachers")
@@ -151,6 +152,9 @@ class TeacherAssignment(Base):
 
 class AttendanceSession(Base):
     __tablename__ = "qr_attendance_sessions"
+    __table_args__ = (
+        Index("idx_att_sess_teacher_date", "teacher_id", "session_date"),
+    )
 
     id = Column(Integer, primary_key=True)
     teacher_id = Column(Integer, nullable=False)
@@ -169,14 +173,21 @@ class AttendanceSession(Base):
 
 class AttendanceRecord(Base):
     __tablename__ = "qr_attendance_records"
+    __table_args__ = (
+        Index("idx_att_rec_session_student", "session_id", "student_id"),
+        Index("idx_att_rec_student_id", "student_id"),
+        Index("idx_att_rec_date", "session_date"),
+        UniqueConstraint("session_id", "student_id", name="uq_session_student_attendance"),
+    )
 
     id = Column(Integer, primary_key=True)
     session_id = Column(Integer, nullable=False)
     student_id = Column(Integer, nullable=False)
     roll_number = Column(String(50), nullable=False)
     session_date = Column(String(20), nullable=False)
+    period_count = Column(Integer, default=4, nullable=True)
     status = Column(SQLEnum(AttendanceStatus), default=AttendanceStatus.PRESENT, nullable=False)
-    scan_mode = Column(String(20), default="QR") # QR or MANUAL
+    scan_mode = Column(String(50), default="QR") # QR or MANUAL or PROJECTOR_SCAN
     scanned_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("AttendanceSession", primaryjoin="AttendanceRecord.session_id==AttendanceSession.id", foreign_keys="[AttendanceRecord.session_id]", back_populates="records")

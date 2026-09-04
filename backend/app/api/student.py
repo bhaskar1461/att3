@@ -1,11 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from typing import Dict, Any, List
+from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks
+from sqlalchemy.orm import Session, joinedload
+from typing import Dict, Any, List, Optional
+from datetime import datetime
+from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.api.auth import get_current_user
-from app.models.models import User, UserRole, Student, AttendanceRecord, AttendanceSession, Subject
+from app.models.models import User, UserRole, Student, AttendanceRecord, AttendanceSession, Subject, DeviceRegistration
 from app.services.qr_service import QRService
+from app.core.security import get_server_ist_date
+from app.core.device_security import validate_active_binding_for_student
 
 router = APIRouter(prefix="/student", tags=["Student Portal"])
 
@@ -28,22 +32,87 @@ def get_student_profile(current_student: Student = Depends(require_student)):
     }
 
 @router.get("/qr-code")
-def get_student_qr(current_student: Student = Depends(require_student)):
+def get_student_qr(
+    request: Request,
+    date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_student: Student = Depends(require_student)
+):
+    device_public_id = request.headers.get("x-device-public-id", "").strip()
+    if device_public_id:
+        device = db.query(DeviceRegistration).filter(DeviceRegistration.device_public_id == device_public_id).first()
+        if device and not device.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Device has been revoked or disabled by system administrator."
+            )
+    server_today = get_server_ist_date()
+    target_date = date or server_today
+
+    if target_date > server_today:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot generate attendance QR code for a future date"
+        )
+    
     qr_base64 = QRService.generate_student_qr_code(
         student_id=current_student.id,
         roll_number=current_student.roll_number,
         student_name=current_student.name,
+        attendance_date=target_date,
+        as_base64=True
+    )
+
+    pure_qr_base64 = QRService.generate_pure_qr_code(
+        student_id=current_student.id,
+        roll_number=current_student.roll_number,
+        attendance_date=target_date,
+        as_base64=True
+    )
+
+    try:
+        dt_obj = datetime.strptime(target_date, "%Y-%m-%d")
+        formatted_date = dt_obj.strftime("%d %b %Y").upper()
+    except Exception:
+        formatted_date = str(target_date).upper()
+
+    is_today = (target_date == server_today)
+
+    return {
+        "roll_number": current_student.roll_number,
+        "name": current_student.name,
+        "attendance_date": target_date,
+        "formatted_date": formatted_date,
+        "is_today": is_today,
+        "is_makeup": not is_today,
+        "qr_code_url": qr_base64,
+        "pure_qr_code_url": pure_qr_base64
+    }
+
+@router.get("/pure-qr")
+def get_student_pure_qr(
+    date: Optional[str] = None,
+    current_student: Student = Depends(require_student)
+):
+    target_date = date or get_server_ist_date()
+    pure_qr_base64 = QRService.generate_pure_qr_code(
+        student_id=current_student.id,
+        roll_number=current_student.roll_number,
+        attendance_date=target_date,
         as_base64=True
     )
     return {
         "roll_number": current_student.roll_number,
-        "name": current_student.name,
-        "qr_code_url": qr_base64
+        "attendance_date": target_date,
+        "pure_qr_code_url": pure_qr_base64
     }
+
 
 @router.get("/attendance-summary")
 def get_student_attendance_summary(db: Session = Depends(get_db), current_student: Student = Depends(require_student)):
-    records = db.query(AttendanceRecord).filter(AttendanceRecord.student_id == current_student.id).all()
+    records = db.query(AttendanceRecord).options(
+        joinedload(AttendanceRecord.session).joinedload(AttendanceSession.subject)
+    ).filter(AttendanceRecord.student_id == current_student.id).all()
     
     total_conducted = len(records)
     total_present = sum(1 for r in records if r.status.value in ["PRESENT", "4"])
@@ -69,9 +138,192 @@ def get_student_attendance_summary(db: Session = Depends(get_db), current_studen
             "percentage": pct
         })
 
+        return {
+            "total_conducted": total_conducted,
+            "total_present": total_present,
+            "overall_percentage": overall_percentage,
+            "subjects": subject_list
+        }
+
+
+class StudentScanSessionRequest(BaseModel):
+    session_token: str
+    device_uuid: Optional[str] = None
+
+
+from app.core.security import validate_projector_session_token
+from app.api.attendance import _async_post_scan_tasks, _get_effective_gsheet_id, invalidate_session_cache
+from app.models.models import AttendanceStatus, SessionStatus, SecurityEventType, BindingStatus, DeviceAccountBinding
+from app.core.device_security import log_security_audit_event
+
+
+@router.post("/scan-session")
+def student_scan_session(
+    req: StudentScanSessionRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_student: Student = Depends(require_student)
+):
+    """
+    Endpoint for students scanning the teacher's projected rotating 10-second QR code.
+    Validates token, session status, section membership, device binding, and records attendance.
+    """
+    # 1. Device binding check (ADR-004: Anti-proxy account switching lockout)
+    from app.core.device_security import register_or_get_device, enforce_device_binding
+    device_id = req.device_uuid or request.headers.get("x-device-public-id", "").strip()
+    if not device_id:
+        import hashlib
+        client_ua = request.headers.get("user-agent", "generic_student_browser")
+        client_ip = (request.client.host if request.client else None) or "127.0.0.1"
+        conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+        device_id = f"DEV-CONN-{conn_sig.upper()}"
+
+    clean_roll = current_student.roll_number.strip().upper()
+    ip_addr = request.client.host if request.client else None
+    device_secret = request.headers.get("x-device-secret", "").strip() or f"{device_id}_SECRET_SALT_2026"
+
+    device = register_or_get_device(
+        db=db,
+        device_public_id=device_id.strip(),
+        device_secret=device_secret,
+        ip_address=ip_addr
+    )
+    if not device.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Device has been revoked or disabled by system administrator."
+        )
+
+    # Server-authoritative 30-minute device lock (blocks Student B from scanning on Student A's phone)
+    enforce_device_binding(
+        db=db,
+        device=device,
+        roll_number=clean_roll,
+        ip_address=ip_addr
+    )
+
+    # 2. Validate rotating session token with 10s + 10s sliding window
+    try:
+        token_data = validate_projector_session_token(
+            token_str=req.session_token,
+            step_window=10,
+            max_grace_steps=1
+        )
+    except ValueError as val_err:
+        log_security_audit_event(
+            db=db,
+            event_type=SecurityEventType.ATTENDANCE_REJECTED,
+            action="PROJECTOR_TOKEN_REJECTED",
+            details=f"Projector token validation error for student {current_student.roll_number}: {str(val_err)}",
+            roll_number=current_student.roll_number
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err)
+        )
+
+    session_id = token_data["session_id"]
+    period_count = token_data["period_count"]
+
+    # 3. Fetch session
+    session = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Attendance session not found.")
+
+    if session.status != SessionStatus.OPEN:
+        raise HTTPException(status_code=400, detail="Attendance session is locked. No further scans allowed.")
+
+    # 4. Check section membership
+    if current_student.section_id != session.section_id:
+        log_security_audit_event(
+            db=db,
+            event_type=SecurityEventType.ATTENDANCE_REJECTED,
+            action="SECTION_MISMATCH_REJECTED",
+            details=f"Student {current_student.roll_number} section {current_student.section_id} mismatched session section {session.section_id}",
+            roll_number=current_student.roll_number
+        )
+        section_name = session.section.name if session.section else f"ID {session.section_id}"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Attendance Rejected: You are not enrolled in class section {section_name}."
+        )
+
+    # 5. Check if already marked present
+    existing_record = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == session.id,
+        AttendanceRecord.student_id == current_student.id
+    ).first()
+
+    if existing_record and existing_record.status == AttendanceStatus.PRESENT:
+        return {
+            "status": "ALREADY_MARKED",
+            "message": "You have already been marked present for this session.",
+            "session_id": session.id,
+            "subject_name": session.subject.name if session.subject else "",
+            "period_name": session.period,
+            "period_count": existing_record.period_count or period_count,
+            "session_date": session.session_date,
+            "roll_number": current_student.roll_number,
+            "student_name": current_student.name
+        }
+
+    # 6. Record or update attendance
+    if existing_record:
+        existing_record.status = AttendanceStatus.PRESENT
+        existing_record.period_count = period_count
+        existing_record.scan_mode = "PROJECTOR_SCAN"
+        existing_record.scanned_at = datetime.utcnow()
+    else:
+        new_record = AttendanceRecord(
+            session_id=session.id,
+            student_id=current_student.id,
+            roll_number=current_student.roll_number,
+            session_date=session.session_date,
+            period_count=period_count,
+            status=AttendanceStatus.PRESENT,
+            scan_mode="PROJECTOR_SCAN",
+            scanned_at=datetime.utcnow()
+        )
+        db.add(new_record)
+
+    db.commit()
+    invalidate_session_cache(session.id)
+
+    # 7. Audit log event
+    log_security_audit_event(
+        db=db,
+        event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
+        action="STUDENT_PROJECTOR_SCAN_SUCCESS",
+        details=f"Student {current_student.roll_number} scanned teacher projector QR for session {session.id} (Period count: {period_count})",
+        roll_number=current_student.roll_number
+    )
+
+    # 8. Asynchronous multi-target sync
+    effective_gsheet_id = _get_effective_gsheet_id(db, session)
+    background_tasks.add_task(
+        _async_post_scan_tasks,
+        roll_number=current_student.roll_number,
+        date_formatted=session.session_date,
+        student_name=current_student.name,
+        dept_code=current_student.department.code if current_student.department else "",
+        year_name=current_student.academic_year.name if current_student.academic_year else "",
+        sec_name=session.section.name if session.section else "",
+        sub_name=session.subject.name if session.subject else "",
+        period=session.period,
+        teacher_name=session.teacher.name if session.teacher else "",
+        gs_id=effective_gsheet_id,
+        period_count=period_count
+    )
+
     return {
-        "total_conducted": total_conducted,
-        "total_present": total_present,
-        "overall_percentage": overall_percentage,
-        "subjects": subject_list
+        "status": "SUCCESS",
+        "message": f"Successfully marked present for {period_count} period{'s' if period_count > 1 else ''}!",
+        "session_id": session.id,
+        "subject_name": session.subject.name if session.subject else "",
+        "period_name": session.period,
+        "period_count": period_count,
+        "session_date": session.session_date,
+        "roll_number": current_student.roll_number,
+        "student_name": current_student.name
     }

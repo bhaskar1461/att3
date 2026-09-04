@@ -7,7 +7,7 @@ import sys
 
 PORT = 8088
 DIST_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "frontend", "dist")
-BACKEND_URL = "http://127.0.0.1:8000"
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8001")
 
 class ProxyAndStaticHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -21,6 +21,12 @@ class ProxyAndStaticHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             if not os.path.exists(req_path) and not os.path.splitext(req_path)[1]:
                 self.path = "/index.html"
             super().do_GET()
+
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
 
     def do_POST(self):
         if self.path.startswith("/api/"):

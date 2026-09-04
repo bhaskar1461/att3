@@ -3,80 +3,91 @@
 @tailwind utilities;
 
 :root {
-  --navy: #15347e;
-  --royal: #2f53d7;
-  --royal-dark: #1e3bb3;
-  --page-top: #f7f9fe;
-  --page-bottom: #ecf1fb;
+  --navy: #001e40;
+  --royal: #003366;
+  --page-top: #FBFBFD;
+  --page-bottom: #F5F5F7;
   --card: #ffffff;
-  --panel: #fbfcff;
-  --field: #f5f7fc;
-  --ink: #17233c;
-  --muted: #6a7894;
-  --border: rgba(23, 35, 60, 0.15);
-  --shadow: 0 20px 48px rgba(27, 44, 94, 0.08);
-  --soft-shadow: 0 10px 28px rgba(29, 52, 117, 0.06);
+  --border: #D2D2D7;
+  --ink: #1b1b1d;
+  --muted: #5e5e63;
+  --shadow: 0 20px 48px rgba(0, 30, 64, 0.06);
+  --soft-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
 }
 
 @layer base {
   body {
-    font-family: 'Outfit', sans-serif;
+    font-family: 'Geist', 'Outfit', sans-serif;
     color: var(--ink);
-    background: linear-gradient(180deg, var(--page-top) 0%, var(--page-bottom) 100%);
+    background-color: #FBFBFD;
     min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
   }
 
   h1, h2, h3, .font-heading {
-    font-family: 'Space Grotesk', sans-serif;
+    font-family: 'Geist', sans-serif;
   }
 }
 
-/* SNIST UI Design System Components */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+}
 
+.material-symbols-outlined.filled {
+  font-variation-settings: 'FILL' 1, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(210, 210, 215, 0.6);
+}
+
+/* SNIST UI Design System Components */
 .snist-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 20px;
-  box-shadow: var(--soft-shadow);
-  transition: all 0.25s ease;
+  background: #ffffff;
+  border: 1px solid #D2D2D7;
+  border-radius: 16px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.04);
+  transition: all 0.2s ease;
 }
 
 .snist-card-hover:hover {
   transform: translateY(-2px);
-  box-shadow: var(--shadow);
-  border-color: rgba(47, 83, 215, 0.3);
+  box-shadow: 0 12px 32px rgba(0, 30, 64, 0.08);
+  border-color: #001e40;
 }
 
 .snist-btn-primary {
-  background: linear-gradient(135deg, var(--royal) 0%, var(--navy) 100%);
+  background: #001e40;
   color: #ffffff;
   font-weight: 600;
-  border-radius: 12px;
-  box-shadow: 0 6px 18px rgba(47, 83, 215, 0.25);
+  border-radius: 10px;
+  box-shadow: 0 4px 14px rgba(0, 30, 64, 0.2);
   transition: all 0.2s ease;
 }
 
 .snist-btn-primary:hover {
-  background: linear-gradient(135deg, #3b5fe0 0%, #1a3d8f 100%);
+  background: #003366;
   transform: translateY(-1px);
-  box-shadow: 0 8px 22px rgba(47, 83, 215, 0.35);
+  box-shadow: 0 6px 18px rgba(0, 30, 64, 0.3);
 }
 
 .snist-input {
-  background: var(--field);
-  border: 1px solid rgba(23, 35, 60, 0.18);
-  border-radius: 12px;
+  background: #ffffff;
+  border: 1px solid #D2D2D7;
+  border-radius: 10px;
   padding: 10px 14px;
-  color: var(--ink);
-  font-family: 'Outfit', sans-serif;
+  color: #1b1b1d;
+  font-family: 'Geist', sans-serif;
   transition: all 0.2s ease;
 }
 
 .snist-input:focus {
   outline: none;
-  border-color: var(--royal);
-  background: #ffffff;
-  box-shadow: 0 0 0 3px rgba(47, 83, 215, 0.12);
+  border-color: #001e40;
+  box-shadow: 0 0 0 3px rgba(0, 30, 64, 0.1);
 }
 
 .profile-pill {
@@ -85,16 +96,16 @@
   gap: 10px;
   padding: 6px 14px;
   background: #ffffff;
-  border: 1px solid var(--border);
+  border: 1px solid #D2D2D7;
   border-radius: 30px;
-  box-shadow: 0 4px 12px rgba(27, 44, 94, 0.05);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
 }
 
 .profile-avatar {
   width: 34px;
   height: 34px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--royal) 0%, var(--navy) 100%);
+  background: #001e40;
   color: #ffffff;
   font-weight: 700;
   font-size: 14px;
@@ -116,7 +127,6 @@
   border: none !important;
 }
 
-/* Hide html5-qrcode default shaded region borders */
 #reader__scan_region {
   min-height: 100% !important;
 }
@@ -133,24 +143,18 @@
   border: none !important;
 }
 
-@keyframes scanLaser {
-  0% { top: 5%; }
-  50% { top: 90%; }
-  100% { top: 5%; }
-}
-
 /* Custom Scrollbars */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: #ecf1fb;
+  background: #F5F5F7;
 }
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: #D2D2D7;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: #737780;
 }

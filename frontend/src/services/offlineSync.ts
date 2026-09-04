@@ -50,7 +50,7 @@ export const addScanToBatchQueue = (scan: PendingScan) => {
   } else if (!batchTimer) {
     batchTimer = setTimeout(() => {
       flushBatchQueue();
-    }, 500);
+    }, 100);
   }
 };
 
@@ -88,10 +88,38 @@ export const syncOfflineScans = async (): Promise<{ synced: number; failed: numb
       method: 'POST',
       body: JSON.stringify({ scans: queue })
     });
-    clearOfflineQueue();
-    return { synced: res.processed_count || queue.length, failed: 0 };
+
+    const results: Array<{ status: string; reason?: string }> = res.results || [];
+    const remainingFailed: PendingScan[] = [];
+    let syncedCount = 0;
+
+    queue.forEach((scan, idx) => {
+      const itemResult = results[idx];
+      if (itemResult && itemResult.status === 'SUCCESS') {
+        syncedCount++;
+      } else if (itemResult && itemResult.status === 'FAILED') {
+        remainingFailed.push({
+          ...scan,
+          scanned_at: scan.scanned_at || new Date().toISOString()
+        });
+      } else {
+        // Fallback: If no explicit per-item result, assume synced if processed_count covers it
+        syncedCount++;
+      }
+    });
+
+    if (remainingFailed.length === 0) {
+      clearOfflineQueue();
+    } else {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(remainingFailed));
+    }
+
+    return { 
+      synced: syncedCount, 
+      failed: remainingFailed.length 
+    };
   } catch (e) {
-    console.warn("Offline scan sync error:", e);
+    console.warn("Offline scan sync network error:", e);
     return { synced: 0, failed: queue.length };
   }
 };

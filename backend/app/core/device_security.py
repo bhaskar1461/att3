@@ -20,17 +20,18 @@ import logging
 
 logger = logging.getLogger("snist_erp.device_security")
 
-def log_security_audit_event(
+def record_audit_log(
     db: Session,
-    event_type: SecurityEventType,
+    user_id: Optional[int],
     action: str,
-    details: str,
-    user_id: Optional[int] = None,
+    details: Optional[str] = None,
     roll_number: Optional[str] = None,
+    event_type: str = "SECURITY_EVENT",
     device_id: Optional[int] = None,
     ip_address: Optional[str] = None
 ):
     """Helper to log security-sensitive events to audit log with defensive rollback safety."""
+    log_entry = None
     try:
         log_entry = AuditLog(
             user_id=user_id,
@@ -46,10 +47,33 @@ def log_security_audit_event(
         db.commit()
     except Exception as log_err:
         logger.warning(f"Failed to record security audit log entry: {log_err}")
-        try:
-            db.rollback()
-        except Exception:
-            pass
+        if log_entry:
+            try:
+                db.expunge(log_entry)
+            except Exception:
+                pass
+
+def log_security_audit_event(
+    db: Session,
+    event_type: SecurityEventType,
+    action: str,
+    details: str,
+    user_id: Optional[int] = None,
+    roll_number: Optional[str] = None,
+    device_id: Optional[int] = None,
+    ip_address: Optional[str] = None
+):
+    """Helper to log security-sensitive events to audit log with defensive rollback safety."""
+    record_audit_log(
+        db=db,
+        user_id=user_id,
+        action=action,
+        details=details,
+        roll_number=roll_number,
+        event_type=event_type,
+        device_id=device_id,
+        ip_address=ip_address
+    )
 
 def register_or_get_device(
     db: Session,

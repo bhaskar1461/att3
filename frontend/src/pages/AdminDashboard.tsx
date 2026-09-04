@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
 import { DashboardStats } from '../types';
-import { Users, UserCheck, BarChart2, Shield, Settings, FileText, CheckCircle2, RefreshCw, Layers } from 'lucide-react';
+import { Users, UserCheck, BarChart2, Shield, Settings, FileText, CheckCircle2, RefreshCw, Layers, FileSpreadsheet } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { ClassExcelRegisterModal } from '../components/ClassExcelRegisterModal';
 
 export const AdminDashboard: React.FC = () => {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isExcelRegisterOpen, setIsExcelRegisterOpen] = useState(false);
 
   useEffect(() => {
     fetchAdminData();
@@ -44,6 +46,12 @@ export const AdminDashboard: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => setIsExcelRegisterOpen(true)}
+            className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center gap-2 shadow-md shadow-emerald-600/20 transition active:scale-95"
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-200" /> Class Registers (Excel Grid)
+          </button>
           <Link
             to="/admin/management"
             className="px-4 py-2.5 snist-btn-primary text-xs font-bold flex items-center gap-2"
@@ -185,6 +193,12 @@ export const AdminDashboard: React.FC = () => {
           </table>
         </div>
       </div>
+
+      {/* Class Register Excel Grid Modal */}
+      <ClassExcelRegisterModal
+        isOpen={isExcelRegisterOpen}
+        onClose={() => setIsExcelRegisterOpen(false)}
+      />
 
     </div>
   );

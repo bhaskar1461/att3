@@ -161,12 +161,24 @@ def create_subject(sub: SubjectCreate, db: Session = Depends(get_db), current_us
     db.refresh(new_sub)
     return new_sub
 
+def extract_spreadsheet_id(input_str: str) -> str:
+    if not input_str:
+        return ""
+    s = input_str.strip()
+    if "/d/" in s:
+        parts = s.split("/d/")
+        if len(parts) > 1:
+            return parts[1].split("/")[0]
+    return s
+
 # --- Teachers & Assignments ---
 @router.get("/teachers")
 def get_teachers(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     teachers = db.query(Teacher).all()
     res = []
     for t in teachers:
+        sp_id = t.google_sheet_id or ""
+        sp_url = f"https://docs.google.com/spreadsheets/d/{sp_id}/edit" if sp_id else ""
         res.append({
             "id": t.id,
             "teacher_code": t.teacher_code,
@@ -174,9 +186,30 @@ def get_teachers(db: Session = Depends(get_db), current_user: User = Depends(req
             "department": t.department.name if t.department else "",
             "department_id": t.department_id,
             "mobile": t.mobile,
-            "username": t.user.username if t.user else ""
+            "username": t.user.username if t.user else "",
+            "google_sheet_id": sp_id,
+            "google_sheet_url": sp_url
         })
     return res
+
+class TeacherGSheetUpdate(BaseModel):
+    google_sheet_id: str
+
+@router.put("/teachers/{teacher_id}/google-sheet")
+def update_teacher_google_sheet(teacher_id: int, req: TeacherGSheetUpdate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    teacher = db.query(Teacher).filter(Teacher.id == teacher_id).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher not found")
+
+    sp_id = extract_spreadsheet_id(req.google_sheet_id)
+    teacher.google_sheet_id = sp_id
+    db.commit()
+    sp_url = f"https://docs.google.com/spreadsheets/d/{sp_id}/edit" if sp_id else ""
+    return {
+        "message": f"Updated Google Sheet ID for {teacher.name}",
+        "google_sheet_id": sp_id,
+        "google_sheet_url": sp_url
+    }
 
 @router.post("/teachers")
 def create_teacher(req: TeacherCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):

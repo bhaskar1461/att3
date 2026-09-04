@@ -50,6 +50,33 @@ export const ManualSearchModal: React.FC<ManualSearchModalProps> = ({
     }
   };
 
+  const handleMarkAll = async (targetStatus: 'PRESENT' | 'ABSENT') => {
+    if (!filteredStudents.length) return;
+    setIsSubmitting(true);
+    setMsg(null);
+    let count = 0;
+    try {
+      for (const s of filteredStudents) {
+        await apiRequest('/attendance/manual-mark', {
+          method: 'POST',
+          body: JSON.stringify({
+            session_id: sessionId,
+            roll_number: s.roll_number,
+            status: targetStatus,
+            period_count: periodCount
+          })
+        });
+        count++;
+      }
+      setMsg(`Marked ${count} students as ${targetStatus}`);
+      onMarkSuccess();
+    } catch (err: any) {
+      setMsg(err.message || 'Failed to update attendance');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-md flex items-center justify-center p-4">
       <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-lg overflow-hidden shadow-2xl flex flex-col max-h-[85vh]">
@@ -57,7 +84,7 @@ export const ManualSearchModal: React.FC<ManualSearchModalProps> = ({
         {/* Header */}
         <div className="p-5 border-b border-slate-800 flex items-center justify-between">
           <h2 className="text-lg font-bold text-white flex items-center gap-2">
-            <UserCheck className="w-5 h-5 text-cyan-400" /> Manual Attendance Search
+            <UserCheck className="w-5 h-5 text-cyan-400" /> Manual Attendance Search & Roster
           </h2>
           <button onClick={onClose} className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800">
             <X className="w-5 h-5" />
@@ -94,6 +121,25 @@ export const ManualSearchModal: React.FC<ManualSearchModalProps> = ({
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full bg-slate-800/80 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:border-cyan-500"
             />
+          </div>
+
+          <div className="flex items-center gap-2 pt-1">
+            <button
+              type="button"
+              disabled={isSubmitting}
+              onClick={() => handleMarkAll('PRESENT')}
+              className="flex-1 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl transition shadow-sm disabled:opacity-50"
+            >
+              ✓ Mark All Present ({periodCount} Periods)
+            </button>
+            <button
+              type="button"
+              disabled={isSubmitting}
+              onClick={() => handleMarkAll('ABSENT')}
+              className="flex-1 py-2 bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs rounded-xl transition shadow-sm disabled:opacity-50"
+            >
+              ✗ Mark All Absent
+            </button>
           </div>
 
           {msg && (

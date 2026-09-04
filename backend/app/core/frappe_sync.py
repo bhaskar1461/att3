@@ -36,11 +36,21 @@ def sync_session_to_frappe(
                 "scan_mode": "STUDENT_QR_SCAN"
             })
 
+        # Extract period number from session.period e.g. "Period 2" -> 2
+        p_num = 1
+        if session.period:
+            import re
+            digits = re.findall(r'\d+', str(session.period))
+            if digits:
+                p_num = int(digits[0])
+
+        fac_sap_id = (session.teacher.teacher_code if session.teacher and session.teacher.teacher_code else f"FAC{session.teacher_id}")
+
         payload = {
             "session_date": str(session.session_date),
-            "period_number": 1,
+            "period_number": p_num,
             "teaching_assignment": f"STA-SEC{session.section_id}-SUBJ{session.subject_id}-2026",
-            "created_by_sap_id": f"FAC{session.teacher_id}",
+            "created_by_sap_id": fac_sap_id,
             "session_type": str(getattr(session, 'session_type', 'SCHEDULED')),
             "records": sync_records
         }

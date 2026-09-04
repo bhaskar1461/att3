@@ -55,7 +55,27 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
       headers,
     });
 
-    if (response.status === 401 && endpoint !== '/auth/refresh') {
+    if (response.status === 401 && endpoint !== '/auth/refresh' && !(options as any)._isRetry) {
+      // Attempt seamless token renewal before kicking out to login
+      try {
+        const refreshResponse = await fetch(`${API_BASE}/auth/refresh`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...deviceHeaders,
+            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+          }
+        });
+        if (refreshResponse.ok) {
+          const refreshData = await refreshResponse.json();
+          if (refreshData && refreshData.access_token) {
+            localStorage.setItem('token', refreshData.access_token);
+            scheduleTokenAutoRefresh();
+            return apiRequest<T>(endpoint, { ...(options as any), _isRetry: true });
+          }
+        }
+      } catch {}
+
       localStorage.removeItem('token');
       localStorage.removeItem('user');
       if (window.location.pathname !== '/login') {

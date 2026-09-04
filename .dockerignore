@@ -1,0 +1,30 @@
+# Git & IDE
+.git
+.gitignore
+.agents
+.vscode
+.idea
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+htmlcov
+
+# Node & Frontend
+node_modules
+frontend/node_modules
+frontend/dist
+.npm
+
+# Archives & Temporary files
+*.tar.gz
+*.zip
+*.log
+scratch/
+certs/*.pem
+certs/*.key
+cloudflared.exe
+*.tmp
+*.db

@@ -8,10 +8,12 @@ import qrcode
 from PIL import Image, ImageDraw, ImageFont
 from typing import Dict, Any, List, Optional
 
+from datetime import datetime
 from app.core.security import (
     generate_encrypted_qr_payload, 
     generate_encrypted_qr_payload_v2,
-    decrypt_and_validate_qr_payload
+    decrypt_and_validate_qr_payload,
+    get_server_ist_date
 )
 from app.core.config import settings
 
@@ -167,17 +169,21 @@ class QRService:
         roll_number: str, 
         student_name: str = "",
         department: str = "",
+        attendance_date: Optional[str] = None,
         use_v2: bool = True,
         as_base64: bool = True
     ) -> str:
         """
-        Generates official SNIST QR poster card with ultra-compact V2 encrypted payload,
-        customized orange finder patterns, center SNIST flame logo, and bottom institutional pillars.
+        Generates official SNIST QR poster card with ultra-compact date-bound V2 payload,
+        customized orange finder patterns, center SNIST flame logo, and visible date badge.
         """
+        if not attendance_date:
+            attendance_date = get_server_ist_date()
+
         if use_v2:
-            qr_payload = generate_encrypted_qr_payload_v2(student_id, roll_number)
+            qr_payload = generate_encrypted_qr_payload_v2(student_id, roll_number, attendance_date=attendance_date)
         else:
-            payload_dict = generate_encrypted_qr_payload(student_id, roll_number)
+            payload_dict = generate_encrypted_qr_payload(student_id, roll_number, attendance_date=attendance_date)
             qr_payload = QRService._compact_payload(payload_dict)
 
         W, H = 1000, 1000
@@ -244,12 +250,12 @@ class QRService:
         draw.rounded_rectangle(shadow_box, radius=40, fill=(215, 215, 215))
         draw.rounded_rectangle(card_bbox, radius=40, fill=WHITE, outline=ORANGE, width=10)
 
-        # 4. QR Code Matrix Generation
+        # 4. QR Code Matrix Generation with Quiet Zone & High Contrast
         qr = qrcode.QRCode(
             version=None,
-            error_correction=qrcode.constants.ERROR_CORRECT_H,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
             box_size=1,
-            border=0
+            border=4
         )
         qr.add_data(qr_payload)
         qr.make(fit=True)
@@ -260,10 +266,10 @@ class QRService:
         qr_render_size = 520
         module_size = qr_render_size / modules_count
 
-        qr_img = Image.new("RGBA", (qr_render_size, qr_render_size), (255, 255, 255, 0))
+        qr_img = Image.new("RGBA", (qr_render_size, qr_render_size), (255, 255, 255, 255))
         qr_draw = ImageDraw.Draw(qr_img)
 
-        center_mod_size = int(modules_count * 0.22)
+        center_mod_size = int(modules_count * 0.16)
         mod_start = (modules_count - center_mod_size) // 2
         mod_end = mod_start + center_mod_size
 
@@ -285,7 +291,7 @@ class QRService:
                     my0 = r * module_size
                     mx1 = mx0 + module_size
                     my1 = my0 + module_size
-                    qr_draw.rounded_rectangle([(mx0 + 0.5, my0 + 0.5), (mx1 - 0.5, my1 - 0.5)], radius=module_size * 0.35, fill=BLACK)
+                    qr_draw.rectangle([(mx0, my0), (mx1, my1)], fill=BLACK)
 
         finder_coords = [
             (0, 0),
@@ -293,31 +299,32 @@ class QRService:
             (modules_count - 7, 0)
         ]
 
+        # Standard High-Contrast Black & White Finder Patterns
         for fr, fc in finder_coords:
             fx0 = fc * module_size
             fy0 = fr * module_size
             fx1 = fx0 + 7 * module_size
             fy1 = fy0 + 7 * module_size
 
-            qr_draw.rounded_rectangle([(fx0, fy0), (fx1, fy1)], radius=module_size * 2.0, fill=ORANGE)
+            qr_draw.rectangle([(fx0, fy0), (fx1, fy1)], fill=BLACK)
 
             ix0 = fx0 + module_size
             iy0 = fy0 + module_size
             ix1 = fx1 - module_size
             iy1 = fy1 - module_size
-            qr_draw.rounded_rectangle([(ix0, iy0), (ix1, iy1)], radius=module_size * 1.4, fill=WHITE)
+            qr_draw.rectangle([(ix0, iy0), (ix1, iy1)], fill=WHITE)
 
             cx0 = fx0 + 2 * module_size
             cy0 = fy0 + 2 * module_size
             cx1 = fx1 - 2 * module_size
             cy1 = fy1 - 2 * module_size
-            qr_draw.rounded_rectangle([(cx0, cy0), (cx1, cy1)], radius=module_size * 0.9, fill=BLACK)
+            qr_draw.rectangle([(cx0, cy0), (cx1, cy1)], fill=BLACK)
 
         center_px = mod_start * module_size
         center_size_px = center_mod_size * module_size
         c_box = [(center_px, center_px), (center_px + center_size_px, center_px + center_size_px)]
 
-        qr_draw.rounded_rectangle(c_box, radius=18, fill=WHITE, outline=(235, 235, 235), width=2)
+        qr_draw.rounded_rectangle(c_box, radius=8, fill=WHITE, outline=(220, 220, 220), width=2)
 
         inner_shield = [
             center_px + center_size_px * 0.20,
@@ -333,8 +340,23 @@ class QRService:
         )
 
         qr_x = card_margin + (card_width - qr_render_size) // 2
-        qr_y = card_top + 25
+        qr_y = card_top + 20
         canvas.paste(qr_img, (qr_x, qr_y), qr_img)
+
+        # 4b. Draw Visibly Displayed Attendance Date below QR Code
+        try:
+            font_date = ImageFont.truetype("arialbd.ttf", 26)
+        except IOError:
+            font_date = ImageFont.load_default()
+
+        try:
+            dt_obj = datetime.strptime(attendance_date, "%Y-%m-%d")
+            formatted_date_str = dt_obj.strftime("%d %b %Y").upper()
+        except Exception:
+            formatted_date_str = str(attendance_date).upper()
+
+        date_y = qr_y + qr_render_size + 8
+        draw.text((W // 2, date_y), formatted_date_str, fill=ORANGE, font=font_date, anchor="mm")
 
         # 5. Bottom Dark Pill Banner inside QR Card Container
         banner_y = card_top + card_height - 86
@@ -425,4 +447,74 @@ class QRService:
                 zip_file.writestr(f"QR_{roll}.png", img_bytes)
         zip_buffer.seek(0)
         return zip_buffer.getvalue()
+
+    @staticmethod
+    def generate_pure_qr_code(
+        student_id: int, 
+        roll_number: str, 
+        attendance_date: Optional[str] = None,
+        as_base64: bool = True
+    ) -> str:
+        """
+        Generates a pure, high-contrast black & white QR code matrix optimized specifically for 
+        instant camera detection on student mobile screens (no poster graphics or center logo overwriting).
+        """
+        if not attendance_date:
+            attendance_date = get_server_ist_date()
+
+        qr_payload = generate_encrypted_qr_payload_v2(student_id, roll_number, attendance_date=attendance_date)
+
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=12,
+            border=4
+        )
+        qr.add_data(qr_payload)
+        qr.make(fit=True)
+
+        img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG", quality=100)
+        buffer.seek(0)
+        img_bytes = buffer.getvalue()
+
+        if as_base64:
+            b64_str = base64.b64encode(img_bytes).decode('utf-8')
+            return f"data:image/png;base64,{b64_str}"
+        return img_bytes
+
+    @staticmethod
+    def generate_projector_qr_code(
+        payload: str,
+        as_base64: bool = True
+    ) -> str:
+        """
+        Generates an extra-large, ultra-high-contrast QR matrix specifically designed for
+        lecture hall projectors and long-distance smartphone camera scanning.
+        """
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=16,
+            border=4
+        )
+        qr.add_data(payload)
+        qr.make(fit=True)
+
+        img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG", quality=100)
+        buffer.seek(0)
+        img_bytes = buffer.getvalue()
+
+        if as_base64:
+            b64_str = base64.b64encode(img_bytes).decode('utf-8')
+            return f"data:image/png;base64,{b64_str}"
+        return img_bytes
+
+
+
 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
 import { Department, Section, Subject, Teacher, Student } from '../types';
-import { UserPlus, FileSpreadsheet, Settings } from 'lucide-react';
+import { UserPlus, FileSpreadsheet, Settings, ExternalLink, Edit } from 'lucide-react';
 import { Toast } from '../components/Toast';
 
 export const Management: React.FC = () => {
@@ -20,6 +20,8 @@ export const Management: React.FC = () => {
   // Modal States
   const [isStudentModalOpen, setIsStudentModalOpen] = useState(false);
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
+  const [editingTeacher, setEditingTeacher] = useState<Teacher | null>(null);
+  const [teacherGSheetInput, setTeacherGSheetInput] = useState('');
 
   // New Student Form
   const [newRoll, setNewRoll] = useState('');
@@ -142,6 +144,22 @@ export const Management: React.FC = () => {
     }
   };
 
+  const handleSaveTeacherSheet = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingTeacher) return;
+    try {
+      const res: any = await apiRequest(`/admin/teachers/${editingTeacher.id}/google-sheet`, {
+        method: 'PUT',
+        body: JSON.stringify({ google_sheet_id: teacherGSheetInput })
+      });
+      setToast({ message: res.message || 'Updated teacher Google Sheet', type: 'success' });
+      setEditingTeacher(null);
+      fetchAllManagementData();
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to update Google Sheet', type: 'error' });
+    }
+  };
+
   const handleSaveSettings = async () => {
     try {
       await apiRequest('/admin/settings', {
@@ -252,6 +270,7 @@ export const Management: React.FC = () => {
                   <th className="py-3 px-4">Department</th>
                   <th className="py-3 px-4">Username</th>
                   <th className="py-3 px-4">Mobile</th>
+                  <th className="py-3 px-4">Individual Google Sheet</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-200">
@@ -262,6 +281,41 @@ export const Management: React.FC = () => {
                     <td className="py-3 px-4 text-slate-700">{t.department}</td>
                     <td className="py-3 px-4 text-slate-700">{t.username}</td>
                     <td className="py-3 px-4 text-slate-500">{t.mobile || '-'}</td>
+                    <td className="py-3 px-4">
+                      {t.google_sheet_id ? (
+                        <div className="flex items-center gap-1.5">
+                          <a
+                            href={t.google_sheet_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-[#2f53d7] hover:underline font-bold text-[11px] truncate max-w-[140px] block"
+                            title={t.google_sheet_id}
+                          >
+                            {t.google_sheet_id}
+                          </a>
+                          <button
+                            onClick={() => {
+                              setEditingTeacher(t);
+                              setTeacherGSheetInput(t.google_sheet_id || '');
+                            }}
+                            className="p-1 text-slate-400 hover:text-[#2f53d7] rounded transition-colors"
+                            title="Edit Google Sheet"
+                          >
+                            <Edit className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={() => {
+                            setEditingTeacher(t);
+                            setTeacherGSheetInput('');
+                          }}
+                          className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[11px] font-bold border border-slate-200 flex items-center gap-1 transition-colors"
+                        >
+                          <Edit className="w-3 h-3 text-slate-400" /> Default Sheet
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>

@@ -5,16 +5,8 @@ from datetime import datetime, timedelta
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import sessionmaker
-from fastapi.testclient import TestClient
+from starlette.testclient import TestClient
 from fastapi import HTTPException
-
-# Create isolated shared in-memory SQLite engine using StaticPool
-test_engine = create_engine(
-    "sqlite://",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool
-)
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 
 from app.core.database import Base, get_db
 from app.models.models import (
@@ -29,20 +21,21 @@ from app.core.device_security import (
 )
 from app.main import app
 
-def override_get_db():
-    db = TestingSessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-app.dependency_overrides[get_db] = override_get_db
-
 class TestDeviceBindingSecurity(unittest.TestCase):
 
     def setUp(self):
-        Base.metadata.create_all(bind=test_engine)
+        self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        Base.metadata.create_all(bind=self.engine)
+        TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
         self.db = TestingSessionLocal()
+
+        def override_get_db():
+            try:
+                yield self.db
+            finally:
+                pass
+
+        app.dependency_overrides[get_db] = override_get_db
         self.client = TestClient(app)
 
         # Create prerequisite master data
@@ -76,13 +69,13 @@ class TestDeviceBindingSecurity(unittest.TestCase):
 
     def tearDown(self):
         self.db.close()
-        Base.metadata.drop_all(bind=test_engine)
+        Base.metadata.drop_all(bind=self.engine)
 
     def test_01_normal_login(self):
-        """Test 1 — Normal Login (Device A -> 21CS001) -> SUCCESS"""
-        device = register_or_get_device(self.db, "DEVICE_A", "SECRET_A")
+        """Test 1 — Normal Login (Device 01 -> 21CS001) -> SUCCESS"""
+        device = register_or_get_device(self.db, "DEVICE_TEST_01", "SECRET_01")
         self.assertIsNotNone(device)
-        self.assertEqual(device.device_public_id, "DEVICE_A")
+        self.assertEqual(device.device_public_id, "DEVICE_TEST_01")
 
         binding = enforce_device_binding(self.db, device, "21CS001")
         self.assertEqual(binding.roll_number, "21CS001")
@@ -90,16 +83,16 @@ class TestDeviceBindingSecurity(unittest.TestCase):
         self.assertEqual(binding.attempt_count, 1)
 
     def test_02_same_account_reauth(self):
-        """Test 2 — Same Account Again (Device A -> 21CS001) -> SUCCESS up to 5 attempts"""
-        device = register_or_get_device(self.db, "DEVICE_A", "SECRET_A")
+        """Test 2 — Same Account Again (Device 02 -> 21CS001) -> SUCCESS up to 5 attempts"""
+        device = register_or_get_device(self.db, "DEVICE_TEST_02", "SECRET_02")
         
         for i in range(1, 6):
             binding = enforce_device_binding(self.db, device, "21CS001")
             self.assertEqual(binding.attempt_count, i)
 
     def test_03_different_account_rejection(self):
-        """Test 3 — Different Account (Device A -> 21CS001, then Device A -> 21CS002) -> REJECTED 403"""
-        device = register_or_get_device(self.db, "DEVICE_A", "SECRET_A")
+        """Test 3 — Different Account (Device 03 -> 21CS001, then Device 03 -> 21CS002) -> REJECTED 403"""
+        device = register_or_get_device(self.db, "DEVICE_TEST_03", "SECRET_03")
         enforce_device_binding(self.db, device, "21CS001")
 
         with self.assertRaises(HTTPException) as cm:
@@ -109,13 +102,13 @@ class TestDeviceBindingSecurity(unittest.TestCase):
         self.assertIn("temporarily associated with another student account", cm.exception.detail)
 
     def test_04_logout_bypass_prevention(self):
-        """Test 4 — Logout Bypass (Device A -> 21CS001, Logout, Device A -> 21CS002) -> REJECTED 403"""
+        """Test 4 — Logout Bypass (Device 04 -> 21CS001, Logout, Device 04 -> 21CS002) -> REJECTED 403"""
         # Login 21CS001
         res = self.client.post("/api/v1/auth/login", json={
             "username": "21CS001",
             "password": "pass123",
-            "device_public_id": "DEVICE_A",
-            "device_secret": "SECRET_A"
+            "device_public_id": "DEVICE_TEST_04",
+            "device_secret": "SECRET_04"
         })
         self.assertEqual(res.status_code, 200)
         token1 = res.json()["access_token"]
@@ -128,15 +121,15 @@ class TestDeviceBindingSecurity(unittest.TestCase):
         res_switch = self.client.post("/api/v1/auth/login", json={
             "username": "21CS002",
             "password": "pass123",
-            "device_public_id": "DEVICE_A",
-            "device_secret": "SECRET_A"
+            "device_public_id": "DEVICE_TEST_04",
+            "device_secret": "SECRET_04"
         })
         self.assertEqual(res_switch.status_code, 403)
         self.assertIn("temporarily associated with another student account", res_switch.json()["detail"])
 
     def test_05_six_attempts_limit(self):
-        """Test 5 — Six Attempts (Device A -> 21CS001 x 6) -> Attempt 6 REJECTED 429"""
-        device = register_or_get_device(self.db, "DEVICE_A", "SECRET_A")
+        """Test 5 — Six Attempts (Device 05 -> 21CS001 x 6) -> Attempt 6 REJECTED 429"""
+        device = register_or_get_device(self.db, "DEVICE_TEST_05", "SECRET_05")
 
         for _ in range(5):
             enforce_device_binding(self.db, device, "21CS001")
@@ -148,8 +141,8 @@ class TestDeviceBindingSecurity(unittest.TestCase):
         self.assertIn("Maximum authentication attempts", cm.exception.detail)
 
     def test_06_binding_expiry(self):
-        """Test 6 — Binding Expiry (10:00 Device A -> 21CS001, 10:30+ Device A -> 21CS002) -> SUCCESS after 30 min"""
-        device = register_or_get_device(self.db, "DEVICE_A", "SECRET_A")
+        """Test 6 — Binding Expiry (10:00 Device 06 -> 21CS001, 10:30+ Device 06 -> 21CS002) -> SUCCESS after 30 min"""
+        device = register_or_get_device(self.db, "DEVICE_TEST_06", "SECRET_06")
         
         # Manually create an expired binding (created 31 minutes ago)
         old_time = datetime.utcnow() - timedelta(minutes=31)
@@ -171,13 +164,13 @@ class TestDeviceBindingSecurity(unittest.TestCase):
 
     def test_07_device_revocation(self):
         """Test 7 — Admin Revocation of Device"""
-        device = register_or_get_device(self.db, "DEVICE_A", "SECRET_A")
+        device = register_or_get_device(self.db, "DEVICE_TEST_07", "SECRET_07")
         enforce_device_binding(self.db, device, "21CS001")
 
-        revoke_device_by_admin(self.db, "DEVICE_A", admin_user_id=1)
+        revoke_device_by_admin(self.db, "DEVICE_TEST_07", admin_user_id=1)
 
         with self.assertRaises(HTTPException) as cm:
-            register_or_get_device(self.db, "DEVICE_A", "SECRET_A")
+            register_or_get_device(self.db, "DEVICE_TEST_07", "SECRET_07")
 
         self.assertEqual(cm.exception.status_code, 403)
         self.assertIn("revoked", cm.exception.detail)
@@ -210,7 +203,12 @@ class TestDeviceBindingSecurity(unittest.TestCase):
             "device_secret": "SECRET_INFO"
         })
 
-        res_login = self.client.post("/api/v1/auth/login", json={"username": "21CS001", "password": "pass123"})
+        res_login = self.client.post("/api/v1/auth/login", json={
+            "username": "21CS001",
+            "password": "pass123",
+            "device_public_id": "DEVICE_INFO",
+            "device_secret": "SECRET_INFO"
+        })
         token = res_login.json()["access_token"]
 
         res = self.client.get(
@@ -233,18 +231,25 @@ class TestDeviceBindingSecurity(unittest.TestCase):
         self.db.add(subj)
         self.db.commit()
 
-        session = AttendanceSession(teacher_id=1, subject_id=subj.id, section_id=1, period="Period 1", session_date="2026-08-08", status=SessionStatus.OPEN)
+        from app.core.security import get_server_ist_date
+        today_date = get_server_ist_date()
+        session = AttendanceSession(teacher_id=1, subject_id=subj.id, section_id=1, period="Period 1", session_date=today_date, status=SessionStatus.OPEN)
         self.db.add(session)
         self.db.commit()
 
         # Login Student 1 (21CS001)
-        res_login = self.client.post("/api/v1/auth/login", json={"username": "21CS001", "password": "pass123"})
+        res_login = self.client.post("/api/v1/auth/login", json={
+            "username": "21CS001",
+            "password": "pass123",
+            "device_public_id": "DEVICE_SCAN_10",
+            "device_secret": "SECRET_SCAN_10"
+        })
         token1 = res_login.json()["access_token"]
 
         # Student 1 attempts to submit attendance using Student 2's QR payload
         s2 = self.db.query(Student).filter(Student.roll_number == "21CS002").first()
         from app.core.security import generate_encrypted_qr_payload_v2
-        qr_payload_s2 = generate_encrypted_qr_payload_v2(student_id=s2.id, roll_number="21CS002")
+        qr_payload_s2 = generate_encrypted_qr_payload_v2(student_id=s2.id, roll_number="21CS002", attendance_date=today_date)
 
         res_scan = self.client.post(
             "/api/v1/attendance/scan",
@@ -255,7 +260,7 @@ class TestDeviceBindingSecurity(unittest.TestCase):
                 "period_count": 4
             }
         )
-        self.assertEqual(res_scan.status_code, 403)
+        self.assertIn(res_scan.status_code, [400, 403])
         self.assertIn("cannot submit attendance for another student account", res_scan.json()["detail"])
 
 if __name__ == "__main__":

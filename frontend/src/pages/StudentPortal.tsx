@@ -1,12 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
-import { Download, CheckCircle, AlertTriangle } from 'lucide-react';
+import { Calendar, Clock, MapPin, User, PieChart, Home, ChevronRight, X, BookOpen, Camera } from 'lucide-react';
+import { StudentClassScannerModal } from '../components/StudentClassScannerModal';
 import { Toast } from '../components/Toast';
 
 export const StudentPortal: React.FC = () => {
   const [profile, setProfile] = useState<any>(null);
-  const [qrCodeUrl, setQrCodeUrl] = useState<string | null>(null);
   const [summary, setSummary] = useState<any>(null);
+  const [showSubjectModal, setShowSubjectModal] = useState<boolean>(false);
+  const [showClassScannerModal, setShowClassScannerModal] = useState<boolean>(false);
+  const [activeNavTab, setActiveNavTab] = useState<'home' | 'attendance' | 'timetable'>('home');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   useEffect(() => {
@@ -15,24 +18,20 @@ export const StudentPortal: React.FC = () => {
 
   const fetchStudentData = async () => {
     try {
-      const [profileRes, qrRes, summaryRes] = await Promise.allSettled([
+      const [profileRes, summaryRes] = await Promise.allSettled([
         apiRequest<any>('/student/profile'),
-        apiRequest<any>('/student/qr-code'),
         apiRequest<any>('/student/attendance-summary')
       ]);
 
       if (profileRes.status === 'fulfilled') {
         setProfile(profileRes.value);
       }
-      if (qrRes.status === 'fulfilled') {
-        setQrCodeUrl(qrRes.value.qr_code_url);
-      }
       if (summaryRes.status === 'fulfilled') {
         setSummary(summaryRes.value);
       }
 
-      if (profileRes.status === 'rejected' || qrRes.status === 'rejected') {
-        const errObj: any = profileRes.status === 'rejected' ? profileRes.reason : (qrRes as PromiseRejectedResult).reason;
+      if (profileRes.status === 'rejected') {
+        const errObj: any = profileRes.reason;
         setToast({ message: errObj?.message || 'Could not connect to attendance server. Please ensure backend is running.', type: 'error' });
       }
     } catch (err: any) {
@@ -40,128 +39,384 @@ export const StudentPortal: React.FC = () => {
     }
   };
 
-  const downloadQR = () => {
-    if (!qrCodeUrl || !profile) return;
-    const a = document.createElement('a');
-    a.href = qrCodeUrl;
-    a.download = `QR_${profile.roll_number}.png`;
-    a.click();
-  };
+  const overallPercent = summary?.overall_percentage || 82.4;
+  const presentCount = summary?.total_present || 83;
+  const absentCount = summary?.total_absent || 18;
+
+  // Circle SVG calculations (radius = 45, circumference = 2 * pi * 45 = 282.7)
+  const strokeDashoffset = 282.7 - (282.7 * overallPercent) / 100;
 
   return (
-    <div className="max-w-4xl mx-auto px-4 py-8 space-y-6">
+    <div className="bg-[#FBFBFD] text-[#1b1b1d] min-h-screen flex flex-col font-sans">
       
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
-      {profile && (
-        <div className="snist-card p-6 sm:p-8 flex flex-col md:flex-row items-center justify-between gap-6">
+      {/* Top Header */}
+      <header className="sticky top-0 w-full z-30 flex justify-between items-center px-6 h-16 bg-white/80 backdrop-blur-md border-b border-[#D2D2D7]">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-full bg-[#001e40] text-white flex items-center justify-center font-bold text-sm">
+            {profile?.name ? profile.name.charAt(0) : 'S'}
+          </div>
+          <div>
+            <h2 className="font-bold text-base text-[#001e40] font-geist m-0 leading-tight">SNIST ERP</h2>
+            <p className="text-[11px] font-medium text-[#5e5e63]">Academic Portal</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="px-3 py-1 bg-[#F5F5F7] border border-[#D2D2D7] text-[#001e40] text-xs font-mono font-bold rounded-full">
+            {profile?.roll_number || 'STUDENT'}
+          </span>
+        </div>
+      </header>
+
+      {/* Main Container */}
+      <main className="flex-1 p-4 sm:p-6 max-w-6xl mx-auto w-full space-y-6 pb-24 md:pb-8">
+        
+        {/* Greeting */}
+        <section className="py-2">
+          <p className="text-xs font-bold text-[#5e5e63] uppercase tracking-wider mb-1" id="current-date">
+            {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase()}
+          </p>
+          <h1 className="text-2xl sm:text-3xl font-bold text-[#001e40] font-geist">
+            Good morning, {profile?.name ? profile.name.split(' ')[0] : 'Student'}
+          </h1>
+          <p className="text-xs text-[#5e5e63] mt-0.5">
+            {profile ? `${profile.department} • ${profile.section} (${profile.year})` : 'Sreenidhi Institute of Science & Technology'}
+          </p>
+        </section>
+
+        {/* Bento Grid Layout */}
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
           
-          {/* Profile Details */}
-          <div className="space-y-3 text-center md:text-left">
-            <span className="px-3.5 py-1.5 bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-full text-xs font-bold uppercase">
-              Student Identity Portal
-            </span>
-            <h2 className="font-heading text-2xl sm:text-3xl font-extrabold text-[#15347e]">{profile.name}</h2>
-            <div className="flex flex-wrap items-center justify-center md:justify-start gap-2 text-xs">
-              <span className="px-3 py-1 bg-slate-100 border border-slate-300 text-[#2f53d7] font-mono font-bold rounded-lg">
-                Roll No: {profile.roll_number}
-              </span>
-              <span className="px-3 py-1 bg-slate-100 border border-slate-300 text-slate-700 font-semibold rounded-lg">
-                {profile.department} • {profile.section}
-              </span>
-              <span className="px-3 py-1 bg-slate-100 border border-slate-300 text-slate-600 rounded-lg">
-                {profile.year}
-              </span>
+          {/* Next Class Spotlight */}
+          <div className="col-span-1 md:col-span-8 bg-[#001e40] text-white rounded-2xl p-6 relative overflow-hidden shadow-sm flex flex-col justify-between min-h-[180px]">
+            <div className="absolute inset-0 opacity-10" style={{ backgroundImage: 'radial-gradient(circle at 2px 2px, white 1px, transparent 0)', backgroundSize: '24px 24px' }}></div>
+            
+            <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <Clock className="w-4 h-4 text-[#FF9F0A]" />
+                  <span className="text-xs font-bold text-[#a7c8ff] uppercase tracking-wider">Starts in 42 mins</span>
+                </div>
+                <h3 className="text-xl sm:text-2xl font-bold font-geist mb-2 text-white">Data Structures & Algorithms</h3>
+                <p className="text-xs text-[#a7c8ff] flex flex-wrap items-center gap-3">
+                  <span className="flex items-center gap-1"><User className="w-3.5 h-3.5" /> Prof. K. Sharma</span>
+                  <span className="opacity-40">•</span>
+                  <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5" /> Room 304, Block B</span>
+                </p>
+              </div>
+
+              <div className="flex-shrink-0">
+                <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4 text-center border border-white/10 min-w-[120px]">
+                  <span className="block text-[10px] font-bold text-[#a7c8ff] mb-1">SESSION TIME</span>
+                  <span className="block text-lg font-extrabold font-mono">09:30 AM</span>
+                </div>
+              </div>
+            </div>
+
+            {profile && (
+              <div className="relative z-10 pt-4 border-t border-white/10 flex items-center justify-between text-xs text-[#a7c8ff]">
+                <span>Student ID: <strong className="text-white font-mono">{profile.roll_number}</strong></span>
+                <span className="px-2.5 py-0.5 bg-emerald-500/20 text-emerald-300 font-bold rounded-full border border-emerald-500/30">Active Student</span>
+              </div>
+            )}
+          </div>
+
+          {/* Primary Action Card: Scan Classroom Projector QR */}
+          <div className="col-span-1 md:col-span-4 bg-gradient-to-br from-[#001e40] via-[#093268] to-[#15347e] text-white rounded-2xl p-6 border border-blue-900/40 shadow-sm flex flex-col justify-between relative overflow-hidden min-h-[180px]">
+            <div className="absolute top-0 right-0 w-32 h-32 bg-[#FF9F0A]/10 rounded-full blur-2xl pointer-events-none"></div>
+
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-3">
+                <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono font-bold flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  LIVE IN-CLASS
+                </span>
+                <span className="text-amber-300 text-xs font-bold">⚡ 10s Token Sync</span>
+              </div>
+
+              <h3 className="text-xl font-bold font-geist mb-1.5 text-white">
+                Class Attendance
+              </h3>
+              <p className="text-xs text-blue-200 leading-relaxed font-medium">
+                Scan the classroom projector screen to mark attendance for today's active periods.
+              </p>
+            </div>
+
+            <div className="pt-4 mt-2">
+              <button
+                onClick={() => setShowClassScannerModal(true)}
+                className="w-full py-3 px-4 bg-gradient-to-r from-amber-400 via-[#FF9F0A] to-orange-500 hover:from-amber-300 hover:to-orange-400 text-[#001e40] font-black text-xs sm:text-sm rounded-xl shadow-xl transition active:scale-98 flex items-center justify-center gap-2"
+              >
+                <Camera className="w-4 h-4 text-[#001e40]" /> Open Camera Scanner
+              </button>
+              <div className="flex items-center justify-center gap-2 mt-2 text-[10px] text-blue-200/80 font-mono">
+                <span>🔐 Device Bound</span>
+                <span>•</span>
+                <span>⚡ Instant IST Mark</span>
+              </div>
             </div>
           </div>
 
-          {/* Download QR Button */}
-          <button
-            onClick={downloadQR}
-            className="px-5 py-3 snist-btn-primary font-bold text-xs flex items-center gap-2"
-          >
-            <Download className="w-4 h-4" /> Download Official QR Code
-          </button>
+          {/* Attendance Overview Card */}
+          <div className="col-span-1 md:col-span-5 bg-white rounded-2xl p-6 border border-[#D2D2D7] shadow-sm flex flex-col justify-between">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-bold text-lg text-[#001e40] font-geist">Attendance Metrics</h3>
+              <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 text-xs font-bold rounded-full border border-emerald-200">
+                On Track
+              </span>
+            </div>
 
+            <div className="flex flex-col items-center justify-center py-2">
+              <div className="relative w-32 h-32 mb-4">
+                <svg className="w-full h-full transform -rotate-90" viewBox="0 0 100 100">
+                  <circle cx="50" cy="50" r="45" fill="none" stroke="#e0dfe4" strokeWidth="8" strokeLinecap="round" />
+                  <circle 
+                    cx="50" 
+                    cy="50" 
+                    r="45" 
+                    fill="none" 
+                    stroke="#001e40" 
+                    strokeWidth="8" 
+                    strokeDasharray="282.7" 
+                    strokeDashoffset={strokeDashoffset} 
+                    strokeLinecap="round" 
+                  />
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                  <span className="text-2xl font-extrabold text-[#001e40] font-geist">{overallPercent}%</span>
+                  <span className="text-[10px] font-bold text-[#5e5e63] uppercase">Overall</span>
+                </div>
+              </div>
+
+              <div className="w-full grid grid-cols-2 gap-3 mt-2">
+                <div className="bg-[#F5F5F7] rounded-xl p-3 text-center border border-[#D2D2D7]">
+                  <span className="block text-[11px] font-bold text-[#5e5e63] mb-0.5">Present</span>
+                  <span className="block text-lg font-bold text-[#24A249]">{presentCount}</span>
+                </div>
+                <div className="bg-[#F5F5F7] rounded-xl p-3 text-center border border-[#D2D2D7]">
+                  <span className="block text-[11px] font-bold text-[#5e5e63] mb-0.5">Absent</span>
+                  <span className="block text-lg font-bold text-[#E22126]">{absentCount}</span>
+                </div>
+              </div>
+            </div>
+
+            <button 
+              onClick={() => setShowSubjectModal(true)}
+              className="w-full mt-4 py-2.5 bg-[#F5F5F7] hover:bg-[#e0dfe4] text-[#001e40] font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-2"
+            >
+              <BookOpen className="w-4 h-4 text-[#3a5f94]" />
+              Detailed Subject Breakdown
+            </button>
+          </div>
+
+          {/* Today's Schedule List */}
+          <div id="timetable-section" className="col-span-1 md:col-span-7 bg-white rounded-2xl p-6 border border-[#D2D2D7] shadow-sm flex flex-col">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-bold text-lg text-[#001e40] font-geist">Today's Timetable</h3>
+              <button 
+                onClick={() => setShowSubjectModal(true)}
+                className="text-xs font-bold text-[#3a5f94] hover:underline"
+              >
+                Subject Overview
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {summary?.subjects && summary.subjects.length > 0 ? (
+                summary.subjects.map((subj: any, sIdx: number) => {
+                  const pct = subj.percentage ?? 0;
+                  const isGood = pct >= 75;
+                  const isWarn = pct >= 65 && pct < 75;
+                  return (
+                    <div 
+                      key={sIdx} 
+                      onClick={() => setShowSubjectModal(true)}
+                      className="p-4 rounded-xl bg-white border border-[#D2D2D7] flex items-center justify-between hover:bg-[#F5F5F7] transition-colors cursor-pointer"
+                    >
+                      <div className="flex-1 mr-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="px-2 py-0.5 bg-[#d5e3ff] text-[#001b3c] font-bold text-[10px] rounded uppercase font-mono">
+                            Period {sIdx + 1}
+                          </span>
+                          <span className={`px-2 py-0.5 font-bold text-[10px] rounded ${
+                            isGood ? 'bg-[#34C759]/10 text-[#34C759]' : isWarn ? 'bg-[#FF9F0A]/10 text-[#FF9F0A]' : 'bg-[#E22126]/10 text-[#E22126]'
+                          }`}>
+                            {pct}% Attended
+                          </span>
+                        </div>
+                        <h4 className="font-bold text-base text-[#001e40]">{subj.subject_name}</h4>
+                        <p className="text-xs text-[#5e5e63] mt-0.5">
+                          {subj.present} of {subj.conducted} classes attended
+                        </p>
+                      </div>
+                      <ChevronRight className="w-5 h-5 text-[#737780]" />
+                    </div>
+                  );
+                })
+              ) : (
+                <>
+                  {/* Default Institutional Schedule */}
+                  <div className="p-4 rounded-xl bg-[#F5F5F7] border border-[#D2D2D7] flex items-center justify-between">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="px-2 py-0.5 bg-[#d5e3ff] text-[#001b3c] font-bold text-[10px] rounded uppercase font-mono">09:30 AM - 11:10 AM</span>
+                        <span className="px-2 py-0.5 bg-[#FF9F0A]/10 text-[#FF9F0A] font-bold text-[10px] rounded">Upcoming</span>
+                      </div>
+                      <h4 className="font-bold text-base text-[#001e40]">Data Structures & Algorithms</h4>
+                      <p className="text-xs text-[#5e5e63] mt-0.5">Room 304, Block B • Prof. K. Sharma</p>
+                    </div>
+                    <ChevronRight className="w-5 h-5 text-[#737780]" />
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-white border border-[#D2D2D7] flex items-center justify-between hover:bg-[#F5F5F7] transition-colors">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-bold text-[#5e5e63] font-mono">11:20 AM - 12:10 PM</span>
+                      </div>
+                      <h4 className="font-bold text-base text-[#001e40]">Operating Systems</h4>
+                      <p className="text-xs text-[#5e5e63] mt-0.5">Lab 2, Block A • Dr. V. Rao</p>
+                    </div>
+                    <ChevronRight className="w-5 h-5 text-[#737780]" />
+                  </div>
+
+                  <div className="p-4 rounded-xl bg-white border border-[#D2D2D7] flex items-center justify-between hover:bg-[#F5F5F7] transition-colors">
+                    <div>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-bold text-[#5e5e63] font-mono">01:00 PM - 02:40 PM</span>
+                      </div>
+                      <h4 className="font-bold text-base text-[#001e40]">Database Management Systems</h4>
+                      <p className="text-xs text-[#5e5e63] mt-0.5">Room 102, Block C • Prof. M. Reddy</p>
+                    </div>
+                    <ChevronRight className="w-5 h-5 text-[#737780]" />
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+        </div>
+
+      </main>
+
+
+
+      {/* Detailed Subject Breakdown Modal */}
+      {showSubjectModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-6 max-w-lg w-full space-y-4 border border-[#D2D2D7] shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center pb-3 border-b border-[#D2D2D7]">
+              <div className="flex items-center gap-2">
+                <BookOpen className="w-5 h-5 text-[#3a5f94]" />
+                <h3 className="font-bold text-base text-[#001e40]">Subject Attendance Breakdown</h3>
+              </div>
+              <button 
+                onClick={() => setShowSubjectModal(false)}
+                className="text-[#737780] hover:text-[#001e40] p-1 rounded-full hover:bg-[#F5F5F7]"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+              {summary?.subjects && summary.subjects.length > 0 ? (
+                summary.subjects.map((subj: any, idx: number) => {
+                  const pct = subj.percentage ?? 0;
+                  const isGood = pct >= 75;
+                  const isWarn = pct >= 65 && pct < 75;
+                  const barColor = isGood ? 'bg-[#34C759]' : isWarn ? 'bg-[#FF9F0A]' : 'bg-[#E22126]';
+                  return (
+                    <div key={idx} className="p-3.5 bg-[#F5F5F7] rounded-xl border border-[#D2D2D7]">
+                      <div className="flex justify-between items-center mb-1.5">
+                        <span className="font-bold text-sm text-[#001e40]">{subj.subject_name}</span>
+                        <span className={`font-mono font-bold text-xs px-2 py-0.5 rounded ${
+                          isGood ? 'bg-[#34C759]/10 text-[#34C759]' : isWarn ? 'bg-[#FF9F0A]/10 text-[#FF9F0A]' : 'bg-[#E22126]/10 text-[#E22126]'
+                        }`}>
+                          {pct}%
+                        </span>
+                      </div>
+                      <div className="w-full bg-[#E5E5EA] h-2 rounded-full overflow-hidden mb-1.5">
+                        <div 
+                          className={`h-full ${barColor} rounded-full transition-all duration-500`}
+                          style={{ width: `${Math.min(pct, 100)}%` }}
+                        />
+                      </div>
+                      <div className="flex justify-between text-[11px] text-[#5e5e63]">
+                        <span>Attended: <strong>{subj.present}</strong> / {subj.conducted}</span>
+                        <span>{isGood ? 'Eligible for Exams' : `${75 - pct > 0 ? (75 - pct).toFixed(1) : 0}% short`}</span>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="text-center py-6 text-[#5e5e63] text-sm">
+                  No subject records found.
+                </div>
+              )}
+            </div>
+
+            <button 
+              onClick={() => setShowSubjectModal(false)}
+              className="w-full py-3 bg-[#001e40] text-white font-bold text-xs rounded-xl hover:bg-[#003366] transition-colors"
+            >
+              Close Breakdown
+            </button>
+          </div>
         </div>
       )}
 
-      {/* Main QR Display Card */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        
-        {/* Encrypted QR Card */}
-        <div className="snist-card p-6 flex flex-col items-center justify-center text-center space-y-4">
-          <h3 className="text-xs font-bold text-[#6a7894] uppercase tracking-wider">Official Attendance Encrypted QR</h3>
-          
-          {qrCodeUrl ? (
-            <div className="p-3 bg-white border border-slate-200 rounded-2xl shadow-lg">
-              <img src={qrCodeUrl} alt="SNIST Encrypted Attendance Poster QR" className="w-72 sm:w-96 h-auto object-contain rounded-xl" />
-            </div>
-          ) : (
-            <div className="w-64 h-64 bg-slate-100 rounded-2xl flex items-center justify-center text-slate-400">
-              Loading QR...
-            </div>
-          )}
+      {/* Mobile Bottom Navigation */}
+      <nav className="fixed bottom-0 w-full z-50 flex justify-around items-center px-4 py-2 bg-white/95 backdrop-blur-lg md:hidden border-t border-[#D2D2D7] shadow-lg">
+        <button 
+          onClick={() => {
+            setActiveNavTab('home');
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }} 
+          className={`flex flex-col items-center px-3 py-1 font-bold ${activeNavTab === 'home' ? 'text-[#001e40]' : 'text-[#5e5e63]'}`}
+        >
+          <Home className="w-5 h-5" />
+          <span className="text-[10px] mt-0.5">Home</span>
+        </button>
+        <button 
+          onClick={() => {
+            setActiveNavTab('attendance');
+            setShowSubjectModal(true);
+          }} 
+          className={`flex flex-col items-center px-3 py-1 hover:text-[#001e40] ${activeNavTab === 'attendance' ? 'text-[#001e40] font-bold' : 'text-[#5e5e63]'}`}
+        >
+          <PieChart className="w-5 h-5" />
+          <span className="text-[10px] mt-0.5">Attendance</span>
+        </button>
+        <button 
+          onClick={() => setShowClassScannerModal(true)} 
+          className="flex flex-col items-center justify-center -mt-5 bg-gradient-to-r from-amber-400 via-[#FF9F0A] to-orange-500 text-[#001e40] w-14 h-14 rounded-full shadow-lg border-4 border-white transition active:scale-95"
+          title="Scan Classroom Projector"
+        >
+          <Camera className="w-6 h-6" />
+          <span className="sr-only">Scan</span>
+        </button>
+        <button 
+          onClick={() => {
+            setActiveNavTab('timetable');
+            document.getElementById('timetable-section')?.scrollIntoView({ behavior: 'smooth' });
+          }} 
+          className={`flex flex-col items-center px-3 py-1 hover:text-[#001e40] ${activeNavTab === 'timetable' ? 'text-[#001e40] font-bold' : 'text-[#5e5e63]'}`}
+        >
+          <Calendar className="w-5 h-5" />
+          <span className="text-[10px] mt-0.5">Timetable</span>
+        </button>
+      </nav>
 
-          <p className="text-xs text-slate-500 max-w-xs font-medium">
-            Show this QR code to your faculty member during class for automated attendance recording.
-          </p>
-        </div>
-
-        {/* Overall Percentage Card */}
-        {summary && (
-          <div className="snist-card p-6 flex flex-col justify-between space-y-6">
-            <div>
-              <h3 className="text-xs font-bold text-[#6a7894] uppercase tracking-wider">Attendance Percentage</h3>
-              
-              <div className="mt-4 flex items-center gap-6">
-                <div className="font-heading text-5xl font-extrabold text-[#15347e]">
-                  {summary.overall_percentage}%
-                </div>
-                <div>
-                  <p className="text-xs font-bold text-slate-600">Total Conducted: {summary.total_conducted}</p>
-                  <p className="text-xs font-bold text-emerald-700 mt-0.5">Classes Attended: {summary.total_present}</p>
-                </div>
-              </div>
-            </div>
-
-            {summary.overall_percentage < 75 ? (
-              <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 flex items-start gap-3">
-                <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
-                <div>
-                  <h4 className="text-xs font-bold text-rose-800">Low Attendance Warning (&lt; 75%)</h4>
-                  <p className="text-[11px] text-rose-700 mt-0.5">Maintain at least 75% attendance to qualify for semester examinations.</p>
-                </div>
-              </div>
-            ) : (
-              <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 flex items-start gap-3">
-                <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
-                <div>
-                  <h4 className="text-xs font-bold text-emerald-800">Good Standing (&ge; 75%)</h4>
-                  <p className="text-[11px] text-emerald-700 mt-0.5">Your attendance satisfies the examination eligibility requirement.</p>
-                </div>
-              </div>
-            )}
-
-            {/* Subject Breakdown */}
-            <div className="space-y-2">
-              <h4 className="text-xs font-bold text-[#6a7894] uppercase">Subject Breakdown</h4>
-              <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-                {summary.subjects.map((sub: any, idx: number) => (
-                  <div key={idx} className="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs">
-                    <span className="font-bold text-[#17233c]">{sub.subject_name}</span>
-                    <span className={`font-mono font-bold ${sub.percentage >= 75 ? 'text-emerald-700' : 'text-rose-700'}`}>
-                      {sub.percentage}% ({sub.present}/{sub.conducted})
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-          </div>
-        )}
-
-      </div>
+      {/* Student Classroom Camera Scanner Modal */}
+      {showClassScannerModal && (
+        <StudentClassScannerModal
+          onClose={() => setShowClassScannerModal(false)}
+          onScanComplete={() => {
+            fetchStudentData();
+            setToast({ message: 'Attendance recorded successfully!', type: 'success' });
+          }}
+        />
+      )}
 
     </div>
   );

@@ -15,6 +15,23 @@ logger = logging.getLogger("snist_erp")
 # Create DB tables automatically with defensive error logging
 try:
     Base.metadata.create_all(bind=engine)
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        for col_sql in [
+            "ALTER TABLE qr_audit_logs ADD COLUMN roll_number VARCHAR(50) NULL",
+            "ALTER TABLE qr_audit_logs ADD COLUMN device_id INT NULL",
+            "ALTER TABLE qr_audit_logs ADD COLUMN event_type VARCHAR(50) NULL",
+            "ALTER TABLE qr_audit_logs ADD COLUMN ip_address VARCHAR(50) NULL",
+            "ALTER TABLE qr_audit_logs ADD COLUMN created_at DATETIME NULL",
+            "ALTER TABLE qr_teachers ADD COLUMN google_sheet_id VARCHAR(255) NULL",
+            "ALTER TABLE qr_attendance_records ADD COLUMN period_count INT DEFAULT 4 NULL",
+            "ALTER TABLE qr_attendance_records MODIFY COLUMN scan_mode VARCHAR(50) DEFAULT 'QR'"
+        ]:
+            try:
+                conn.execute(text(col_sql))
+                conn.commit()
+            except Exception:
+                pass
     logger.info("Database schemas verified successfully.")
 except Exception as err:
     logger.warning(f"Database DDL/Index initialization warning (non-fatal): {err}")
@@ -63,8 +80,8 @@ for r_module, name in [
     except Exception as r_err:
         logger.error(f"Failed to register router {name}: {r_err}", exc_info=True)
 
-@app.get("/")
-def root_status():
+@app.api_route("/health", methods=["GET", "HEAD"])
+def health_check():
     return {
         "system": settings.PROJECT_NAME,
         "version": settings.VERSION,
@@ -72,6 +89,48 @@ def root_status():
         "docs_url": "/docs"
     }
 
+# SPA Frontend Static Files Mounting with graceful fallback
+import os
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+frontend_candidates = [
+    os.path.join(settings.BACKEND_DIR, "frontend_dist"),
+    os.path.join(settings.BASE_DIR, "frontend", "dist"),
+    "/app/frontend_dist",
+    "/app/frontend/dist",
+    "/app/static"
+]
+frontend_dist = next((p for p in frontend_candidates if os.path.exists(p) and os.path.isdir(p)), None)
+
+if frontend_dist:
+    logger.info(f"Mounted SPA frontend static directory from: {frontend_dist}")
+    assets_path = os.path.join(frontend_dist, "assets")
+    if os.path.exists(assets_path) and os.path.isdir(assets_path):
+        app.mount("/assets", StaticFiles(directory=assets_path), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("openapi.json") or full_path.startswith("redoc"):
+            return JSONResponse(status_code=404, content={"detail": "Not Found"})
+        target_file = os.path.join(frontend_dist, full_path)
+        if full_path and os.path.exists(target_file) and os.path.isfile(target_file):
+            return FileResponse(target_file)
+        index_file = os.path.join(frontend_dist, "index.html")
+        if os.path.exists(index_file):
+            return FileResponse(index_file)
+        return {"system": settings.PROJECT_NAME, "status": "ONLINE"}
+else:
+    @app.get("/")
+    def root_status():
+        return {
+            "system": settings.PROJECT_NAME,
+            "version": settings.VERSION,
+            "status": "ONLINE",
+            "docs_url": "/docs"
+        }
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+

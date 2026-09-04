@@ -2,6 +2,23 @@
 version: '3.8'
 
 services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: attendance-app:latest
+    container_name: attendance_system_app
+    restart: always
+    ports:
+      - "8080:8000"
+    environment:
+      - DATABASE_URL=${DATABASE_URL:-mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo}
+    volumes:
+      - ./backend/app:/app/app
+      - ./frontend/dist:/app/frontend_dist
+      - ./backend/data:/app/data
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
   backend:
     build:
       context: ./backend
@@ -13,7 +30,7 @@ services:
     environment:
       - SECRET_KEY=8f3b2a19e5d4c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2
       - QR_SECRET_KEY=a1b2c3d4e5f678901234567890abcdef1234567890abcdef1234567890abcdef
-      - DATABASE_URL=${DATABASE_URL:-mysql+pymysql://db_user:db_password@seg-demo-mysql.internal:3306/attendance_db}
+      - DATABASE_URL=${DATABASE_URL:-mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo}
     volumes:
       - ./backend/data:/app/data
 
@@ -32,10 +49,12 @@ services:
     depends_on:
       - backend
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: attendance_cloudflare_tunnel
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: attendance_ngrok_tunnel
     restart: always
-    command: tunnel --no-autoupdate --url http://frontend:80
+    command: http frontend:80
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
     depends_on:
       - frontend

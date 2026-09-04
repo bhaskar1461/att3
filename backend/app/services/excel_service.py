@@ -1,4 +1,5 @@
 import os
+import threading
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from copy import copy
@@ -18,6 +19,7 @@ class ExcelAttendanceService:
       Row 6:   Column headers: SNO | ROLL NO | NAME | Agency | (period totals under dates)
       Row 7+:  Student rows with roll numbers in Col B
     """
+    _file_lock = threading.Lock()
 
     # Normalizes a date value (string or datetime) to a comparable "D/M/YY" string
     @staticmethod
@@ -203,57 +205,58 @@ class ExcelAttendanceService:
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Master attendance file not found at: {file_path}")
 
-        wb = openpyxl.load_workbook(file_path, data_only=False)
-        ws = wb.active
+        with cls._file_lock:
+            wb = openpyxl.load_workbook(file_path, data_only=False)
+            ws = wb.active
 
-        date_row, header_row, roll_no_col, first_date_col = cls._find_layout(ws)
-        student_row = cls._find_student_row(ws, header_row, roll_no_col, roll_number)
+            date_row, header_row, roll_no_col, first_date_col = cls._find_layout(ws)
+            student_row = cls._find_student_row(ws, header_row, roll_no_col, roll_number)
 
-        if student_row == -1:
-            wb.close()
-            return {
-                "status": "NOT_FOUND",
-                "message": f"Student with Roll Number '{roll_number}' not found in Excel sheet. Attendance saved in database only.",
-            }
-
-        date_col = cls._find_or_create_date_column(ws, date_row, date_str, first_date_col)
-
-        target_cell = ws.cell(row=student_row, column=date_col)
-        existing_val = str(target_cell.value or "").strip()
-
-        # Check duplicate
-        if existing_val and not overwrite:
-            if existing_val == str(status_code):
+            if student_row == -1:
                 wb.close()
                 return {
-                    "status": "DUPLICATE",
-                    "message": f"Attendance already '{existing_val}' for {roll_number} on {date_str}",
-                    "row": student_row,
-                    "col": date_col,
-                    "previous_value": existing_val
+                    "status": "NOT_FOUND",
+                    "message": f"Student with Roll Number '{roll_number}' not found in Excel sheet. Attendance saved in database only.",
                 }
 
-        # Write attendance value
-        if status_code == "A":
-            target_cell.value = "A"
-        elif status_code.isdigit():
-            target_cell.value = int(status_code)
-        else:
-            target_cell.value = status_code
+            date_col = cls._find_or_create_date_column(ws, date_row, date_str, first_date_col)
 
-        target_cell.alignment = Alignment(horizontal="center", vertical="center")
+            target_cell = ws.cell(row=student_row, column=date_col)
+            existing_val = str(target_cell.value or "").strip()
 
-        wb.save(file_path)
-        wb.close()
+            # Check duplicate
+            if existing_val and not overwrite:
+                if existing_val == str(status_code):
+                    wb.close()
+                    return {
+                        "status": "DUPLICATE",
+                        "message": f"Attendance already '{existing_val}' for {roll_number} on {date_str}",
+                        "row": student_row,
+                        "col": date_col,
+                        "previous_value": existing_val
+                    }
 
-        return {
-            "status": "SUCCESS",
-            "message": f"Recorded '{status_code}' for {roll_number} on {date_str}",
-            "file_path": file_path,
-            "row": student_row,
-            "col": date_col,
-            "written_value": status_code
-        }
+            # Write attendance value
+            if status_code == "A":
+                target_cell.value = "A"
+            elif status_code.isdigit():
+                target_cell.value = int(status_code)
+            else:
+                target_cell.value = status_code
+
+            target_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            wb.save(file_path)
+            wb.close()
+
+            return {
+                "status": "SUCCESS",
+                "message": f"Recorded '{status_code}' for {roll_number} on {date_str}",
+                "file_path": file_path,
+                "row": student_row,
+                "col": date_col,
+                "written_value": status_code
+            }
 
     @classmethod
     def get_all_roll_numbers(cls, file_path: str) -> List[str]:
