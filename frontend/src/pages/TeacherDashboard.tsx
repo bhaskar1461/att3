@@ -6,7 +6,7 @@ import {
   FileSpreadsheet, ExternalLink, Users, Zap, CheckCircle, X,
   UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Radio
 } from 'lucide-react';
-import { QRScannerModal } from '../components/QRScannerModal';
+const QRScannerModal = React.lazy(() => import('../components/QRScannerModal').then(m => ({ default: m.QRScannerModal })));
 import { ManualSearchModal } from '../components/ManualSearchModal';
 import { ClassExcelRegisterModal } from '../components/ClassExcelRegisterModal';
 import { ProximityControllerModal } from '../components/ProximityControllerModal';
@@ -1052,25 +1052,27 @@ export const TeacherDashboard: React.FC = () => {
 
       {/* QR Camera Modal */}
       {isScannerOpen && activeSession && (
-        <QRScannerModal
-          sessionId={activeSession.session_id}
-          sessionDate={activeSession.session_date}
-          periodText={activeSession.period}
-          subjectName={activeSession.subject_name}
-          sectionName={activeSession.section_name}
-          initialPeriodCount={parseInt(activeSession.period?.replace(/\D/g, '') || '4') || 4}
-          onClose={() => {
-            setIsScannerOpen(false);
-            fetchSessionDetails(activeSession.session_id);
-          }}
-          onScanSuccess={() => {
-            fetchSessionDetails(activeSession.session_id);
-          }}
-          onOpenManualSearch={() => {
-            setIsScannerOpen(false);
-            setIsManualOpen(true);
-          }}
-        />
+        <React.Suspense fallback={null}>
+          <QRScannerModal
+            sessionId={activeSession.session_id}
+            sessionDate={activeSession.session_date}
+            periodText={activeSession.period}
+            subjectName={activeSession.subject_name}
+            sectionName={activeSession.section_name}
+            initialPeriodCount={parseInt(activeSession.period?.replace(/\D/g, '') || '4') || 4}
+            onClose={() => {
+              setIsScannerOpen(false);
+              fetchSessionDetails(activeSession.session_id);
+            }}
+            onScanSuccess={() => {
+              fetchSessionDetails(activeSession.session_id);
+            }}
+            onOpenManualSearch={() => {
+              setIsScannerOpen(false);
+              setIsManualOpen(true);
+            }}
+          />
+        </React.Suspense>
       )}
 
       {/* Manual Search Modal */}
