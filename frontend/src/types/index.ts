@@ -76,6 +76,10 @@ export interface TeacherAssignment {
 export interface AttendanceSession {
   session_id: number;
   section_id?: number;
+  classroom_id?: number;
+  classroom_code?: string;
+  current_challenge?: string;
+  manual_fallback_code?: string;
   subject_name: string;
   section_name: string;
   period: string;
@@ -120,4 +124,47 @@ export interface HistoricalAttendanceSession {
   absent_count: number;
   created_at?: string;
 }
+
+export interface Classroom {
+  id: number;
+  room_code: string;
+  building: string;
+  floor: number;
+  center_latitude: number;
+  center_longitude: number;
+  geofence_radius_meters: number;
+  default_rssi_threshold: number;
+  uwb_supported: boolean;
+}
+
+export interface ProximitySessionData {
+  session_id: number;
+  status: string;
+  session_date: string;
+  period: string;
+  classroom_id?: number;
+  classroom_code?: string;
+  broadcast_payload: string;
+  challenge_nonce: string;
+  manual_fallback_code: string;
+  remaining_seconds: number;
+  rssi_threshold: number;
+  geofence_radius_meters: number;
+  total_enrolled?: number;
+  total_marked?: number;
+}
+
+export interface AuditReview {
+  id: number;
+  session_id: number;
+  student_id: number;
+  roll_number?: string;
+  student_name?: string;
+  reason_flag: string;
+  measured_rssi?: number;
+  measured_distance_meters?: number;
+  details?: Record<string, any>;
+  created_at: string;
+}
+
 

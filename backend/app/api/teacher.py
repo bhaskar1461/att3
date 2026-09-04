@@ -263,6 +263,10 @@ def get_session_details(session_id: int, db: Session = Depends(get_db), current_
 
     return {
         "session_id": session.id,
+        "classroom_id": session.classroom_id,
+        "classroom_code": session.classroom.room_code if session.classroom else None,
+        "current_challenge": session.current_challenge,
+        "manual_fallback_code": session.manual_fallback_code,
         "subject_name": session.subject.name if session.subject else "",
         "section_name": session.section.name if session.section else "",
         "period": session.period,

@@ -3,7 +3,7 @@ import time
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -12,11 +12,17 @@ from app.api.auth import get_current_user
 from app.core.config import settings
 from app.models.models import (
     User, UserRole, Student, Teacher, AttendanceSession, AttendanceRecord, 
-    AttendanceStatus, SessionStatus, SystemSettings
+    AttendanceStatus, SessionStatus, SystemSettings, Classroom, AttendanceAuditReview,
+    TeacherAssignment
 )
 from app.services.qr_service import QRService
 from app.services.excel_service import ExcelAttendanceService
 from app.services.gsheets_service import GoogleSheetsService
+from app.core.security import (
+    haversine_distance, generate_proximity_challenge, verify_proximity_challenge,
+    verify_manual_short_code, get_server_ist_date, get_server_ist_datetime
+)
+import secrets
 
 logger = logging.getLogger("snist_erp.attendance_api")
 
@@ -603,22 +609,622 @@ def manual_mark_attendance(
 
     return {"status": "SUCCESS", "message": f"Updated {student.name} ({student.roll_number}) to {status_code}"}
 
-@router.post("/mark-all-absent")
-def mark_all_students_absent(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    db.query(AttendanceRecord).update({AttendanceRecord.status: AttendanceStatus.ABSENT})
+    return {"status": "SUCCESS", "message": "All students marked as ABSENT across system and Google Sheets"}
+
+
+# ==============================================================================
+# PROXIMITY-BASED CONCURRENT ATTENDANCE ENGINE (BLE / UWB / ROTATING SHORT CODE)
+# ==============================================================================
+
+class StartProximitySessionRequest(BaseModel):
+    subject_id: int
+    section_id: int
+    period: str
+    classroom_id: Optional[int] = None
+    date: Optional[str] = None
+
+class ProximitySubmitRequest(BaseModel):
+    session_id: int
+    challenge_nonce: str
+    latitude: float
+    longitude: float
+    location_accuracy_meters: Optional[float] = None
+    is_mock_location: Optional[bool] = False
+    median_rssi: Optional[int] = None
+    rssi_samples: Optional[List[int]] = None
+    proximity_tier: Optional[str] = "BLE"
+    client_timestamp_ist: Optional[str] = None
+    period_count: Optional[int] = 4
+
+class ManualCodeSubmitRequest(BaseModel):
+    session_id: int
+    code: str
+    latitude: float
+    longitude: float
+    location_accuracy_meters: Optional[float] = None
+    is_mock_location: Optional[bool] = False
+    period_count: Optional[int] = 4
+
+
+@router.get("/classrooms")
+def list_active_classrooms(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+    """Returns list of active classrooms with indoor coordinates and RSSI thresholds."""
+    rooms = db.query(Classroom).filter(Classroom.is_active == True).all()
+    return [
+        {
+            "id": r.id,
+            "room_code": r.room_code,
+            "building": r.building,
+            "floor": r.floor,
+            "center_latitude": r.center_latitude,
+            "center_longitude": r.center_longitude,
+            "geofence_radius_meters": r.geofence_radius_meters,
+            "default_rssi_threshold": r.default_rssi_threshold,
+            "uwb_supported": r.uwb_supported
+        }
+        for r in rooms
+    ]
+
+
+@router.post("/session/start-proximity")
+def start_proximity_session(
+    req: StartProximitySessionRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Initializes or resumes a proximity-based attendance session for a class.
+    Generates the master ephemeral cryptographic secret and the first 15-second rotating challenge nonce.
+    """
+    if current_user.role not in [UserRole.TEACHER, UserRole.SUPER_ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only faculty members or administrators can launch proximity attendance sessions."
+        )
+
+    # Verify teacher assignment allotment if teacher
+    if current_user.role == UserRole.TEACHER and current_user.teacher_profile:
+        teacher_id = current_user.teacher_profile.id
+        assignment = db.query(TeacherAssignment).filter(
+            TeacherAssignment.teacher_id == teacher_id,
+            TeacherAssignment.subject_id == req.subject_id,
+            TeacherAssignment.section_id == req.section_id
+        ).first()
+        if not assignment:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not authorized or assigned to this subject and section."
+            )
+    else:
+        # Super admin: use first assigned teacher or existing session's teacher
+        teacher = db.query(Teacher).first()
+        teacher_id = teacher.id if teacher else 1
+
+    date_str = req.date or get_server_ist_date()
+
+    # Find or create AttendanceSession
+    session = db.query(AttendanceSession).filter(
+        AttendanceSession.teacher_id == teacher_id,
+        AttendanceSession.subject_id == req.subject_id,
+        AttendanceSession.section_id == req.section_id,
+        AttendanceSession.period == req.period,
+        AttendanceSession.session_date == date_str
+    ).first()
+
+    if not session:
+        session = AttendanceSession(
+            teacher_id=teacher_id,
+            subject_id=req.subject_id,
+            section_id=req.section_id,
+            period=req.period,
+            session_date=date_str,
+            status=SessionStatus.OPEN
+        )
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+    else:
+        if session.status == SessionStatus.LOCKED and current_user.role != UserRole.SUPER_ADMIN:
+            session.status = SessionStatus.OPEN
+            session.locked_at = None
+            db.commit()
+
+    # Associate Classroom if specified, or pick default if empty
+    if req.classroom_id:
+        classroom = db.query(Classroom).filter(Classroom.id == req.classroom_id).first()
+        if classroom:
+            session.classroom_id = classroom.id
+    elif not session.classroom_id:
+        default_classroom = db.query(Classroom).filter(Classroom.is_active == True).first()
+        if default_classroom:
+            session.classroom_id = default_classroom.id
+
+    # Generate or refresh 32-byte cryptographic ephemeral secret
+    if not session.ephemeral_secret:
+        session.ephemeral_secret = secrets.token_hex(32)
+
+    nonce, short_code, remaining_sec = generate_proximity_challenge(session.id, session.ephemeral_secret)
+    session.current_challenge = nonce
+    session.challenge_generated_at = datetime.utcnow()
+    session.manual_fallback_code = short_code
+
+    from datetime import timedelta
+    session.manual_code_expires_at = datetime.utcnow() + timedelta(seconds=remaining_sec)
+    db.commit()
+    invalidate_session_cache(session.id)
+
+    classroom = session.classroom
+    broadcast_payload = f"SNIST|{session.id}|{nonce}|{int(time.time())}"
+
+    from app.core.device_security import log_security_audit_event, SecurityEventType
+    log_security_audit_event(
+        db=db,
+        event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
+        action="PROXIMITY_SESSION_STARTED",
+        details=f"Proximity session {session.id} started with classroom {classroom.room_code if classroom else 'N/A'}",
+        user_id=current_user.id
+    )
+
+    return {
+        "session_id": session.id,
+        "status": session.status.value,
+        "session_date": session.session_date,
+        "period": session.period,
+        "classroom_id": session.classroom_id,
+        "classroom_code": classroom.room_code if classroom else "",
+        "broadcast_payload": broadcast_payload,
+        "challenge_nonce": nonce,
+        "manual_fallback_code": short_code,
+        "remaining_seconds": remaining_sec,
+        "rssi_threshold": classroom.default_rssi_threshold if classroom else -75,
+        "geofence_radius_meters": classroom.geofence_radius_meters if classroom else 60
+    }
+
+
+@router.get("/session/{session_id}/live-challenge")
+def get_live_challenge(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns the active rotating challenge nonce and live counter for the faculty dashboard.
+    """
+    session = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if current_user.role == UserRole.TEACHER and current_user.teacher_profile:
+        if session.teacher_id != current_user.teacher_profile.id and current_user.role != UserRole.SUPER_ADMIN:
+            raise HTTPException(status_code=403, detail="Not authorized for this session")
+
+    if not session.ephemeral_secret:
+        session.ephemeral_secret = secrets.token_hex(32)
+        db.commit()
+
+    nonce, short_code, remaining_sec = generate_proximity_challenge(session.id, session.ephemeral_secret)
+    session.current_challenge = nonce
+    session.manual_fallback_code = short_code
     db.commit()
 
-    gs_id_setting = db.query(SystemSettings).filter(SystemSettings.key == "GOOGLE_SPREADSHEET_ID").first()
-    gs_id = gs_id_setting.value if gs_id_setting else settings.GOOGLE_SPREADSHEET_ID
+    total_enrolled = db.query(Student).filter(Student.section_id == session.section_id).count()
+    total_marked = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == session.id,
+        AttendanceRecord.status.in_([AttendanceStatus.PRESENT, "4"])
+    ).count()
 
-    if gs_id:
-        try:
-            creds_file = settings.GOOGLE_CREDENTIALS_FILE or os.path.join(settings.BACKEND_DIR, "credentials.json")
-            GoogleSheetsService.mark_all_absent(
-                credentials_json=creds_file,
-                spreadsheet_id=gs_id
+    classroom = session.classroom
+
+    return {
+        "session_id": session.id,
+        "status": session.status.value,
+        "challenge_nonce": nonce,
+        "broadcast_payload": f"SNIST|{session.id}|{nonce}|{int(time.time())}",
+        "manual_fallback_code": short_code,
+        "remaining_seconds": remaining_sec,
+        "total_enrolled": total_enrolled,
+        "total_marked": total_marked,
+        "classroom_code": classroom.room_code if classroom else "",
+        "rssi_threshold": classroom.default_rssi_threshold if classroom else -75
+    }
+
+
+@router.post("/proximity-submit")
+def submit_proximity_attendance(
+    req: ProximitySubmitRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Concurrent Proximity-Verified Attendance Submission Endpoint.
+    Validates: student identity, 30-minute device lock, session status, section membership,
+    ephemeral cryptographic challenge, coarse geofence, and fine in-room RSSI proximity.
+    """
+    t0 = time.perf_counter()
+
+    if current_user.role != UserRole.STUDENT or not current_user.student_profile:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only authenticated students can submit proximity attendance."
+        )
+
+    student = current_user.student_profile
+    from app.core.device_security import log_security_audit_event, SecurityEventType
+
+    # 1. Device Binding Verification (ADR-004)
+    device_public_id = request.headers.get("x-device-public-id", "").strip()
+    if device_public_id:
+        from app.models.models import DeviceRegistration, DeviceAccountBinding, BindingStatus
+        device = db.query(DeviceRegistration).filter(DeviceRegistration.device_public_id == device_public_id).first()
+        if device and not device.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Device has been revoked or disabled by system administrator."
             )
-        except Exception as ex:
-            print(f"GSheets Mark All Absent Error: {str(ex)}")
+        now_dt = datetime.utcnow()
+        other_binding = db.query(DeviceAccountBinding).filter(
+            DeviceAccountBinding.device_id == (device.id if device else -1),
+            DeviceAccountBinding.status == BindingStatus.ACTIVE,
+            DeviceAccountBinding.expires_at > now_dt,
+            DeviceAccountBinding.roll_number != student.roll_number
+        ).first()
+        if other_binding:
+            log_security_audit_event(
+                db=db,
+                event_type=SecurityEventType.ACCOUNT_SWITCH_ATTEMPT,
+                action="ACCOUNT_SWITCH_ATTEMPT",
+                details=f"Proximity submit from device bound to {other_binding.roll_number} attempted by {student.roll_number}",
+                roll_number=student.roll_number,
+                device_id=device.id if device else None
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This device is temporarily associated with another student account. Please try again after the current security window expires."
+            )
 
-    return {"status": "SUCCESS", "message": "All students marked as ABSENT across system and Google Sheets"}
+    # 2. Session Lookup & Validation
+    session_meta = get_cached_session_meta(db, req.session_id)
+    if not session_meta:
+        raise HTTPException(status_code=404, detail="Attendance session not found")
+
+    status_str = getattr(session_meta["status"], "value", str(session_meta["status"]))
+    if status_str == "LOCKED":
+        raise HTTPException(status_code=400, detail="Attendance session is locked")
+
+    session = db.query(AttendanceSession).filter(AttendanceSession.id == req.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Attendance session not found")
+
+    # 3. Section Membership Verification
+    if student.section_id != session.section_id:
+        log_security_audit_event(
+            db=db,
+            event_type=SecurityEventType.ATTENDANCE_REJECTED,
+            action="SECTION_MISMATCH_REJECTED",
+            details=f"Student {student.roll_number} does not belong to section {session.section.name if session.section else session.section_id}",
+            user_id=current_user.id,
+            roll_number=student.roll_number
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Attendance Rejected: Student {student.roll_number} does not belong to class section {session.section.name if session.section else ''}."
+        )
+
+    # 4. Ephemeral Cryptographic Challenge Nonce Verification
+    if not session.ephemeral_secret:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Session has not initialized proximity security parameters."
+        )
+
+    is_challenge_valid = verify_proximity_challenge(
+        nonce=req.challenge_nonce,
+        session_id=session.id,
+        secret=session.ephemeral_secret,
+        window_seconds=15,
+        tolerance_windows=1
+    )
+
+    if not is_challenge_valid:
+        log_security_audit_event(
+            db=db,
+            event_type=SecurityEventType.ATTENDANCE_REJECTED,
+            action="CHALLENGE_NONCE_REJECTED",
+            details=f"Expired or invalid challenge nonce '{req.challenge_nonce}' for session {session.id}",
+            user_id=current_user.id,
+            roll_number=student.roll_number
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Attendance Rejected: Invalid or expired proximity challenge nonce. Please refresh and retry."
+        )
+
+    # 5. Coarse Geofence Validation
+    classroom = session.classroom
+    dist_meters = None
+    if classroom and classroom.center_latitude and classroom.center_longitude:
+        dist_meters = haversine_distance(
+            req.latitude, req.longitude,
+            classroom.center_latitude, classroom.center_longitude
+        )
+        if dist_meters > classroom.geofence_radius_meters:
+            log_security_audit_event(
+                db=db,
+                event_type=SecurityEventType.ATTENDANCE_REJECTED,
+                action="GEOFENCE_REJECTED",
+                details=f"Student {student.roll_number} outside classroom {classroom.room_code}: {round(dist_meters, 1)}m away (max {classroom.geofence_radius_meters}m)",
+                user_id=current_user.id,
+                roll_number=student.roll_number
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Attendance Rejected: Outside classroom geofence ({round(dist_meters, 1)}m away, allowed radius {classroom.geofence_radius_meters}m)."
+            )
+
+    # 6. Fine Proximity (RSSI) Validation & Anomaly Flagging
+    threshold = classroom.default_rssi_threshold if classroom else -75
+    tier = (req.proximity_tier or "BLE").upper()
+
+    if tier == "BLE" and req.median_rssi is not None:
+        if req.median_rssi < (threshold - 10):
+            log_security_audit_event(
+                db=db,
+                event_type=SecurityEventType.ATTENDANCE_REJECTED,
+                action="PROXIMITY_RSSI_REJECTED",
+                details=f"Student {student.roll_number} RSSI {req.median_rssi} dBm too weak (required >= {threshold} dBm)",
+                user_id=current_user.id,
+                roll_number=student.roll_number
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Attendance Rejected: In-room proximity signal too weak ({req.median_rssi} dBm, required >= {threshold} dBm)."
+            )
+        elif req.median_rssi < threshold:
+            # Borderline RSSI: Deterministically ACCEPT, but record non-decision review flag
+            review = AttendanceAuditReview(
+                session_id=session.id,
+                student_id=student.id,
+                roll_number=student.roll_number,
+                event_type="BORDERLINE_RSSI",
+                measured_rssi=req.median_rssi,
+                target_threshold=threshold,
+                latitude=req.latitude,
+                longitude=req.longitude,
+                calculated_distance_meters=dist_meters,
+                details=f"Borderline RSSI ({req.median_rssi} dBm vs target {threshold} dBm) in {classroom.room_code if classroom else 'room'}"
+            )
+            db.add(review)
+
+    # OS Mock Location Flagging
+    if req.is_mock_location:
+        review = AttendanceAuditReview(
+            session_id=session.id,
+            student_id=student.id,
+            roll_number=student.roll_number,
+            event_type="MOCK_LOCATION_FLAG",
+            latitude=req.latitude,
+            longitude=req.longitude,
+            calculated_distance_meters=dist_meters,
+            details="Client OS reported mock location provider enabled"
+        )
+        db.add(review)
+
+    # 7. Idempotent Attendance Record Insert / Update
+    period_count = max(1, min(8, req.period_count or 4))
+    scan_mode_val = f"PROXIMITY_{tier}"
+    now = datetime.utcnow()
+
+    existing = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == session.id,
+        AttendanceRecord.student_id == student.id
+    ).first()
+
+    if existing:
+        existing.status = AttendanceStatus.PRESENT
+        existing.period_count = period_count
+        existing.scan_mode = scan_mode_val
+        existing.verified_scan_mode = scan_mode_val
+        existing.measured_rssi = req.median_rssi
+        existing.location_accuracy_meters = req.location_accuracy_meters
+        existing.challenge_latency_ms = int((time.perf_counter() - t0) * 1000)
+        existing.scanned_at = now
+    else:
+        new_record = AttendanceRecord(
+            session_id=session.id,
+            student_id=student.id,
+            roll_number=student.roll_number,
+            session_date=session.session_date,
+            period_count=period_count,
+            status=AttendanceStatus.PRESENT,
+            scan_mode=scan_mode_val,
+            verified_scan_mode=scan_mode_val,
+            measured_rssi=req.median_rssi,
+            location_accuracy_meters=req.location_accuracy_meters,
+            challenge_latency_ms=int((time.perf_counter() - t0) * 1000),
+            scanned_at=now
+        )
+        db.add(new_record)
+
+    db.commit()
+
+    # 8. Multi-Target Sync in Background
+    gs_id = session_meta["teacher_gsheet_id"]
+    date_formatted = datetime.now().strftime("%d/%m/%Y")
+    background_tasks.add_task(
+        _async_post_scan_tasks,
+        roll_number=student.roll_number,
+        date_formatted=date_formatted,
+        student_name=student.name,
+        dept_code=session_meta["dept_code"],
+        year_name=session_meta["year_name"],
+        sec_name=session_meta["section_name"],
+        sub_name=session_meta["subject_name"],
+        period=session_meta["period"],
+        teacher_name=session_meta["teacher_name"],
+        gs_id=gs_id,
+        period_count=period_count
+    )
+
+    dur_ms = round((time.perf_counter() - t0) * 1000, 2)
+    logger.info(f"Proximity attendance recorded in {dur_ms}ms for {student.roll_number} (session {session.id})")
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Attendance recorded via proximity verification for {student.name} ({period_count} periods)",
+        "roll_number": student.roll_number,
+        "student_name": student.name,
+        "verified_scan_mode": scan_mode_val,
+        "measured_rssi": req.median_rssi,
+        "scanned_at": now.strftime("%H:%M:%S")
+    }
+
+
+@router.post("/manual-code-submit")
+def submit_manual_code_attendance(
+    req: ManualCodeSubmitRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Student Fallback Endpoint: Submits the displayed 4-character rotating short code.
+    Enforces student identity, section membership, short-code validity, and coarse geofence.
+    """
+    if current_user.role != UserRole.STUDENT or not current_user.student_profile:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only authenticated students can submit attendance."
+        )
+
+    student = current_user.student_profile
+    session_meta = get_cached_session_meta(db, req.session_id)
+    if not session_meta or session_meta["status"] == SessionStatus.LOCKED:
+        raise HTTPException(status_code=400, detail="Attendance session not found or locked")
+
+    session = db.query(AttendanceSession).filter(AttendanceSession.id == req.session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Attendance session not found")
+
+    if student.section_id != session.section_id:
+        raise HTTPException(status_code=400, detail="Student does not belong to class section")
+
+    # Verify rotating short code
+    if not session.ephemeral_secret:
+        raise HTTPException(status_code=400, detail="Session has not initialized proximity security parameters")
+
+    is_code_valid = verify_manual_short_code(
+        code=req.code,
+        session_id=session.id,
+        secret=session.ephemeral_secret,
+        window_seconds=15,
+        tolerance_windows=2
+    )
+
+    if not is_code_valid:
+        raise HTTPException(status_code=400, detail="Invalid or expired short code. Please check the screen and retry.")
+
+    # Validate coarse geofence
+    classroom = session.classroom
+    dist_meters = None
+    if classroom and classroom.center_latitude and classroom.center_longitude:
+        dist_meters = haversine_distance(
+            req.latitude, req.longitude,
+            classroom.center_latitude, classroom.center_longitude
+        )
+        if dist_meters > classroom.geofence_radius_meters:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Attendance Rejected: Outside classroom geofence ({round(dist_meters, 1)}m away)."
+            )
+
+    period_count = max(1, min(8, req.period_count or 4))
+    now = datetime.utcnow()
+
+    existing = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == session.id,
+        AttendanceRecord.student_id == student.id
+    ).first()
+
+    if existing:
+        existing.status = AttendanceStatus.PRESENT
+        existing.period_count = period_count
+        existing.scan_mode = "PROXIMITY_CODE"
+        existing.verified_scan_mode = "PROXIMITY_CODE"
+        existing.scanned_at = now
+    else:
+        new_record = AttendanceRecord(
+            session_id=session.id,
+            student_id=student.id,
+            roll_number=student.roll_number,
+            session_date=session.session_date,
+            period_count=period_count,
+            status=AttendanceStatus.PRESENT,
+            scan_mode="PROXIMITY_CODE",
+            verified_scan_mode="PROXIMITY_CODE",
+            scanned_at=now
+        )
+        db.add(new_record)
+
+    db.commit()
+
+    gs_id = session_meta["teacher_gsheet_id"]
+    date_formatted = datetime.now().strftime("%d/%m/%Y")
+    background_tasks.add_task(
+        _async_post_scan_tasks,
+        roll_number=student.roll_number,
+        date_formatted=date_formatted,
+        student_name=student.name,
+        dept_code=session_meta["dept_code"],
+        year_name=session_meta["year_name"],
+        sec_name=session_meta["section_name"],
+        sub_name=session_meta["subject_name"],
+        period=session_meta["period"],
+        teacher_name=session_meta["teacher_name"],
+        gs_id=gs_id,
+        period_count=period_count
+    )
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Attendance marked via short-code verification for {student.name}",
+        "roll_number": student.roll_number,
+        "verified_scan_mode": "PROXIMITY_CODE",
+        "scanned_at": now.strftime("%H:%M:%S")
+    }
+
+
+@router.get("/sessions/{session_id}/audit-reviews")
+def get_session_audit_reviews(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Returns flagged anomaly reviews for human audit inspection.
+    """
+    if current_user.role not in [UserRole.TEACHER, UserRole.SUPER_ADMIN]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    reviews = db.query(AttendanceAuditReview).filter(
+        AttendanceAuditReview.session_id == session_id
+    ).order_by(AttendanceAuditReview.created_at.desc()).all()
+
+    return [
+        {
+            "id": r.id,
+            "student_id": r.student_id,
+            "roll_number": r.roll_number,
+            "event_type": r.event_type,
+            "measured_rssi": r.measured_rssi,
+            "target_threshold": r.target_threshold,
+            "latitude": r.latitude,
+            "longitude": r.longitude,
+            "calculated_distance_meters": r.calculated_distance_meters,
+            "details": r.details,
+            "created_at": r.created_at.isoformat() if r.created_at else ""
+        }
+        for r in reviews
+    ]
+

@@ -128,8 +128,17 @@ class Student(Base):
     section_id = Column(Integer, nullable=False)
     email = Column(String(100), nullable=True)
     mobile = Column(String(20), nullable=True)
+    device_hash = Column(String(128), nullable=True)
     agency = Column(String(100), default="Regular")
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    @property
+    def roll_no(self):
+        return self.roll_number
+
+    @roll_no.setter
+    def roll_no(self, val):
+        self.roll_number = val
 
     user = relationship("User", primaryjoin="Student.user_id==User.id", foreign_keys="[Student.user_id]", back_populates="student_profile")
     department = relationship("Department", primaryjoin="Student.department_id==Department.id", foreign_keys="[Student.department_id]", back_populates="students")
@@ -150,6 +159,24 @@ class TeacherAssignment(Base):
     subject = relationship("Subject", primaryjoin="TeacherAssignment.subject_id==Subject.id", foreign_keys="[TeacherAssignment.subject_id]", back_populates="assignments")
     section = relationship("Section", primaryjoin="TeacherAssignment.section_id==Section.id", foreign_keys="[TeacherAssignment.section_id]", back_populates="assignments")
 
+class Classroom(Base):
+    __tablename__ = "qr_classrooms"
+
+    id = Column(Integer, primary_key=True)
+    room_code = Column(String(50), unique=True, nullable=False) # e.g. ROOM-304-BLOCK-B
+    building = Column(String(100), nullable=False)
+    floor = Column(Integer, default=1, nullable=False)
+    center_latitude = Column(Float, nullable=False)
+    center_longitude = Column(Float, nullable=False)
+    geofence_radius_meters = Column(Integer, default=60, nullable=False)
+    default_rssi_threshold = Column(Integer, default=-75, nullable=False) # dBm
+    uwb_supported = Column(Boolean, default=False, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    sessions = relationship("AttendanceSession", primaryjoin="Classroom.id==AttendanceSession.classroom_id", foreign_keys="[AttendanceSession.classroom_id]")
+
 class AttendanceSession(Base):
     __tablename__ = "qr_attendance_sessions"
     __table_args__ = (
@@ -166,10 +193,25 @@ class AttendanceSession(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     locked_at = Column(DateTime, nullable=True)
 
+    # Proximity & Cryptographic Challenge Fields
+    classroom_id = Column(Integer, nullable=True)
+    faculty_id = Column(Integer, nullable=True)
+    room_id = Column(Integer, nullable=True)
+    starts_at = Column(DateTime, default=datetime.utcnow)
+    locks_at = Column(DateTime, nullable=True)
+    kill_switch_active = Column(Boolean, default=False)
+    ephemeral_secret = Column(String(64), nullable=True)
+    current_challenge = Column(String(64), nullable=True)
+    challenge_generated_at = Column(DateTime, nullable=True)
+    manual_fallback_code = Column(String(8), nullable=True)
+    manual_code_expires_at = Column(DateTime, nullable=True)
+
     teacher = relationship("Teacher", primaryjoin="AttendanceSession.teacher_id==Teacher.id", foreign_keys="[AttendanceSession.teacher_id]", back_populates="sessions")
     subject = relationship("Subject", primaryjoin="AttendanceSession.subject_id==Subject.id", foreign_keys="[AttendanceSession.subject_id]")
     section = relationship("Section", primaryjoin="AttendanceSession.section_id==Section.id", foreign_keys="[AttendanceSession.section_id]")
+    classroom = relationship("Classroom", primaryjoin="AttendanceSession.classroom_id==Classroom.id", foreign_keys="[AttendanceSession.classroom_id]", overlaps="sessions")
     records = relationship("AttendanceRecord", primaryjoin="AttendanceSession.id==AttendanceRecord.session_id", foreign_keys="[AttendanceRecord.session_id]", back_populates="session", cascade="all, delete-orphan")
+    audit_reviews = relationship("AttendanceAuditReview", primaryjoin="AttendanceSession.id==AttendanceAuditReview.session_id", foreign_keys="[AttendanceAuditReview.session_id]", cascade="all, delete-orphan")
 
 class AttendanceRecord(Base):
     __tablename__ = "qr_attendance_records"
@@ -188,10 +230,46 @@ class AttendanceRecord(Base):
     period_count = Column(Integer, default=4, nullable=True)
     status = Column(SQLEnum(AttendanceStatus), default=AttendanceStatus.PRESENT, nullable=False)
     scan_mode = Column(String(20), default="QR") # QR or MANUAL
+    verified_scan_mode = Column(String(30), default="QR", nullable=True) # PROXIMITY_BLE, PROXIMITY_UWB, PROXIMITY_CODE, QR, MANUAL
+    method = Column(String(20), default="ble", nullable=True) # ble, code, manual
+    measured_rssi = Column(Integer, nullable=True)
+    rssi = Column(Integer, nullable=True)
+    location_accuracy_meters = Column(Float, nullable=True)
+    geo_accuracy_m = Column(Float, nullable=True)
+    challenge_latency_ms = Column(Integer, nullable=True)
     scanned_at = Column(DateTime, default=datetime.utcnow)
+    marked_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("AttendanceSession", primaryjoin="AttendanceRecord.session_id==AttendanceSession.id", foreign_keys="[AttendanceRecord.session_id]", back_populates="records")
     student = relationship("Student", primaryjoin="AttendanceRecord.student_id==Student.id", foreign_keys="[AttendanceRecord.student_id]", back_populates="records")
+
+class AttendanceAuditReview(Base):
+    __tablename__ = "qr_attendance_audit_reviews"
+    __table_args__ = (
+        Index("idx_audit_review_session", "session_id"),
+        Index("idx_audit_review_student", "student_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    record_id = Column(Integer, nullable=True)
+    session_id = Column(Integer, nullable=False)
+    student_id = Column(Integer, nullable=False)
+    roll_number = Column(String(50), nullable=False)
+    flag = Column(String(50), nullable=True) # rssi_borderline, geo_coarse, manual
+    event_type = Column(String(50), nullable=False) # BORDERLINE_RSSI, MOCK_LOCATION_FLAG, CLOCK_DRIFT_WARNING, OFFLINE_REPLAY
+    measured_rssi = Column(Integer, nullable=True)
+    target_threshold = Column(Integer, nullable=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    calculated_distance_meters = Column(Float, nullable=True)
+    os_integrity_flags = Column(Text, nullable=True) # JSON text
+    details = Column(Text, nullable=True)
+    resolved_by = Column(String(100), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    session = relationship("AttendanceSession", primaryjoin="AttendanceAuditReview.session_id==AttendanceSession.id", foreign_keys="[AttendanceAuditReview.session_id]", overlaps="audit_reviews")
+    student = relationship("Student", primaryjoin="AttendanceAuditReview.student_id==Student.id", foreign_keys="[AttendanceAuditReview.student_id]")
 
 class QRToken(Base):
     __tablename__ = "qr_tokens"
@@ -259,4 +337,77 @@ class AuditLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", primaryjoin="AuditLog.user_id==User.id", foreign_keys="[AuditLog.user_id]", back_populates="audit_logs")
+
+# ============================================================================
+# PROXPRESENCE CORE DOMAIN MODELS (PostgreSQL / SQLite Compatible)
+# ============================================================================
+
+class DeviceBinding(Base):
+    """
+    30-minute device-to-student lock per session.
+    Enforces one device_hash <-> one student per 30-min window.
+    Violation yields HTTP 403.
+    """
+    __tablename__ = "device_bindings"
+
+    id = Column(Integer, primary_key=True)
+    device_hash = Column(String(128), nullable=False)
+    student_id = Column(Integer, nullable=False)
+    bound_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=True)
+
+class RotatingCode(Base):
+    """
+    TOTP-style 4-char rotating codes.
+    code_hash is SHA-256 of code to ensure secrets/codes are never stored plaintext.
+    """
+    __tablename__ = "rotating_codes"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer, nullable=False)
+    code_hash = Column(String(64), nullable=False)
+    generated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    valid_until = Column(DateTime, nullable=False)
+
+class SheetsSyncDLQ(Base):
+    """
+    Dead-Letter Queue for failed Google Sheets batchUpdate sync attempts.
+    Maintains payload, retry count, and diagnostic errors for replay.
+    """
+    __tablename__ = "sheets_sync_dlq"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer, nullable=False)
+    payload = Column(Text, nullable=False)
+    retry_count = Column(Integer, default=0, nullable=False)
+    error_message = Column(Text, nullable=True)
+    last_attempted_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String(50), default="PENDING", nullable=False) # PENDING, RETRIED, FAILED, RESOLVED
+
+class StudentCanonical(Base):
+    """
+    Canonical students table: students(id, roll_no, section, name, device_hash)
+    """
+    __tablename__ = "students"
+
+    id = Column(Integer, primary_key=True)
+    roll_no = Column(String(50), unique=True, nullable=False)
+    section = Column(String(50), nullable=False)
+    name = Column(String(100), nullable=False)
+    device_hash = Column(String(128), nullable=True)
+
+class SessionCanonical(Base):
+    """
+    Canonical sessions table: sessions(id, faculty_id, room_id, section, starts_at, locks_at, status)
+    """
+    __tablename__ = "sessions"
+
+    id = Column(Integer, primary_key=True)
+    faculty_id = Column(Integer, nullable=False)
+    room_id = Column(Integer, nullable=False)
+    section = Column(String(50), nullable=False)
+    starts_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    locks_at = Column(DateTime, nullable=True)
+    status = Column(String(20), default="OPEN", nullable=False)
+
 

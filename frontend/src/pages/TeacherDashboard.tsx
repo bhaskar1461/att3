@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { apiRequest } from '../services/api';
-import { TeacherAssignment, AttendanceSession, HistoricalAttendanceSession } from '../types';
+import { TeacherAssignment, AttendanceSession, HistoricalAttendanceSession, Classroom } from '../types';
 import { 
   Camera, Lock, Unlock, RefreshCw, Search, Calendar, History, 
   FileSpreadsheet, ExternalLink, Users, Zap, CheckCircle, X,
-  UserCheck, UserX, AlertCircle, Sparkles, ChevronRight
+  UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Radio
 } from 'lucide-react';
 import { QRScannerModal } from '../components/QRScannerModal';
 import { ManualSearchModal } from '../components/ManualSearchModal';
 import { ClassExcelRegisterModal } from '../components/ClassExcelRegisterModal';
+import { ProximityControllerModal } from '../components/ProximityControllerModal';
 import { Toast } from '../components/Toast';
 
 export const TeacherDashboard: React.FC = () => {
@@ -32,6 +33,9 @@ export const TeacherDashboard: React.FC = () => {
   const [showUnmarkedModal, setShowUnmarkedModal] = useState(false);
 
   const [isScannerOpen, setIsScannerOpen] = useState(false);
+  const [isProximityOpen, setIsProximityOpen] = useState(false);
+  const [classrooms, setClassrooms] = useState<Classroom[]>([]);
+  const [selectedClassroomId, setSelectedClassroomId] = useState<number | null>(null);
   const [isManualOpen, setIsManualOpen] = useState(false);
   const [isExcelRegisterOpen, setIsExcelRegisterOpen] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
@@ -47,7 +51,20 @@ export const TeacherDashboard: React.FC = () => {
     fetchHistoricalSessions();
     fetchTeacherProfile();
     fetchCurrentClass();
+    fetchClassrooms();
   }, []);
+
+  const fetchClassrooms = async () => {
+    try {
+      const data: any = await apiRequest('/attendance/classrooms');
+      setClassrooms(data);
+      if (data && data.length > 0) {
+        setSelectedClassroomId(data[0].id);
+      }
+    } catch (err) {
+      console.warn('Failed to load classrooms:', err);
+    }
+  };
 
   const fetchTeacherProfile = async () => {
     try {
@@ -128,6 +145,36 @@ export const TeacherDashboard: React.FC = () => {
       setToast({ message: `Session started for ${period}!`, type: 'success' });
     } catch (err: any) {
       setToast({ message: err.message || 'Failed to start session', type: 'error' });
+    } finally {
+      setIsStartingSession(false);
+    }
+  };
+
+  const handleStartProximitySession = async (targetDate?: string) => {
+    if (!selectedAssignment) {
+      setToast({ message: 'Please select a class first.', type: 'warning' });
+      return;
+    }
+    const sessionDate = targetDate || selectedDate;
+    setIsStartingSession(true);
+    try {
+      const response: any = await apiRequest('/attendance/session/start-proximity', {
+        method: 'POST',
+        body: JSON.stringify({
+          subject_id: selectedAssignment.subject_id,
+          section_id: selectedAssignment.section_id,
+          period: period,
+          date: sessionDate,
+          classroom_id: selectedClassroomId || (classrooms.length > 0 ? classrooms[0].id : 1)
+        })
+      });
+      await fetchSessionDetails(response.session_id);
+      fetchHistoricalSessions();
+      fetchCurrentClass();
+      setIsProximityOpen(true);
+      setToast({ message: `Proximity session active for ${period}!`, type: 'success' });
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to start proximity session', type: 'error' });
     } finally {
       setIsStartingSession(false);
     }
@@ -502,27 +549,35 @@ export const TeacherDashboard: React.FC = () => {
               </div>
 
               {/* Action Buttons Bar */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-1">
+                <button
+                  onClick={() => setIsProximityOpen(true)}
+                  disabled={activeSession.status !== 'OPEN'}
+                  className="py-3 px-3.5 bg-gradient-to-r from-emerald-400 to-teal-500 hover:from-emerald-300 hover:to-teal-400 disabled:opacity-50 text-[#001e40] font-black text-xs sm:text-sm rounded-xl transition shadow-lg flex items-center justify-center gap-2 active:scale-98"
+                >
+                  <Radio className="w-4 h-4 text-[#001e40] animate-pulse" /> Proximity HUD
+                </button>
+
                 <button
                   onClick={() => setIsScannerOpen(true)}
                   disabled={activeSession.status !== 'OPEN'}
-                  className="py-3.5 px-4 bg-[#FF9F0A] hover:bg-[#e08b05] disabled:opacity-50 text-[#001e40] font-black text-sm rounded-xl transition shadow-lg flex items-center justify-center gap-2 active:scale-98"
+                  className="py-3 px-3.5 bg-[#FF9F0A] hover:bg-[#e08b05] disabled:opacity-50 text-[#001e40] font-black text-xs sm:text-sm rounded-xl transition shadow-lg flex items-center justify-center gap-2 active:scale-98"
                 >
-                  <Camera className="w-5 h-5" /> Open QR Scanner
+                  <Camera className="w-4 h-4" /> QR Scanner
                 </button>
 
                 <button
                   onClick={handleFetchUnmarkedStudents}
-                  className="py-3.5 px-4 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl border border-white/20 transition flex items-center justify-center gap-2"
+                  className="py-3 px-3.5 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl border border-white/20 transition flex items-center justify-center gap-2"
                 >
                   <Users className="w-4 h-4 text-amber-300" /> Absence Callout
                 </button>
 
                 <button
                   onClick={() => setIsManualOpen(true)}
-                  className="py-3.5 px-4 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl border border-white/20 transition flex items-center justify-center gap-2"
+                  className="py-3 px-3.5 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl border border-white/20 transition flex items-center justify-center gap-2"
                 >
-                  <Search className="w-4 h-4 text-cyan-300" /> Manual Search / Mark
+                  <Search className="w-4 h-4 text-cyan-300" /> Manual Search
                 </button>
               </div>
 
@@ -596,7 +651,7 @@ export const TeacherDashboard: React.FC = () => {
                 </p>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1.5">Assigned Class / Subject</label>
                   <select
@@ -632,16 +687,42 @@ export const TeacherDashboard: React.FC = () => {
                     <option value="Period 8">Period 8 (03:40 - 04:30)</option>
                   </select>
                 </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1.5">Classroom Location</label>
+                  <select
+                    value={selectedClassroomId || ''}
+                    onChange={(e) => setSelectedClassroomId(Number(e.target.value))}
+                    className="snist-input w-full font-semibold"
+                  >
+                    {classrooms.map(c => (
+                      <option key={c.id} value={c.id}>
+                        {c.room_code} ({c.building})
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
-              <button
-                onClick={() => handleStartSession(todayStr)}
-                disabled={isStartingSession}
-                className="w-full py-3.5 snist-btn-primary font-bold text-sm flex items-center justify-center gap-2 shadow-md transition active:scale-98"
-              >
-                <Camera className="w-5 h-5" /> 
-                {isStartingSession ? 'Starting Session...' : 'Start Attendance Session & Launch Scanner'}
-              </button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+                <button
+                  onClick={() => handleStartProximitySession(todayStr)}
+                  disabled={isStartingSession}
+                  className="py-3.5 px-4 bg-gradient-to-r from-[#001e40] to-[#15347e] hover:from-[#002a5c] hover:to-[#1a429e] text-white font-bold text-sm rounded-xl transition shadow-lg flex items-center justify-center gap-2 border border-blue-500/30 active:scale-98"
+                >
+                  <Radio className="w-5 h-5 text-emerald-400 animate-pulse" />
+                  {isStartingSession ? 'Starting Session...' : 'Start Proximity Session (100+ Mode)'}
+                </button>
+
+                <button
+                  onClick={() => handleStartSession(todayStr)}
+                  disabled={isStartingSession}
+                  className="py-3.5 px-4 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm rounded-xl transition flex items-center justify-center gap-2 border border-slate-300 active:scale-98"
+                >
+                  <Camera className="w-5 h-5 text-amber-600" />
+                  {isStartingSession ? 'Starting...' : 'Start QR Camera Session (Fallback)'}
+                </button>
+              </div>
             </div>
           )}
 
@@ -943,6 +1024,30 @@ export const TeacherDashboard: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Proximity Controller Live HUD */}
+      {isProximityOpen && activeSession && (
+        <ProximityControllerModal
+          sessionId={activeSession.session_id}
+          sessionDate={activeSession.session_date}
+          periodText={activeSession.period}
+          subjectName={activeSession.subject_name}
+          sectionName={activeSession.section_name}
+          classroomCode={activeSession.classroom_code || classrooms.find(c => c.id === selectedClassroomId)?.room_code}
+          onClose={() => {
+            setIsProximityOpen(false);
+            fetchSessionDetails(activeSession.session_id);
+          }}
+          onSwitchToQR={() => {
+            setIsProximityOpen(false);
+            setIsScannerOpen(true);
+          }}
+          onSessionLocked={() => {
+            fetchSessionDetails(activeSession.session_id);
+            fetchHistoricalSessions();
+          }}
+        />
       )}
 
       {/* QR Camera Modal */}

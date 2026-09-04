@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { apiRequest } from '../services/api';
-import { Download, QrCode, Calendar, Clock, MapPin, User, CheckCircle, PieChart, Home, FileText, Settings, Bell, ChevronRight, Zap, X, Award, BookOpen } from 'lucide-react';
+import { Download, QrCode, Calendar, Clock, MapPin, User, CheckCircle, PieChart, Home, FileText, Settings, Bell, ChevronRight, Zap, X, Award, BookOpen, Radio } from 'lucide-react';
+import { StudentProximityModal } from '../components/StudentProximityModal';
 import { Toast } from '../components/Toast';
 
 export const StudentPortal: React.FC = () => {
@@ -11,6 +12,7 @@ export const StudentPortal: React.FC = () => {
   const [formattedDate, setFormattedDate] = useState<string>('');
   const [summary, setSummary] = useState<any>(null);
   const [showQRModal, setShowQRModal] = useState<boolean>(false);
+  const [showProximityModal, setShowProximityModal] = useState<boolean>(false);
   const [showSubjectModal, setShowSubjectModal] = useState<boolean>(false);
   const [activeNavTab, setActiveNavTab] = useState<'home' | 'attendance' | 'timetable'>('home');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -149,11 +151,18 @@ export const StudentPortal: React.FC = () => {
                 </p>
               </div>
 
-              <div className="flex-shrink-0">
-                <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4 text-center border border-white/10 min-w-[120px]">
-                  <span className="block text-[10px] font-bold text-[#a7c8ff] mb-1">SESSION TIME</span>
-                  <span className="block text-lg font-extrabold font-mono">09:30 AM</span>
+              <div className="flex-shrink-0 flex flex-col items-stretch gap-2">
+                <div className="bg-white/10 backdrop-blur-sm rounded-xl p-3 text-center border border-white/10 min-w-[120px]">
+                  <span className="block text-[10px] font-bold text-[#a7c8ff] mb-0.5">SESSION TIME</span>
+                  <span className="block text-base font-extrabold font-mono">09:30 AM</span>
                 </div>
+                <button
+                  onClick={() => setShowProximityModal(true)}
+                  className="py-2.5 px-3 bg-gradient-to-r from-emerald-400 to-teal-400 hover:from-emerald-300 hover:to-teal-300 text-[#001e40] font-black text-xs uppercase tracking-wider rounded-xl transition shadow flex items-center justify-center gap-1.5 active:scale-98"
+                >
+                  <Radio className="w-3.5 h-3.5 animate-pulse" />
+                  1-Tap Proximity
+                </button>
               </div>
             </div>
 
@@ -273,6 +282,14 @@ export const StudentPortal: React.FC = () => {
                 📅 {formattedDate || 'TODAY'} {isMakeup ? '• Make-up Class' : ''}
               </span>
             </div>
+
+            <button
+              onClick={() => setShowProximityModal(true)}
+              className="w-full mb-2.5 py-2.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs rounded-xl transition shadow flex items-center justify-center gap-1.5 active:scale-98"
+            >
+              <Radio className="w-3.5 h-3.5 text-emerald-200 animate-pulse" />
+              1-Tap Proximity Attendance
+            </button>
 
             <div className="flex items-center gap-2 w-full">
               <button 
@@ -631,6 +648,17 @@ export const StudentPortal: React.FC = () => {
             </button>
           </div>
         </div>
+      )}
+
+      {/* 1-Tap Proximity Attendance Modal */}
+      {showProximityModal && (
+        <StudentProximityModal
+          onClose={() => setShowProximityModal(false)}
+          onSuccess={() => {
+            fetchStudentData();
+            setToast({ message: 'Attendance verified & confirmed via proximity!', type: 'success' });
+          }}
+        />
       )}
 
       {/* Mobile Bottom Navigation */}

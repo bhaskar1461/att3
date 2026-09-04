@@ -350,3 +350,193 @@ def decrypt_and_validate_qr_payload(qr_string: str) -> Dict[str, Any]:
     except Exception as e:
         raise ValueError(f"QR Validation Failed: {str(e)}")
 
+
+# --- Proximity & Geofencing Cryptographic Primitives ---
+
+import math
+from typing import Tuple
+
+def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Calculates great-circle distance between two geographical points in meters using the Haversine formula.
+    """
+    R = 6371000.0  # Earth's radius in meters
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = (math.sin(delta_phi / 2.0) ** 2 +
+         math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2)
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return R * c
+
+_UNAMBIGUOUS_CHARS = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+
+def _derive_short_code(raw_hmac: str) -> str:
+    """Derives a 4-character human-readable short code from HMAC hex string."""
+    val = int(raw_hmac[:8], 16)
+    code = []
+    base = len(_UNAMBIGUOUS_CHARS)
+    for _ in range(4):
+        val, rem = divmod(val, base)
+        code.append(_UNAMBIGUOUS_CHARS[rem])
+    return "".join(code)
+
+def generate_proximity_challenge(
+    session_id: int,
+    secret: str,
+    window_seconds: int = 15,
+    current_time: Optional[float] = None
+) -> Tuple[str, str, int]:
+    """
+    Generates server-authoritative ephemeral rotating challenge nonce and 4-character short code.
+    Returns: (challenge_nonce, manual_short_code, remaining_seconds_in_window)
+    """
+    t = current_time if current_time is not None else time.time()
+    time_window = int(t // window_seconds)
+    remaining_sec = int(window_seconds - (t % window_seconds))
+
+    msg = f"SNIST_PROX|{session_id}|{time_window}".encode('utf-8')
+    key = secret.encode('utf-8') if isinstance(secret, str) else secret
+    mac = hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+    nonce = mac[:16]
+    short_code = _derive_short_code(mac)
+    return nonce, short_code, remaining_sec
+
+def verify_proximity_challenge(
+    nonce: str,
+    session_id: int,
+    secret: str,
+    window_seconds: int = 15,
+    tolerance_windows: int = 1,
+    current_time: Optional[float] = None
+) -> bool:
+    """
+    Verifies that the submitted challenge nonce matches the active or immediately preceding rotating window.
+    Accounts for transmission latency and network delay (tolerance_windows = 1 covers +/- 15s).
+    """
+    if not nonce or not secret:
+        return False
+
+    t = current_time if current_time is not None else time.time()
+    current_window = int(t // window_seconds)
+    key = secret.encode('utf-8') if isinstance(secret, str) else secret
+
+    # Check current window, -1 window (grace for network in flight), and +1 window (minor clock drift)
+    for delta in range(-tolerance_windows, tolerance_windows + 1):
+        test_window = current_window + delta
+        msg = f"SNIST_PROX|{session_id}|{test_window}".encode('utf-8')
+        expected_nonce = hmac.new(key, msg, hashlib.sha256).hexdigest()[:16]
+        if hmac.compare_digest(nonce.strip().lower(), expected_nonce.lower()):
+            return True
+
+    return False
+
+def verify_manual_short_code(
+    code: str,
+    session_id: int,
+    secret: str,
+    window_seconds: int = 15,
+    tolerance_windows: int = 2,
+    current_time: Optional[float] = None
+) -> bool:
+    """
+    Verifies human-entered short code against active or recent windows.
+    """
+    if not code or not secret:
+        return False
+
+    clean_code = code.strip().upper()
+    t = current_time if current_time is not None else time.time()
+    current_window = int(t // window_seconds)
+    key = secret.encode('utf-8') if isinstance(secret, str) else secret
+
+    for delta in range(-tolerance_windows, tolerance_windows + 1):
+        test_window = current_window + delta
+        msg = f"SNIST_PROX|{session_id}|{test_window}".encode('utf-8')
+        expected_mac = hmac.new(key, msg, hashlib.sha256).hexdigest()
+        expected_code = _derive_short_code(expected_mac)
+        if hmac.compare_digest(clean_code, expected_code):
+            return True
+
+    return False
+
+# --- ProxPresence Tier 2 Rotating Code Engine ---
+
+def hash_rotating_code(code: str) -> str:
+    """Returns SHA-256 hash of rotating code so plaintext is never persisted in DB."""
+    return hashlib.sha256(code.strip().upper().encode('utf-8')).hexdigest()
+
+def generate_rotating_code(
+    session_id: int,
+    secret: str,
+    window_seconds: int = 15,
+    current_time: Optional[float] = None
+) -> Tuple[str, str, int]:
+    """
+    Tier 2: 4-character rotating code (15s rotation, HMAC-signed, TOTP-style).
+    HMAC(server_secret, session_id + time_bucket), never stored plaintext.
+    Returns: (code, code_hash, remaining_seconds_in_window)
+    """
+    t = current_time if current_time is not None else time.time()
+    time_bucket = int(t // window_seconds)
+    remaining_sec = int(window_seconds - (t % window_seconds))
+
+    msg = f"SNIST_PROX|{session_id}|{time_bucket}".encode('utf-8')
+    key = secret.encode('utf-8') if isinstance(secret, str) else secret
+    mac = hmac.new(key, msg, hashlib.sha256).hexdigest()
+
+    code = _derive_short_code(mac)
+    code_hash = hash_rotating_code(code)
+    return code, code_hash, remaining_sec
+
+def verify_rotating_code(
+    code: str,
+    session_id: int,
+    secret: str,
+    window_seconds: int = 15,
+    tolerance_windows: int = 2,
+    current_time: Optional[float] = None
+) -> bool:
+    """
+    Tier 2 Verifier: Server grace window: +-30s tolerance (tolerance_windows=2).
+    Checks current bucket and +- 2 windows ([-2, +2] buckets of 15s each).
+    Edge cases at bucket boundaries:
+    - t-14s: PASS
+    - t-15s: PASS
+    - t-16s: PASS
+    - t-31s: MUST FAIL
+    """
+    return verify_manual_short_code(
+        code=code,
+        session_id=session_id,
+        secret=secret,
+        window_seconds=window_seconds,
+        tolerance_windows=tolerance_windows,
+        current_time=current_time
+    )
+
+def validate_coarse_geofence(
+    client_lat: Optional[float],
+    client_lon: Optional[float],
+    classroom_lat: float,
+    classroom_lon: float,
+    geofence_radius_m: float,
+    tolerance_m: float = 25.0
+) -> Tuple[bool, float]:
+    """
+    Security Invariant 1:
+    geofence: coarse check only, radius = geofence_radius_meters + 25m tolerance.
+    Used as campus/building gate, NEVER as room-level proof.
+    Returns: (is_inside_geofence, distance_in_meters)
+    """
+    if client_lat is None or client_lon is None:
+        return False, 999999.0
+
+    dist = haversine_distance(client_lat, client_lon, classroom_lat, classroom_lon)
+    max_allowed = float(geofence_radius_m) + float(tolerance_m)
+    return dist <= max_allowed, dist
+
+
