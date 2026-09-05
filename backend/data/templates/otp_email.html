@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SNIST ERP — Verification Code</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f4f8;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; background-color: #ffffff;">
+        <!-- Header -->
+        <tr>
+            <td style="background: linear-gradient(135deg, #001e40 0%, #15347e 50%, #2f53d7 100%); padding: 24px; text-align: center;">
+                <h1 style="color: #ffffff; font-size: 18px; margin: 0;">SNIST ERP — Email Verification</h1>
+            </td>
+        </tr>
+
+        <!-- Body -->
+        <tr>
+            <td style="padding: 32px 24px; text-align: center;">
+                <p style="color: #333; font-size: 14px; margin: 0 0 24px;">Your one-time verification code is:</p>
+
+                <!-- OTP Code -->
+                <table cellpadding="0" cellspacing="0" style="margin: 0 auto;">
+                    <tr>
+                        <td style="background: #f0f4ff; border: 2px solid #2f53d7; border-radius: 12px; padding: 16px 32px;">
+                            <p style="margin: 0; color: #15347e; font-size: 36px; font-weight: 700; font-family: monospace; letter-spacing: 12px;">{{ otp_code }}</p>
+                        </td>
+                    </tr>
+                </table>
+
+                <p style="color: #666; font-size: 13px; margin: 24px 0 0;">
+                    This code expires in <strong>{{ expiry_minutes }} minutes</strong>.
+                </p>
+                <p style="color: #999; font-size: 12px; margin: 12px 0 0;">
+                    If you did not request this code, please ignore this email.
+                </p>
+            </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+            <td style="background: #f0f4f8; padding: 12px 24px; text-align: center; border-top: 1px solid #e2e8f0;">
+                <p style="color: #999; font-size: 10px; margin: 0;">SNIST ERP System — Automated Email</p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

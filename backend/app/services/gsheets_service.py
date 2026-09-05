@@ -616,28 +616,88 @@ class GoogleSheetsService:
         period_total: str = "4"
     ) -> bool:
         """
-        Syncs an entire session's attendance to Google Sheet:
-        Present rolls get "4", Absent rolls get "A".
+        Syncs an entire session's attendance to Google Sheet in a SINGLE atomic batch call:
+        Present rolls get "4" (or period_total), Absent rolls get "A".
+        Eliminates N+1 HTTP round-trips and Google Sheets API write quota throttling.
         """
         if not credentials_json or not spreadsheet_id:
+            logger.info("Google Sheets session sync skipped: Credentials or Spreadsheet ID missing.")
             return False
 
         try:
+            from datetime import datetime
+
+            def norm_d(d):
+                s = str(d).strip()
+                if not s:
+                    return ""
+                for fmt in ["%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d"]:
+                    try:
+                        dt = datetime.strptime(s, fmt)
+                        return f"{dt.day}/{dt.month}/{str(dt.year)[-2:]}"
+                    except ValueError:
+                        continue
+                parts = s.replace("-", "/").split("/")
+                if len(parts) == 3:
+                    day = str(int(parts[0])) if parts[0].isdigit() else parts[0]
+                    month = str(int(parts[1])) if parts[1].isdigit() else parts[1]
+                    year = parts[2][-2:] if len(parts[2]) == 4 else parts[2]
+                    return f"{day}/{month}/{year}"
+                return s
+
+            client = cls._get_client(credentials_json)
+            spreadsheet = client.open_by_key(spreadsheet_id)
+            try:
+                worksheet = spreadsheet.worksheet("Attendance Register")
+            except Exception:
+                worksheet = spreadsheet.sheet1
+
+            vals = worksheet.get_all_values()
+            if len(vals) < 6:
+                logger.warning("Sheet does not have SNIST layout headers yet.")
+                return False
+
+            row5 = vals[4]
+            target_date_norm = norm_d(date_str)
+            date_col_0idx = -1
+
+            # Locate date column in row 5 (columns E+, 0-based index 4+)
+            for c_idx in range(4, len(row5)):
+                d_val = str(row5[c_idx]).strip()
+                if d_val and norm_d(d_val) == target_date_norm:
+                    date_col_0idx = c_idx
+                    break
+
+            # If date column not found, append a new date column at the end
+            if date_col_0idx == -1:
+                date_col_0idx = max(len(row5), 4)
+                for r_i in range(len(vals)):
+                    while len(vals[r_i]) <= date_col_0idx:
+                        vals[r_i].append("")
+                vals[4][date_col_0idx] = target_date_norm
+                vals[5][date_col_0idx] = str(period_total)
+
             present_set = {str(r).strip().upper() for r in present_rolls}
-            for roll in all_section_rolls:
-                clean_roll = str(roll).strip().upper()
-                status = "4" if clean_roll in present_set else "A"
-                cls.record_attendance_in_gsheet(
-                    credentials_json=credentials_json,
-                    spreadsheet_id=spreadsheet_id,
-                    roll_number=clean_roll,
-                    date_str=date_str,
-                    status_code=status,
-                    period_total=period_total
-                )
+
+            # Update every student row in memory
+            for r_idx in range(6, len(vals)):
+                while len(vals[r_idx]) <= date_col_0idx:
+                    vals[r_idx].append("")
+                row_roll = str(vals[r_idx][1]).strip().upper() if len(vals[r_idx]) > 1 else ""
+                if row_roll:
+                    vals[r_idx][date_col_0idx] = str(period_total) if row_roll in present_set else "A"
+
+            # Execute single atomic update across the entire sheet
+            worksheet.update(values=vals, range_name="A1")
+            try:
+                cls._apply_sheet_formatting(spreadsheet, worksheet, len(vals), date_col_0idx + 1)
+            except Exception:
+                pass
+
+            logger.info(f"[GSheets Batch Sync] Successfully synchronized session attendance ({len(present_set)} present, {len(all_section_rolls) - len(present_set)} absent) for {date_str} via atomic update.")
             return True
         except Exception as e:
-            logger.error(f"Failed to sync session to Google Sheet: {str(e)}")
+            logger.error(f"Failed to batch sync session to Google Sheet: {str(e)}", exc_info=True)
             return False
 
     @classmethod

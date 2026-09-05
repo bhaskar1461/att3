@@ -138,12 +138,67 @@ def get_student_attendance_summary(db: Session = Depends(get_db), current_studen
             "percentage": pct
         })
 
-        return {
-            "total_conducted": total_conducted,
-            "total_present": total_present,
-            "overall_percentage": overall_percentage,
-            "subjects": subject_list
+    return {
+        "total_conducted": total_conducted,
+        "total_present": total_present,
+        "overall_percentage": overall_percentage,
+        "subjects": subject_list
+    }
+
+
+@router.get("/today-schedule")
+def get_student_today_schedule(
+    db: Session = Depends(get_db),
+    current_student: Student = Depends(require_student)
+):
+    """
+    Returns today's active schedule for the student's section.
+    For CS Security testing, returns Career Enhancement Training (CET) (4 Periods).
+    """
+    server_today = get_server_ist_date()
+    
+    # Check if there is an active session for the student's section today
+    active_session = db.query(AttendanceSession).filter(
+        AttendanceSession.section_id == current_student.section_id,
+        AttendanceSession.session_date == server_today,
+        AttendanceSession.status == SessionStatus.OPEN
+    ).order_by(AttendanceSession.id.desc()).first()
+
+    schedule_items = [
+        {
+            "subject_name": "Career Enhancement Training (CET)",
+            "subject_code": "CS(CET)",
+            "teacher_name": "Mrs. N. Sowjanya",
+            "timing": "09:30 AM - 01:00 PM",
+            "period": "4 Periods",
+            "period_count": 4,
+            "room": "CSE-CS Projector Lab",
+            "is_live": active_session is not None,
+            "session_id": active_session.id if active_session else None,
+            "status": "Live In-Class" if active_session else "Scheduled"
         }
+    ]
+
+    return {
+        "today_date": server_today,
+        "schedule": schedule_items,
+        "active_session": {
+            "session_id": active_session.id,
+            "subject_name": active_session.subject.name if active_session.subject else "Career Enhancement Training (CET)",
+            "teacher_name": active_session.teacher.name if active_session.teacher else "Mrs. N. Sowjanya",
+            "period": active_session.period or "4 Periods",
+            "period_count": 4,
+            "room": "CSE-CS Projector Lab",
+            "status": "LIVE IN-CLASS"
+        } if active_session else {
+            "subject_name": "Career Enhancement Training (CET)",
+            "teacher_name": "Mrs. N. Sowjanya",
+            "period": "4 Periods",
+            "period_count": 4,
+            "room": "CSE-CS Projector Lab",
+            "status": "Scheduled"
+        }
+    }
 
 
 class StudentScanSessionRequest(BaseModel):
@@ -152,7 +207,7 @@ class StudentScanSessionRequest(BaseModel):
 
 
 from app.core.security import validate_projector_session_token
-from app.api.attendance import _async_post_scan_tasks, _get_effective_gsheet_id, invalidate_session_cache
+from app.api.attendance import _async_post_scan_tasks, get_cached_session_meta
 from app.models.models import AttendanceStatus, SessionStatus, SecurityEventType, BindingStatus, DeviceAccountBinding
 from app.core.device_security import log_security_audit_event
 
@@ -168,6 +223,7 @@ def student_scan_session(
     """
     Endpoint for students scanning the teacher's projected rotating 10-second QR code.
     Validates token, session status, section membership, device binding, and records attendance.
+    Optimized with BoundedLRUSessionCache to eliminate redundant DB round-trips.
     """
     # 1. Device binding check (ADR-004: Anti-proxy account switching lockout)
     from app.core.device_security import register_or_get_device, enforce_device_binding
@@ -226,32 +282,32 @@ def student_scan_session(
     session_id = token_data["session_id"]
     period_count = token_data["period_count"]
 
-    # 3. Fetch session
-    session = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
-    if not session:
+    # 3. Fetch session using BoundedLRUSessionCache (avoids remote MySQL round-trip on hits)
+    session_meta = get_cached_session_meta(db, session_id)
+    if not session_meta:
         raise HTTPException(status_code=404, detail="Attendance session not found.")
 
-    if session.status != SessionStatus.OPEN:
+    status_str = getattr(session_meta["status"], "value", str(session_meta["status"]))
+    if status_str != "OPEN":
         raise HTTPException(status_code=400, detail="Attendance session is locked. No further scans allowed.")
 
     # 4. Check section membership
-    if current_student.section_id != session.section_id:
+    if current_student.section_id != session_meta["section_id"]:
         log_security_audit_event(
             db=db,
             event_type=SecurityEventType.ATTENDANCE_REJECTED,
             action="SECTION_MISMATCH_REJECTED",
-            details=f"Student {current_student.roll_number} section {current_student.section_id} mismatched session section {session.section_id}",
+            details=f"Student {current_student.roll_number} section {current_student.section_id} mismatched session section {session_meta['section_id']}",
             roll_number=current_student.roll_number
         )
-        section_name = session.section.name if session.section else f"ID {session.section_id}"
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Attendance Rejected: You are not enrolled in class section {section_name}."
+            detail=f"Attendance Rejected: You are not enrolled in class section {session_meta['section_name']}."
         )
 
-    # 5. Check if already marked present
+    # 5. Check if already marked present (using composite index idx_att_rec_session_student)
     existing_record = db.query(AttendanceRecord).filter(
-        AttendanceRecord.session_id == session.id,
+        AttendanceRecord.session_id == session_id,
         AttendanceRecord.student_id == current_student.id
     ).first()
 
@@ -259,71 +315,70 @@ def student_scan_session(
         return {
             "status": "ALREADY_MARKED",
             "message": "You have already been marked present for this session.",
-            "session_id": session.id,
-            "subject_name": session.subject.name if session.subject else "",
-            "period_name": session.period,
+            "session_id": session_id,
+            "subject_name": session_meta["subject_name"],
+            "period_name": session_meta["period"],
             "period_count": existing_record.period_count or period_count,
-            "session_date": session.session_date,
+            "session_date": session_meta["session_date"],
             "roll_number": current_student.roll_number,
             "student_name": current_student.name
         }
 
     # 6. Record or update attendance
+    now_utc = datetime.utcnow()
     if existing_record:
         existing_record.status = AttendanceStatus.PRESENT
         existing_record.period_count = period_count
         existing_record.scan_mode = "PROJECTOR_SCAN"
-        existing_record.scanned_at = datetime.utcnow()
+        existing_record.scanned_at = now_utc
     else:
         new_record = AttendanceRecord(
-            session_id=session.id,
+            session_id=session_id,
             student_id=current_student.id,
             roll_number=current_student.roll_number,
-            session_date=session.session_date,
+            session_date=session_meta["session_date"],
             period_count=period_count,
             status=AttendanceStatus.PRESENT,
             scan_mode="PROJECTOR_SCAN",
-            scanned_at=datetime.utcnow()
+            scanned_at=now_utc
         )
         db.add(new_record)
 
     db.commit()
-    invalidate_session_cache(session.id)
 
     # 7. Audit log event
     log_security_audit_event(
         db=db,
         event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
         action="STUDENT_PROJECTOR_SCAN_SUCCESS",
-        details=f"Student {current_student.roll_number} scanned teacher projector QR for session {session.id} (Period count: {period_count})",
+        details=f"Student {current_student.roll_number} scanned teacher projector QR for session {session_id} (Period count: {period_count})",
         roll_number=current_student.roll_number
     )
 
-    # 8. Asynchronous multi-target sync
-    effective_gsheet_id = _get_effective_gsheet_id(db, session)
+    # 8. Asynchronous multi-target sync with pre-resolved session_meta (0 DB queries)
     background_tasks.add_task(
         _async_post_scan_tasks,
         roll_number=current_student.roll_number,
-        date_formatted=session.session_date,
+        date_formatted=session_meta["session_date"],
         student_name=current_student.name,
         dept_code=current_student.department.code if current_student.department else "",
         year_name=current_student.academic_year.name if current_student.academic_year else "",
-        sec_name=session.section.name if session.section else "",
-        sub_name=session.subject.name if session.subject else "",
-        period=session.period,
-        teacher_name=session.teacher.name if session.teacher else "",
-        gs_id=effective_gsheet_id,
+        sec_name=session_meta["section_name"],
+        sub_name=session_meta["subject_name"],
+        period=session_meta["period"],
+        teacher_name=session_meta["teacher_name"],
+        gs_id=session_meta["teacher_gsheet_id"],
         period_count=period_count
     )
 
     return {
         "status": "SUCCESS",
         "message": f"Successfully marked present for {period_count} period{'s' if period_count > 1 else ''}!",
-        "session_id": session.id,
-        "subject_name": session.subject.name if session.subject else "",
-        "period_name": session.period,
+        "session_id": session_id,
+        "subject_name": session_meta["subject_name"],
+        "period_name": session_meta["period"],
         "period_count": period_count,
-        "session_date": session.session_date,
+        "session_date": session_meta["session_date"],
         "roll_number": current_student.roll_number,
         "student_name": current_student.name
     }

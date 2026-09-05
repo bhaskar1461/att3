@@ -4,6 +4,7 @@ import pandas as pd
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from openpyxl import Workbook
+from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
 from reportlab.lib.pagesizes import letter
@@ -100,7 +101,7 @@ class ReportService:
         # Auto-adjust column widths
         for col in ws.columns:
             max_len = max(len(str(cell.value or '')) for cell in col)
-            col_letter = openpyxl.utils.get_column_letter(col[0].column)
+            col_letter = get_column_letter(col[0].column)
             ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
 
         output = io.BytesIO()

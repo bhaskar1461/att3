@@ -14,7 +14,7 @@ class ProxyAndStaticHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         super().__init__(*args, directory=DIST_DIR, **kwargs)
 
     def do_GET(self):
-        if self.path.startswith("/api/") or self.path.startswith("/docs") or self.path.startswith("/openapi.json") or self.path.startswith("/redoc"):
+        if self.path.startswith("/api/") or self.path.startswith("/docs") or self.path.startswith("/openapi.json") or self.path.startswith("/redoc") or self.path.startswith("/health"):
             self.proxy_request("GET")
         else:
             req_path = self.translate_path(self.path)
@@ -22,10 +22,19 @@ class ProxyAndStaticHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.path = "/index.html"
             super().do_GET()
 
+    def address_string(self):
+        # Override to avoid reverse DNS lookup delay on every request
+        return self.client_address[0]
+
+    def log_message(self, format, *args):
+        # Lightweight logging without DNS overhead
+        pass
+
     def end_headers(self):
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
+        if self.path.startswith("/assets/"):
+            self.send_header("Cache-Control", "public, max-age=86400")
+        else:
+            self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
     def do_POST(self):
@@ -95,8 +104,11 @@ class ProxyAndStaticHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as ex:
             self.send_error(502, f"Proxy Error: {str(ex)}")
 
+class ThreadingServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
 if __name__ == "__main__":
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("0.0.0.0", PORT), ProxyAndStaticHTTPRequestHandler) as httpd:
+    with ThreadingServer(("0.0.0.0", PORT), ProxyAndStaticHTTPRequestHandler) as httpd:
         print(f"[*] Dev Server listening on http://0.0.0.0:{PORT} (Proxying /api -> {BACKEND_URL})")
         httpd.serve_forever()

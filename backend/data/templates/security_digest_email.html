@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SNIST ERP — Hourly Security Activity Digest</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif; background-color: #0f172a; color: #f8fafc;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 720px; margin: 24px auto; background-color: #1e293b; border-radius: 12px; overflow: hidden; border: 1px solid #334155; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+        <!-- Header -->
+        <tr>
+            <td style="background: linear-gradient(135deg, #1e3a8a 0%, #0284c7 100%); padding: 24px 28px;">
+                <table width="100%" cellpadding="0" cellspacing="0">
+                    <tr>
+                        <td>
+                            <span style="display: inline-block; background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.3); padding: 4px 12px; border-radius: 16px; font-size: 11px; font-weight: 800; letter-spacing: 1.5px; color: #ffffff;">
+                                HOURLY SAFETY-NET DIGEST
+                            </span>
+                            <h1 style="margin: 10px 0 0; color: #ffffff; font-size: 20px; font-weight: 800; letter-spacing: 0.5px;">
+                                Security Activity Rollup
+                            </h1>
+                        </td>
+                        <td align="right" valign="top" style="color: rgba(255,255,255,0.85); font-size: 12px; font-family: monospace;">
+                            {{ window_start_ist }} &ndash; {{ window_end_ist }} IST
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+
+        <!-- Summary KPI Cards -->
+        <tr>
+            <td style="padding: 24px 28px 0 28px;">
+                <table width="100%" cellpadding="0" cellspacing="0">
+                    <tr>
+                        <td width="31%" style="background: #0f172a; padding: 16px; border-radius: 8px; border: 1px solid #334155; text-align: center;">
+                            <p style="margin: 0; font-size: 11px; text-transform: uppercase; color: #94a3b8; font-weight: 700;">Total Events</p>
+                            <p style="margin: 6px 0 0; font-size: 24px; font-weight: 800; color: #38bdf8;">{{ total_events }}</p>
+                        </td>
+                        <td width="3.5%"></td>
+                        <td width="31%" style="background: #0f172a; padding: 16px; border-radius: 8px; border: 1px solid #334155; text-align: center;">
+                            <p style="margin: 0; font-size: 11px; text-transform: uppercase; color: #94a3b8; font-weight: 700;">Alerts Dispatched</p>
+                            <p style="margin: 6px 0 0; font-size: 24px; font-weight: 800; color: #fbbf24;">{{ alerts_dispatched }}</p>
+                        </td>
+                        <td width="3.5%"></td>
+                        <td width="31%" style="background: #0f172a; padding: 16px; border-radius: 8px; border: 1px solid #334155; text-align: center;">
+                            <p style="margin: 0; font-size: 11px; text-transform: uppercase; color: #94a3b8; font-weight: 700;">Cooldown Suppressed</p>
+                            <p style="margin: 6px 0 0; font-size: 24px; font-weight: 800; color: #a855f7;">{{ suppressed_count }}</p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+
+        <!-- Main Content -->
+        <tr>
+            <td style="padding: 24px 28px;">
+                <p style="margin: 0 0 12px; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; font-weight: 700;">
+                    Recorded Security Audit Events (Past 60 Minutes)
+                </p>
+
+                <!-- Events Table -->
+                <table width="100%" cellpadding="8" cellspacing="0" style="background: #0f172a; border-radius: 8px; border: 1px solid #334155; font-size: 12px; border-collapse: collapse;">
+                    <thead>
+                        <tr style="background: #1e293b; border-bottom: 1px solid #334155; text-align: left; color: #94a3b8;">
+                            <th style="padding: 10px; font-weight: 700;">Time (IST)</th>
+                            <th style="padding: 10px; font-weight: 700;">Event Type</th>
+                            <th style="padding: 10px; font-weight: 700;">Subject / Roll</th>
+                            <th style="padding: 10px; font-weight: 700;">Source / Device</th>
+                            <th style="padding: 10px; font-weight: 700;">Details</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for event in events %}
+                        <tr style="border-bottom: 1px solid #1e293b;">
+                            <td style="padding: 8px 10px; font-family: monospace; color: #cbd5e1; white-space: nowrap;">{{ event.time_ist }}</td>
+                            <td style="padding: 8px 10px; font-weight: 700; color: {% if 'SWITCH' in event.event_type or 'PRIVESC' in event.event_type %}#f87171{% elif 'REVOKED' in event.event_type or 'FAIL' in event.event_type %}#fb923c{% else %}#38bdf8{% endif %};">
+                                {{ event.event_type }}
+                            </td>
+                            <td style="padding: 8px 10px; font-family: monospace; color: #38bdf8;">{{ event.roll_number or "N/A" }}</td>
+                            <td style="padding: 8px 10px; font-family: monospace; color: #94a3b8;">{{ event.device_sig or event.ip_address or "N/A" }}</td>
+                            <td style="padding: 8px 10px; color: #cbd5e1; font-size: 11px;">{{ event.details_short }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+
+                {% if suppressed_items %}
+                <!-- Suppressed Events Breakdown -->
+                <div style="margin-top: 24px; background: rgba(15, 23, 42, 0.6); border: 1px solid #334155; border-radius: 8px; padding: 14px 18px;">
+                    <p style="margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #a855f7; font-weight: 700;">
+                        Cooldown-Suppressed Event Counts (Prevented Email Spam)
+                    </p>
+                    <ul style="margin: 0; padding-left: 20px; font-size: 12px; color: #cbd5e1; line-height: 1.6;">
+                        {% for k, v in suppressed_items.items() %}
+                        <li><strong style="color: #f8fafc;">{{ k }}</strong>: {{ v }} occurrences suppressed during active 10-minute cooldown window.</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+
+                <!-- Footer CTA -->
+                <div style="text-align: center; margin-top: 28px;">
+                    <a href="{{ admin_url or 'https://ather-os.de5.net/admin' }}" style="display: inline-block; background: #0284c7; color: #ffffff; text-decoration: none; padding: 10px 24px; border-radius: 6px; font-size: 12px; font-weight: 700; letter-spacing: 0.5px;">
+                        GO TO ADMIN AUDIT LOGS &rarr;
+                    </a>
+                </div>
+            </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+            <td style="background: #0f172a; padding: 16px 28px; border-top: 1px solid #334155; text-align: center;">
+                <p style="margin: 0; color: #64748b; font-size: 11px;">
+                    SNIST ERP Automated Safety-Net Digest &bull; Scheduled 09:00 - 17:00 IST Weekdays
+                </p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

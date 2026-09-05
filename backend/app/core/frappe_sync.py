@@ -2,7 +2,7 @@
 import requests
 import logging
 from typing import Dict, Any, Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from app.core.config import settings
 from app.models.models import AttendanceSession, AttendanceRecord, Student
 
@@ -19,7 +19,10 @@ def sync_session_to_frappe(
     Defensively syncs a locked attendance session from FastAPI DB to Frappe ERP.
     """
     try:
-        session = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+        # Eagerly load session.teacher to eliminate lazy load when reading teacher_code
+        session = db.query(AttendanceSession).options(
+            joinedload(AttendanceSession.teacher)
+        ).filter(AttendanceSession.id == session_id).first()
         if not session:
             return {"status": "ERROR", "detail": f"Session ID {session_id} not found."}
 

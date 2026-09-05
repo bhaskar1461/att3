@@ -1,13 +1,17 @@
 import os
 import shutil
+import logging
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
-from sqlalchemy.orm import Session
+
+logger = logging.getLogger("snist_erp.admin")
+from sqlalchemy import or_, func
+from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from app.core.database import get_db
-from app.api.auth import get_current_user
+from app.api.auth import get_current_user, require_admin
 from app.core.security import get_password_hash
 from app.core.config import settings
 from app.models.models import (
@@ -19,11 +23,6 @@ from app.services.qr_service import QRService
 from app.services.gsheets_service import GoogleSheetsService
 
 router = APIRouter(prefix="/admin", tags=["Super Admin"])
-
-def require_admin(current_user: User = Depends(get_current_user)):
-    if current_user.role != UserRole.SUPER_ADMIN:
-        raise HTTPException(status_code=403, detail="Super Admin permission required")
-    return current_user
 
 # --- Pydantic Schemas ---
 class DepartmentCreate(BaseModel):
@@ -116,7 +115,11 @@ def get_years(db: Session = Depends(get_db), current_user: User = Depends(get_cu
 
 @router.get("/sections")
 def get_sections(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    sections = db.query(Section).all()
+    # Single round-trip with eager loads for department and academic year
+    sections = db.query(Section).options(
+        joinedload(Section.department),
+        joinedload(Section.academic_year)
+    ).all()
     res = []
     for s in sections:
         res.append({
@@ -139,7 +142,11 @@ def create_section(sec: SectionCreate, db: Session = Depends(get_db), current_us
 
 @router.get("/subjects")
 def get_subjects(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    subjects = db.query(Subject).all()
+    # Single round-trip with eager loads for department and academic year
+    subjects = db.query(Subject).options(
+        joinedload(Subject.department),
+        joinedload(Subject.academic_year)
+    ).all()
     res = []
     for sub in subjects:
         res.append({
@@ -173,8 +180,59 @@ def extract_spreadsheet_id(input_str: str) -> str:
 
 # --- Teachers & Assignments ---
 @router.get("/teachers")
-def get_teachers(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    teachers = db.query(Teacher).all()
+def get_teachers(
+    page: Optional[int] = None,
+    page_size: int = 20,
+    department_id: Optional[int] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(require_admin)
+):
+    query = db.query(Teacher).options(
+        joinedload(Teacher.department),
+        joinedload(Teacher.user)
+    )
+
+    if department_id:
+        query = query.filter(Teacher.department_id == department_id)
+    if search:
+        s_term = f"%{search.strip()}%"
+        query = query.filter(or_(Teacher.name.ilike(s_term), Teacher.teacher_code.ilike(s_term)))
+
+    # Return paginated envelope if page is passed; otherwise plain list for backward compatibility
+    if page is not None:
+        total = query.count()
+        page_num = max(1, page)
+        limit_val = max(1, min(100, page_size))
+        offset_val = (page_num - 1) * limit_val
+        teachers = query.order_by(Teacher.id.asc()).offset(offset_val).limit(limit_val).all()
+        
+        items = []
+        for t in teachers:
+            sp_id = t.google_sheet_id or ""
+            sp_url = f"https://docs.google.com/spreadsheets/d/{sp_id}/edit" if sp_id else ""
+            items.append({
+                "id": t.id,
+                "teacher_code": t.teacher_code,
+                "name": t.name,
+                "department": t.department.name if t.department else "",
+                "department_id": t.department_id,
+                "mobile": t.mobile,
+                "username": t.user.username if t.user else "",
+                "google_sheet_id": sp_id,
+                "google_sheet_url": sp_url
+            })
+
+        import math
+        return {
+            "items": items,
+            "total": total,
+            "page": page_num,
+            "page_size": limit_val,
+            "total_pages": math.ceil(total / limit_val) if total > 0 else 1
+        }
+
+    teachers = query.all()
     res = []
     for t in teachers:
         sp_id = t.google_sheet_id or ""
@@ -241,11 +299,36 @@ def assign_teacher(req: AssignmentCreate, db: Session = Depends(get_db), current
     assignment = TeacherAssignment(teacher_id=req.teacher_id, subject_id=req.subject_id, section_id=req.section_id)
     db.add(assignment)
     db.commit()
-    return {"message": "Teacher assigned successfully"}
+
+    teacher_notified = None
+    try:
+        teacher = db.query(Teacher).filter(Teacher.id == req.teacher_id).first()
+        if teacher and teacher.user and teacher.user.email:
+            from app.services.email_service import send_teacher_class_allotment_notification
+            t_res = send_teacher_class_allotment_notification(
+                db=db,
+                teacher_email=teacher.user.email,
+                section_id=req.section_id,
+                trigger_context="ASSIGNMENT",
+            )
+            if t_res.get("status") in ("SENT", "DEV_MODE"):
+                teacher_notified = teacher.user.email
+    except Exception as e:
+        logger.warning(f"Could not dispatch teacher assignment email: {e}")
+
+    return {
+        "message": "Teacher assigned successfully",
+        "teacher_notified": teacher_notified,
+    }
 
 @router.get("/assignments")
 def list_assignments(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    assignments = db.query(TeacherAssignment).all()
+    # Eagerly load teacher, subject, section in 1 query
+    assignments = db.query(TeacherAssignment).options(
+        joinedload(TeacherAssignment.teacher),
+        joinedload(TeacherAssignment.subject),
+        joinedload(TeacherAssignment.section)
+    ).all()
     res = []
     for a in assignments:
         res.append({
@@ -258,8 +341,66 @@ def list_assignments(db: Session = Depends(get_db), current_user: User = Depends
 
 # --- Student Management & Bulk Excel Import ---
 @router.get("/students")
-def get_students(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    students = db.query(Student).all()
+def get_students(
+    page: Optional[int] = None,
+    page_size: int = 20,
+    department_id: Optional[int] = None,
+    academic_year_id: Optional[int] = None,
+    section_id: Optional[int] = None,
+    search: Optional[str] = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(get_current_user)
+):
+    # Single round-trip with eager loads for department, academic year, and section
+    query = db.query(Student).options(
+        joinedload(Student.department),
+        joinedload(Student.academic_year),
+        joinedload(Student.section)
+    )
+
+    if department_id:
+        query = query.filter(Student.department_id == department_id)
+    if academic_year_id:
+        query = query.filter(Student.academic_year_id == academic_year_id)
+    if section_id:
+        query = query.filter(Student.section_id == section_id)
+    if search:
+        s_term = f"%{search.strip()}%"
+        query = query.filter(or_(Student.name.ilike(s_term), Student.roll_number.ilike(s_term)))
+
+    # Return paginated envelope if page is passed; otherwise plain list for backward compatibility
+    if page is not None:
+        total = query.count()
+        page_num = max(1, page)
+        limit_val = max(1, min(100, page_size))
+        offset_val = (page_num - 1) * limit_val
+        students = query.order_by(Student.id.asc()).offset(offset_val).limit(limit_val).all()
+        
+        items = [{
+            "id": s.id,
+            "roll_number": s.roll_number,
+            "name": s.name,
+            "department": s.department.code if s.department else "",
+            "department_id": s.department_id,
+            "year": s.academic_year.name if s.academic_year else "",
+            "academic_year_id": s.academic_year_id,
+            "section": s.section.name if s.section else "",
+            "section_id": s.section_id,
+            "email": s.email,
+            "mobile": s.mobile,
+            "agency": s.agency
+        } for s in students]
+
+        import math
+        return {
+            "items": items,
+            "total": total,
+            "page": page_num,
+            "page_size": limit_val,
+            "total_pages": math.ceil(total / limit_val) if total > 0 else 1
+        }
+
+    students = query.all()
     res = []
     for s in students:
         res.append({
@@ -267,8 +408,11 @@ def get_students(db: Session = Depends(get_db), current_user: User = Depends(get
             "roll_number": s.roll_number,
             "name": s.name,
             "department": s.department.code if s.department else "",
+            "department_id": s.department_id,
             "year": s.academic_year.name if s.academic_year else "",
+            "academic_year_id": s.academic_year_id,
             "section": s.section.name if s.section else "",
+            "section_id": s.section_id,
             "email": s.email,
             "mobile": s.mobile,
             "agency": s.agency
@@ -431,22 +575,84 @@ def update_settings(data: SettingsUpdate, db: Session = Depends(get_db), current
     return {"message": "Settings updated successfully"}
 
 @router.get("/audit-logs")
-def get_audit_logs(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    logs = db.query(AuditLog).order_by(AuditLog.created_at.desc()).limit(100).all()
-    res = []
-    for l in logs:
-        res.append({
+def get_audit_logs(
+    last_id: Optional[int] = None,
+    limit: int = 20,
+    page: Optional[int] = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(require_admin)
+):
+    # Eagerly load user in 1 query to prevent N+1 lazy loads per log entry
+    query = db.query(AuditLog).options(joinedload(AuditLog.user))
+    
+    # Keyset cursor pagination on ID (uses clustered PK index, zero filesort on append-only table)
+    if last_id is not None:
+        query = query.filter(AuditLog.id < last_id)
+        limit_val = max(1, min(100, limit))
+        logs = query.order_by(AuditLog.id.desc()).limit(limit_val).all()
+        
+        items = [{
             "id": l.id,
             "username": l.user.username if l.user else "System",
+            "roll_number": l.roll_number or "",
+            "event_type": l.event_type or "",
             "action": l.action,
             "details": l.details,
-            "timestamp": l.created_at.strftime("%Y-%m-%d %H:%M:%S")
-        })
-    return res
+            "timestamp": l.created_at.strftime("%Y-%m-%d %H:%M:%S") if l.created_at else ""
+        } for l in logs]
+        
+        next_cursor = items[-1]["id"] if items else None
+        return {
+            "items": items,
+            "next_cursor": next_cursor,
+            "has_more": len(items) == limit_val
+        }
+
+    # Offset pagination if page is provided
+    if page is not None:
+        total = query.count()
+        page_num = max(1, page)
+        limit_val = max(1, min(100, limit))
+        offset_val = (page_num - 1) * limit_val
+        logs = query.order_by(AuditLog.id.desc()).offset(offset_val).limit(limit_val).all()
+        
+        items = [{
+            "id": l.id,
+            "username": l.user.username if l.user else "System",
+            "roll_number": l.roll_number or "",
+            "event_type": l.event_type or "",
+            "action": l.action,
+            "details": l.details,
+            "timestamp": l.created_at.strftime("%Y-%m-%d %H:%M:%S") if l.created_at else ""
+        } for l in logs]
+        
+        import math
+        return {
+            "items": items,
+            "total": total,
+            "page": page_num,
+            "page_size": limit_val,
+            "total_pages": math.ceil(total / limit_val) if total > 0 else 1
+        }
+
+    # Backward-compatible default 100 items with eager loading
+    logs = query.order_by(AuditLog.id.desc()).limit(100).all()
+    return [{
+        "id": l.id,
+        "username": l.user.username if l.user else "System",
+        "action": l.action,
+        "details": l.details,
+        "timestamp": l.created_at.strftime("%Y-%m-%d %H:%M:%S") if l.created_at else ""
+    } for l in logs]
 
 @router.post("/export/students-google-sheet")
 def export_students_google_sheet(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    students = db.query(Student).all()
+    # Single query with eager loads for unpaginated batch export
+    students = db.query(Student).options(
+        joinedload(Student.department),
+        joinedload(Student.academic_year),
+        joinedload(Student.section)
+    ).all()
     if not students:
         raise HTTPException(status_code=404, detail="No students found in database")
 
@@ -458,7 +664,7 @@ def export_students_google_sheet(db: Session = Depends(get_db), current_user: Us
             "name": s.name,
             "department": s.department.name if s.department else "CSE",
             "academic_year": s.academic_year.name if s.academic_year else "3rd Year",
-            "section": s.section.name if s.section else "CSE-A",
+            "section": s.section.name if s.section else "CS-A",
             "email": s.email or "",
             "mobile": s.mobile or "",
             "agency": s.agency or "Regular"
@@ -495,4 +701,77 @@ def export_students_google_sheet(db: Session = Depends(get_db), current_user: Us
     db.commit()
 
     return res
+
+
+@router.post("/security-alerts/test-send")
+def send_test_security_alert(
+    current_user: User = Depends(require_admin),
+    db: Session = Depends(get_db)
+):
+    """
+    Operator Verification Endpoint (Super Admin only).
+    Renders and dispatches a test high-severity security alert to settings.SECURITY_ALERT_EMAIL.
+    """
+    import time
+    t0 = time.perf_counter()
+    from app.services.security_alert_service import EVENT_ACCOUNT_SWITCH
+    from app.services.email_service import render_email_template, send_single_email
+    from app.core.security import get_server_ist_datetime
+
+    target_email = getattr(settings, "SECURITY_ALERT_EMAIL", "23311a05y6@cse.sreenidhi.edu.in")
+    now_ist = get_server_ist_datetime().strftime("%d-%b-%Y %H:%M:%S")
+
+    context = {
+        "event_title": "Multi-Account Device Switching Detected (Test Send)",
+        "event_type": EVENT_ACCOUNT_SWITCH,
+        "severity": "CRITICAL",
+        "subject_id": "23311A05Y6",
+        "source_id": "DEV-TEST-VERIFY-001",
+        "trigger_reason": "Manual operator verification from Admin Dashboard",
+        "client_ip": "127.0.0.1",
+        "audit_id": 9999,
+        "details": "This is a synthetic verification alert to confirm end-to-end email delivery, dual-channel SMTP failover, and HTML template rendering.",
+        "recommended_action": "Verify email arrival in your inbox; confirm responsive HTML formatting and severity card display.",
+        "timestamp_ist": now_ist,
+        "admin_url": f"{getattr(settings, 'FRONTEND_URL', 'https://ather-os.de5.net').rstrip('/')}/admin"
+    }
+
+    html_content = render_email_template("security_alert_email.html", context)
+    subject = "[SNIST SECURITY ALERT] [TEST] Security Alert Pipeline Verification"
+
+    res = send_single_email(
+        to_email=target_email,
+        subject=subject,
+        html_body=html_content,
+        channel="DEFAULT"
+    )
+
+    latency_ms = round((time.perf_counter() - t0) * 1000, 2)
+
+    # Record test dispatch in audit log
+    # WHY: Provides full administrative accountability in qr_audit_logs for test alerts.
+    try:
+        test_audit = AuditLog(
+            user_id=current_user.id,
+            roll_number=current_user.username,
+            event_type="SECURITY_ALERT_SENT",
+            action="OPERATOR_TEST_ALERT_DISPATCHED",
+            details=f"Super Admin {current_user.username} triggered test alert to {target_email}. Status: {res.get('status')}. Latency: {latency_ms}ms",
+            ip_address="127.0.0.1",
+            created_at=datetime.utcnow()
+        )
+        db.add(test_audit)
+        db.commit()
+    except Exception as a_err:
+        logger.warning(f"Failed to record test alert audit entry: {a_err}")
+
+    return {
+        "status": res.get("status"),
+        "target_email": target_email,
+        "channel": res.get("channel"),
+        "error": res.get("error"),
+        "latency_ms": latency_ms,
+        "server_time_ist": now_ist
+    }
+
 

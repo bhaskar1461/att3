@@ -1,26 +1,54 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
 import { DashboardStats } from '../types';
-import { Users, UserCheck, BarChart2, Shield, Settings, FileText, CheckCircle2, RefreshCw, Layers, FileSpreadsheet } from 'lucide-react';
+import { Users, UserCheck, BarChart2, Shield, Settings, FileText, CheckCircle2, RefreshCw, Layers, FileSpreadsheet, ClipboardList, Mail } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { ClassExcelRegisterModal } from '../components/ClassExcelRegisterModal';
+import { OnboardingManager } from '../components/admin/OnboardingManager';
+import { CredentialDispatcher } from '../components/admin/CredentialDispatcher';
 
 export const AdminDashboard: React.FC = () => {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isExcelRegisterOpen, setIsExcelRegisterOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'onboarding' | 'credentials'>('dashboard');
+
+  // Keyset / Offset Pagination State for Audit Logs
+  const [auditPage, setAuditPage] = useState<number>(1);
+  const [auditTotalPages, setAuditTotalPages] = useState<number>(1);
+  const [auditTotal, setAuditTotal] = useState<number>(0);
+  const [isLogsLoading, setIsLogsLoading] = useState<boolean>(false);
 
   useEffect(() => {
     fetchAdminData();
   }, []);
 
+  const fetchAuditLogs = async (page: number = 1) => {
+    setIsLogsLoading(true);
+    try {
+      const logsData: any = await apiRequest(`/admin/audit-logs?page=${page}&limit=20`);
+      if (logsData && logsData.items) {
+        setAuditLogs(logsData.items);
+        setAuditPage(logsData.page || page);
+        setAuditTotalPages(logsData.total_pages || 1);
+        setAuditTotal(logsData.total || 0);
+      } else if (Array.isArray(logsData)) {
+        setAuditLogs(logsData);
+        setAuditTotal(logsData.length);
+      }
+    } catch (err: any) {
+      console.error(err);
+    } finally {
+      setIsLogsLoading(false);
+    }
+  };
+
   const fetchAdminData = async () => {
     try {
       const statsData: any = await apiRequest('/admin/dashboard-stats');
       setStats(statsData);
-      const logsData: any = await apiRequest('/admin/audit-logs');
-      setAuditLogs(logsData);
+      await fetchAuditLogs(1);
     } catch (err: any) {
       console.error(err);
     } finally {
@@ -66,6 +94,53 @@ export const AdminDashboard: React.FC = () => {
           </button>
         </div>
       </div>
+
+      {/* Tab Navigation */}
+      <div className="flex items-center gap-1 bg-white/60 p-1 rounded-2xl border border-slate-200 w-fit">
+        {[
+          { key: 'dashboard' as const, label: 'Dashboard', icon: BarChart2 },
+          { key: 'onboarding' as const, label: 'Onboarding', icon: ClipboardList },
+          { key: 'credentials' as const, label: 'Credentials', icon: Mail },
+        ].map(tab => {
+          const Icon = tab.icon;
+          return (
+            <button
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={`px-4 py-2 text-xs font-bold rounded-xl flex items-center gap-2 transition-all ${
+                activeTab === tab.key
+                  ? 'bg-[#2f53d7] text-white shadow-md shadow-[#2f53d7]/20'
+                  : 'text-slate-500 hover:text-[#15347e] hover:bg-slate-100'
+              }`}
+            >
+              <Icon className="w-4 h-4" /> {tab.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Onboarding Tab */}
+      {activeTab === 'onboarding' && (
+        <div className="snist-card p-6">
+          <h3 className="font-heading text-lg font-bold text-[#15347e] flex items-center gap-2 mb-4">
+            <ClipboardList className="w-5 h-5 text-[#2f53d7]" /> Student Onboarding Management
+          </h3>
+          <OnboardingManager />
+        </div>
+      )}
+
+      {/* Credentials Tab */}
+      {activeTab === 'credentials' && (
+        <div className="snist-card p-6">
+          <h3 className="font-heading text-lg font-bold text-[#15347e] flex items-center gap-2 mb-4">
+            <Mail className="w-5 h-5 text-[#2f53d7]" /> Credential Email Dispatch
+          </h3>
+          <CredentialDispatcher />
+        </div>
+      )}
+
+      {/* Dashboard Tab Content */}
+      {activeTab === 'dashboard' && (<>
 
       {/* Metrics Cards */}
       {stats && (
@@ -192,13 +267,57 @@ export const AdminDashboard: React.FC = () => {
             </tbody>
           </table>
         </div>
+
+        {/* Numbered Pagination Controls */}
+        <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 text-xs text-slate-500 border-t border-slate-100">
+          <div>
+            Showing page <span className="font-bold text-[#17233c]">{auditPage}</span> of <span className="font-bold text-[#17233c]">{auditTotalPages}</span> ({auditTotal} total events)
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => fetchAuditLogs(auditPage - 1)}
+              disabled={auditPage <= 1 || isLogsLoading}
+              className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 font-bold disabled:opacity-40 disabled:cursor-not-allowed transition text-slate-700"
+            >
+              Previous
+            </button>
+            {Array.from({ length: Math.min(5, auditTotalPages) }, (_, i) => {
+              let p = i + 1;
+              if (auditTotalPages > 5) {
+                p = Math.max(1, Math.min(auditTotalPages - 4, auditPage - 2)) + i;
+              }
+              return (
+                <button
+                  key={p}
+                  onClick={() => fetchAuditLogs(p)}
+                  disabled={isLogsLoading}
+                  className={`w-8 h-8 rounded-lg font-bold text-xs transition ${
+                    auditPage === p
+                      ? 'bg-[#2f53d7] text-white shadow-sm'
+                      : 'border border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  {p}
+                </button>
+              );
+            })}
+            <button
+              onClick={() => fetchAuditLogs(auditPage + 1)}
+              disabled={auditPage >= auditTotalPages || isLogsLoading}
+              className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 font-bold disabled:opacity-40 disabled:cursor-not-allowed transition text-slate-700"
+            >
+              Next
+            </button>
+          </div>
+        </div>
       </div>
 
-      {/* Class Register Excel Grid Modal */}
       <ClassExcelRegisterModal
         isOpen={isExcelRegisterOpen}
         onClose={() => setIsExcelRegisterOpen(false)}
       />
+
+      </>)}{/* end dashboard tab */}
 
     </div>
   );

@@ -40,19 +40,69 @@ export const Management: React.FC = () => {
   // Settings State
   const [gsheetId, setGsheetId] = useState('');
 
+  // Pagination States for Students
+  const [studentPage, setStudentPage] = useState<number>(1);
+  const [studentTotalPages, setStudentTotalPages] = useState<number>(1);
+  const [studentTotal, setStudentTotal] = useState<number>(0);
+  const [isStudentsLoading, setIsStudentsLoading] = useState<boolean>(false);
+
+  // Pagination States for Teachers
+  const [teacherPage, setTeacherPage] = useState<number>(1);
+  const [teacherTotalPages, setTeacherTotalPages] = useState<number>(1);
+  const [teacherTotal, setTeacherTotal] = useState<number>(0);
+  const [isTeachersLoading, setIsTeachersLoading] = useState<boolean>(false);
+
   useEffect(() => {
     fetchAllManagementData();
   }, []);
 
+  const fetchStudents = async (page: number = 1) => {
+    setIsStudentsLoading(true);
+    try {
+      const res: any = await apiRequest(`/admin/students?page=${page}&page_size=20`);
+      if (res && res.items) {
+        setStudents(res.items);
+        setStudentPage(res.page || page);
+        setStudentTotalPages(res.total_pages || 1);
+        setStudentTotal(res.total || 0);
+      } else if (Array.isArray(res)) {
+        setStudents(res);
+        setStudentTotal(res.length);
+      }
+    } catch (err: any) {
+      console.error("Failed to load students:", err);
+    } finally {
+      setIsStudentsLoading(false);
+    }
+  };
+
+  const fetchTeachers = async (page: number = 1) => {
+    setIsTeachersLoading(true);
+    try {
+      const res: any = await apiRequest(`/admin/teachers?page=${page}&page_size=20`);
+      if (res && res.items) {
+        setTeachers(res.items);
+        setTeacherPage(res.page || page);
+        setTeacherTotalPages(res.total_pages || 1);
+        setTeacherTotal(res.total || 0);
+      } else if (Array.isArray(res)) {
+        setTeachers(res);
+        setTeacherTotal(res.length);
+      }
+    } catch (err: any) {
+      console.error("Failed to load teachers:", err);
+    } finally {
+      setIsTeachersLoading(false);
+    }
+  };
+
   const fetchAllManagementData = async () => {
     setIsLoading(true);
     try {
-      const [deptsData, secData, subData, teacherData, studentData, yearData, settingsData]: any = await Promise.all([
+      const [deptsData, secData, subData, yearData, settingsData]: any = await Promise.all([
         apiRequest('/admin/departments'),
         apiRequest('/admin/sections'),
         apiRequest('/admin/subjects'),
-        apiRequest('/admin/teachers'),
-        apiRequest('/admin/students'),
         apiRequest('/admin/years'),
         apiRequest('/admin/settings'),
       ]);
@@ -60,12 +110,14 @@ export const Management: React.FC = () => {
       setDepartments(deptsData);
       setSections(secData);
       setSubjects(subData);
-      setTeachers(teacherData);
-      setStudents(studentData);
       setYears(yearData);
-      if (settingsData.GOOGLE_SPREADSHEET_ID) {
+      if (settingsData && settingsData.GOOGLE_SPREADSHEET_ID) {
         setGsheetId(settingsData.GOOGLE_SPREADSHEET_ID);
       }
+      await Promise.all([
+        fetchStudents(1),
+        fetchTeachers(1),
+      ]);
     } catch (err: any) {
       setToast({ message: err.message || 'Error loading data', type: 'error' });
     } finally {
@@ -226,7 +278,7 @@ export const Management: React.FC = () => {
       {activeTab === 'students' && (
         <div className="snist-card p-6 space-y-4">
           <div className="flex items-center justify-between">
-            <h3 className="font-heading text-lg font-bold text-[#15347e]">Registered Students ({students.length})</h3>
+            <h3 className="font-heading text-lg font-bold text-[#15347e]">Registered Students ({studentTotal})</h3>
           </div>
 
           <div className="overflow-x-auto">
@@ -255,12 +307,55 @@ export const Management: React.FC = () => {
               </tbody>
             </table>
           </div>
+
+          {/* Numbered Pagination Controls for Students */}
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 text-xs text-slate-500 border-t border-slate-100">
+            <div>
+              Showing page <span className="font-bold text-[#17233c]">{studentPage}</span> of <span className="font-bold text-[#17233c]">{studentTotalPages}</span> ({studentTotal} total students)
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => fetchStudents(studentPage - 1)}
+                disabled={studentPage <= 1 || isStudentsLoading}
+                className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 font-bold disabled:opacity-40 disabled:cursor-not-allowed transition text-slate-700"
+              >
+                Previous
+              </button>
+              {Array.from({ length: Math.min(5, studentTotalPages) }, (_, i) => {
+                let p = i + 1;
+                if (studentTotalPages > 5) {
+                  p = Math.max(1, Math.min(studentTotalPages - 4, studentPage - 2)) + i;
+                }
+                return (
+                  <button
+                    key={p}
+                    onClick={() => fetchStudents(p)}
+                    disabled={isStudentsLoading}
+                    className={`w-8 h-8 rounded-lg font-bold text-xs transition ${
+                      studentPage === p
+                        ? 'bg-[#2f53d7] text-white shadow-sm'
+                        : 'border border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                    }`}
+                  >
+                    {p}
+                  </button>
+                );
+              })}
+              <button
+                onClick={() => fetchStudents(studentPage + 1)}
+                disabled={studentPage >= studentTotalPages || isStudentsLoading}
+                className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 font-bold disabled:opacity-40 disabled:cursor-not-allowed transition text-slate-700"
+              >
+                Next
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
       {activeTab === 'teachers' && (
         <div className="snist-card p-6 space-y-4">
-          <h3 className="font-heading text-lg font-bold text-[#15347e]">Faculty Members ({teachers.length})</h3>
+          <h3 className="font-heading text-lg font-bold text-[#15347e]">Faculty Members ({teacherTotal})</h3>
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-100 text-[#17233c] font-bold border-b border-slate-200">
@@ -320,6 +415,49 @@ export const Management: React.FC = () => {
                 ))}
               </tbody>
             </table>
+          </div>
+
+          {/* Numbered Pagination Controls for Teachers */}
+          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 text-xs text-slate-500 border-t border-slate-100">
+            <div>
+              Showing page <span className="font-bold text-[#17233c]">{teacherPage}</span> of <span className="font-bold text-[#17233c]">{teacherTotalPages}</span> ({teacherTotal} total faculty)
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => fetchTeachers(teacherPage - 1)}
+                disabled={teacherPage <= 1 || isTeachersLoading}
+                className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 font-bold disabled:opacity-40 disabled:cursor-not-allowed transition text-slate-700"
+              >
+                Previous
+              </button>
+              {Array.from({ length: Math.min(5, teacherTotalPages) }, (_, i) => {
+                let p = i + 1;
+                if (teacherTotalPages > 5) {
+                  p = Math.max(1, Math.min(teacherTotalPages - 4, teacherPage - 2)) + i;
+                }
+                return (
+                  <button
+                    key={p}
+                    onClick={() => fetchTeachers(p)}
+                    disabled={isTeachersLoading}
+                    className={`w-8 h-8 rounded-lg font-bold text-xs transition ${
+                      teacherPage === p
+                        ? 'bg-[#2f53d7] text-white shadow-sm'
+                        : 'border border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                    }`}
+                  >
+                    {p}
+                  </button>
+                );
+              })}
+              <button
+                onClick={() => fetchTeachers(teacherPage + 1)}
+                disabled={teacherPage >= teacherTotalPages || isTeachersLoading}
+                className="px-3 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 font-bold disabled:opacity-40 disabled:cursor-not-allowed transition text-slate-700"
+              >
+                Next
+              </button>
+            </div>
           </div>
         </div>
       )}

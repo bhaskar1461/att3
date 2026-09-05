@@ -2,7 +2,8 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/jpg" href="/snist_logo.jpg" />
+    <link rel="icon" type="image/webp" href="/snist_logo.webp" />
+    <link rel="alternate icon" type="image/jpeg" href="/snist_logo.jpg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <meta name="theme-color" content="#15347e" />
     <meta name="description" content="SNIST QR Attendance System — Sreenidhi Institute of Science and Technology" />
@@ -11,6 +12,18 @@
     <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;800&family=Outfit:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap" rel="stylesheet" />
     <title>SNIST ERP — Academic Portal & Attendance</title>
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(regs) {
+          for (var r of regs) { r.unregister(); }
+        });
+      }
+      if ('caches' in window) {
+        caches.keys().then(function(keys) {
+          for (var k of keys) { caches.delete(k); }
+        });
+      }
+    </script>
   </head>
   <body class="bg-[#FBFBFD] text-[#1b1b1d] font-sans antialiased min-h-screen selection:bg-[#001e40] selection:text-white">
     <div id="root"></div>

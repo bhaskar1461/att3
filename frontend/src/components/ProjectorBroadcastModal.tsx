@@ -31,10 +31,16 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
   const countdownIntervalRef = useRef<any>(null);
   const pollTimerRef = useRef<any>(null);
 
+  const dataRef = useRef<any>(null);
+
   // Keep ref synchronized with state
   useEffect(() => {
     periodCountRef.current = periodCount;
   }, [periodCount]);
+
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
 
   // Fetch rotating token from backend with dynamic period_count
   const fetchBroadcastToken = async (overridePeriod?: number) => {
@@ -46,17 +52,18 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
       setError(null);
     } catch (err: any) {
       console.error('Failed to fetch broadcast token:', err);
-      setError(err.message || 'Error loading broadcast QR token');
+      if (!dataRef.current) {
+        setError(err.message || 'Error loading broadcast QR token');
+      } else {
+        // If already broadcasting, keep active QR code visible and silently retry in 2s
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = setTimeout(() => {
+          fetchBroadcastToken(currentP);
+        }, 2000);
+      }
     } finally {
       setLoading(false);
     }
-  };
-
-  const handlePeriodChange = (newCount: number) => {
-    setPeriodCount(newCount);
-    periodCountRef.current = newCount;
-    setLoading(true);
-    fetchBroadcastToken(newCount);
   };
 
   useEffect(() => {
@@ -138,11 +145,6 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
                 CLASSROOM PROJECTOR BROADCAST
               </span>
-              {data && (
-                <span className="px-2.5 py-0.5 rounded-full bg-white/10 text-amber-300 font-mono font-bold text-xs">
-                  {data.period_count} Period{data.period_count > 1 ? 's' : ''}
-                </span>
-              )}
             </div>
             <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight mt-0.5">
               {data?.subject_name || 'Classroom Attendance Session'}
@@ -190,13 +192,17 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
             <RefreshCw className="w-12 h-12 text-amber-400 animate-spin" />
             <p className="text-lg font-bold text-slate-300">Generating Rotating Projector Token...</p>
           </div>
-        ) : error ? (
+        ) : error && !data ? (
           <div className="max-w-md p-6 bg-rose-500/20 border border-rose-500/40 rounded-2xl text-center space-y-3">
             <AlertCircle className="w-10 h-10 text-rose-400 mx-auto" />
             <h3 className="text-lg font-bold text-white">Broadcast Error</h3>
             <p className="text-sm text-rose-200">{error}</p>
             <button
-              onClick={() => fetchBroadcastToken()}
+              onClick={() => {
+                setError(null);
+                setLoading(true);
+                fetchBroadcastToken();
+              }}
               className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-bold rounded-xl text-xs"
             >
               Retry
@@ -205,36 +211,13 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
         ) : (
           <div className="flex flex-col items-center max-w-xl w-full">
 
-            {/* Period Credit Selector for Faculty */}
-            <div className="flex flex-col items-center gap-1.5 mb-4">
-              <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
-                <span>⏱️</span> Grant Periods (Class Credit):
-              </span>
-              <div className="flex items-center gap-1.5 p-1.5 bg-white/10 backdrop-blur-md rounded-2xl border border-white/15 shadow-inner">
-                {[1, 2, 3, 4, 5, 6].map((p) => (
-                  <button
-                    key={p}
-                    onClick={() => handlePeriodChange(p)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-black font-mono transition-all flex items-center gap-1 ${
-                      periodCount === p
-                        ? 'bg-gradient-to-r from-amber-400 to-[#FF9F0A] text-[#001e40] shadow-lg scale-105'
-                        : 'text-slate-300 hover:text-white hover:bg-white/10'
-                    }`}
-                  >
-                    <span>{p}</span>
-                    <span className="font-sans font-bold text-[10px] uppercase">{p === 1 ? 'Period' : 'Periods'}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-            
             {/* Student Instructions Banner */}
-            <div className="text-center mb-4 space-y-1">
+            <div className="text-center mb-5 space-y-1">
               <span className="text-amber-400 text-xs sm:text-sm font-bold tracking-wider uppercase flex items-center justify-center gap-1.5">
                 <Sparkles className="w-4 h-4" /> Scan with SNIST Student Portal Camera
               </span>
               <p className="text-sm sm:text-base text-slate-300">
-                Hold your phone toward the screen to be marked present for <span className="text-white font-extrabold">{data?.period_count} Period{data?.period_count > 1 ? 's' : ''}</span>
+                Hold your phone toward the screen to mark your attendance
               </p>
             </div>
 
@@ -285,10 +268,6 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
                 />
               </div>
 
-              <div className="flex items-center justify-between text-[11px] text-slate-400 font-medium pt-0.5">
-                <span>🛡️ Anti-Proxy 10s Window</span>
-                <span>✨ 20s Server Grace Buffer Active</span>
-              </div>
             </div>
 
           </div>

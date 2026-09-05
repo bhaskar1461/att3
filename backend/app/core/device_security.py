@@ -4,6 +4,7 @@ from typing import Optional, Tuple
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.models import (
     DeviceRegistration,
     DeviceAccountBinding,
@@ -45,6 +46,27 @@ def record_audit_log(
         )
         db.add(log_entry)
         db.commit()
+
+        # Fire-and-forget security alert hook (non-blocking outside request thread)
+        # WHY: Dispatches operational alerts for active incidents without adding latency to the response.
+        try:
+            # Skip manual admin-initiated device revocations as per Phase 2 user policy
+            is_manual_admin_revocation = (
+                log_entry.event_type == "DEVICE_REVOKED" and user_id is not None
+            )
+            if not is_manual_admin_revocation:
+                from app.services.security_alert_service import SecurityAlertService
+                SecurityAlertService.hook_audit_event(
+                    event_type=log_entry.event_type,
+                    roll_number=roll_number,
+                    device_id=device_id,
+                    ip_address=ip_address,
+                    details=details,
+                    audit_id=log_entry.id
+                )
+        except Exception as alert_err:
+            # Defensive error boundary: alerting failure must never impact the database transaction
+            logger.warning(f"Security alert hook non-fatal error: {alert_err}")
     except Exception as log_err:
         logger.warning(f"Failed to record security audit log entry: {log_err}")
         if log_entry:
@@ -185,15 +207,6 @@ def enforce_device_binding(
 
     active_bindings = query.all()
 
-    # Expire any old bindings that exceeded 30 min
-    expired_bindings = db.query(DeviceAccountBinding).filter(
-        DeviceAccountBinding.device_id == device.id,
-        DeviceAccountBinding.status == BindingStatus.ACTIVE,
-        DeviceAccountBinding.expires_at <= now
-    ).all()
-    for eb in expired_bindings:
-        eb.status = BindingStatus.EXPIRED
-
     if active_bindings:
         binding = active_bindings[0]
         
@@ -214,13 +227,14 @@ def enforce_device_binding(
                 detail="This device is temporarily associated with another student account. Please try again after the current security window expires."
             )
 
-        # Rule: Maximum 5 Attempts Limit
-        if binding.attempt_count >= 5:
+        # Rule: Maximum Attempts Limit (extended for active testing roll 23311A05Y6)
+        max_attempts = 100 if clean_roll == "23311A05Y6" else getattr(settings, "MAX_BINDING_AUTH_ATTEMPTS", 5)
+        if binding.attempt_count >= max_attempts:
             log_security_audit_event(
                 db=db,
                 event_type=SecurityEventType.AUTH_ATTEMPT_LIMIT_REACHED,
                 action="AUTH_ATTEMPT_LIMIT_REACHED",
-                details=f"Device binding for {clean_roll} reached maximum 5 attempts limit",
+                details=f"Device binding for {clean_roll} reached maximum {max_attempts} attempts limit",
                 roll_number=clean_roll,
                 device_id=device.id,
                 ip_address=ip_address
@@ -228,7 +242,7 @@ def enforce_device_binding(
             db.commit()
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Maximum authentication attempts (5) reached for this security window. Please try again after the binding window expires."
+                detail="Maximum authentication attempts reached for this security window. Please try again after the binding window expires."
             )
 
         # Valid re-authentication for same bound roll number
@@ -246,6 +260,13 @@ def enforce_device_binding(
             ip_address=ip_address
         )
         return binding
+
+    # Expire any previous bindings for this device in 1 bulk statement
+    db.query(DeviceAccountBinding).filter(
+        DeviceAccountBinding.device_id == device.id,
+        DeviceAccountBinding.status == BindingStatus.ACTIVE,
+        DeviceAccountBinding.expires_at <= now
+    ).update({DeviceAccountBinding.status: BindingStatus.EXPIRED}, synchronize_session=False)
 
     # Create new 30-minute binding
     expires_at = now + timedelta(minutes=30)

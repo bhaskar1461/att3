@@ -29,8 +29,6 @@ try:
         sha_hash = hashlib.sha256(f"{plain_password}{salt}".encode()).hexdigest()
         if sha_hash == hashed_password or plain_password == hashed_password:
             return True
-        if plain_password in ["password123", "student123"]:
-            return True
         return False
 except ImportError:
     def get_password_hash(password: str) -> str:
@@ -43,8 +41,6 @@ except ImportError:
         salt = "attendance_salt_2026"
         sha_hash = hashlib.sha256(f"{plain_password}{salt}".encode()).hexdigest()
         if sha_hash == hashed_password or plain_password == hashed_password:
-            return True
-        if plain_password in ["password123", "student123"]:
             return True
         return False
 
@@ -65,8 +61,24 @@ try:
     def decode_access_token(token: str) -> Optional[dict]:
         try:
             return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-        except JWTError:
-            return None
+        except Exception:
+            # Defensive fallback: support HMAC signature if token was generated in fallback environment
+            try:
+                parts = token.split(".")
+                if len(parts) != 3:
+                    return None
+                header_b64, payload_b64, signature = parts
+                signature_raw = f"{header_b64}.{payload_b64}"
+                expected_sig = hmac.new(settings.SECRET_KEY.encode(), signature_raw.encode(), hashlib.sha256).hexdigest()
+                if not hmac.compare_digest(signature, expected_sig):
+                    return None
+                padded_payload = payload_b64 + "=" * ((4 - len(payload_b64) % 4) % 4)
+                payload = json.loads(base64.b64decode(padded_payload.encode()).decode())
+                if payload.get("exp", 0) < time.time():
+                    return None
+                return payload
+            except Exception:
+                return None
 except ImportError:
     # Simplified HMAC JWT token fallback
     def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -99,6 +111,28 @@ except ImportError:
             return payload
         except Exception:
             return None
+
+
+def create_magic_login_token(username: str, role: str = "TEACHER", expires_days: int = 7) -> str:
+    """Creates a secure time-bound magic link login token for faculty/students."""
+    data = {
+        "sub": username,
+        "role": role,
+        "type": "magic_login",
+        "iat": datetime.utcnow().timestamp(),
+    }
+    return create_access_token(data, expires_delta=timedelta(days=expires_days))
+
+
+def verify_magic_login_token(token: str) -> Optional[dict]:
+    """Decodes and validates a magic link login token."""
+    payload = decode_access_token(token)
+    if not payload:
+        return None
+    if payload.get("type") != "magic_login":
+        return None
+    return payload
+
 
 # --- AES / HMAC Security for Student QR Codes ---
 

@@ -6,9 +6,10 @@ import {
   FileSpreadsheet, ExternalLink, Users, Zap, CheckCircle, X,
   UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Maximize2
 } from 'lucide-react';
-import { QRScannerModal } from '../components/QRScannerModal';
+// Lazy-load heavy camera scanner and excel register modals
+const QRScannerModal = React.lazy(() => import('../components/QRScannerModal').then(m => ({ default: m.QRScannerModal })));
+const ClassExcelRegisterModal = React.lazy(() => import('../components/ClassExcelRegisterModal').then(m => ({ default: m.ClassExcelRegisterModal })));
 import { ManualSearchModal } from '../components/ManualSearchModal';
-import { ClassExcelRegisterModal } from '../components/ClassExcelRegisterModal';
 import { ProjectorBroadcastModal } from '../components/ProjectorBroadcastModal';
 import { Toast } from '../components/Toast';
 
@@ -174,8 +175,12 @@ export const TeacherDashboard: React.FC = () => {
   const handleLockSession = async () => {
     if (!activeSession) return;
     try {
-      await apiRequest(`/teacher/sessions/${activeSession.session_id}/lock`, { method: 'POST' });
-      setToast({ message: 'Attendance session locked successfully!', type: 'success' });
+      const res: any = await apiRequest(`/teacher/sessions/${activeSession.session_id}/lock`, { method: 'POST' });
+      if (res?.warning) {
+        setToast({ message: res.warning, type: 'warning' });
+      } else {
+        setToast({ message: 'Attendance session locked successfully!', type: 'success' });
+      }
       fetchSessionDetails(activeSession.session_id);
       fetchHistoricalSessions();
     } catch (err: any) {
@@ -958,25 +963,27 @@ export const TeacherDashboard: React.FC = () => {
 
       {/* QR Camera Modal */}
       {isScannerOpen && activeSession && (
-        <QRScannerModal
-          sessionId={activeSession.session_id}
-          sessionDate={activeSession.session_date}
-          periodText={activeSession.period}
-          subjectName={activeSession.subject_name}
-          sectionName={activeSession.section_name}
-          initialPeriodCount={parseInt(activeSession.period?.replace(/\D/g, '') || '4') || 4}
-          onClose={() => {
-            setIsScannerOpen(false);
-            fetchSessionDetails(activeSession.session_id);
-          }}
-          onScanSuccess={() => {
-            fetchSessionDetails(activeSession.session_id);
-          }}
-          onOpenManualSearch={() => {
-            setIsScannerOpen(false);
-            setIsManualOpen(true);
-          }}
-        />
+        <React.Suspense fallback={null}>
+          <QRScannerModal
+            sessionId={activeSession.session_id}
+            sessionDate={activeSession.session_date}
+            periodText={activeSession.period}
+            subjectName={activeSession.subject_name}
+            sectionName={activeSession.section_name}
+            initialPeriodCount={parseInt(activeSession.period?.replace(/\D/g, '') || '4') || 4}
+            onClose={() => {
+              setIsScannerOpen(false);
+              fetchSessionDetails(activeSession.session_id);
+            }}
+            onScanSuccess={() => {
+              fetchSessionDetails(activeSession.session_id);
+            }}
+            onOpenManualSearch={() => {
+              setIsScannerOpen(false);
+              setIsManualOpen(true);
+            }}
+          />
+        </React.Suspense>
       )}
 
       {/* Manual Search Modal */}
@@ -991,12 +998,16 @@ export const TeacherDashboard: React.FC = () => {
       )}
 
       {/* Class Register Excel Grid Modal */}
-      <ClassExcelRegisterModal
-        isOpen={isExcelRegisterOpen}
-        onClose={() => setIsExcelRegisterOpen(false)}
-        defaultSectionId={activeSession?.section_id || selectedAssignment?.section_id}
-        assignedSections={memoizedAssignedSections}
-      />
+      {isExcelRegisterOpen && (
+        <React.Suspense fallback={null}>
+          <ClassExcelRegisterModal
+            isOpen={isExcelRegisterOpen}
+            onClose={() => setIsExcelRegisterOpen(false)}
+            defaultSectionId={activeSession?.section_id || selectedAssignment?.section_id}
+            assignedSections={memoizedAssignedSections}
+          />
+        </React.Suspense>
+      )}
 
       {/* Absence Callout Modal */}
       {showUnmarkedModal && unmarkedData && (

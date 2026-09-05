@@ -53,14 +53,19 @@ export const Navbar: React.FC = () => {
         {/* SNIST Logo & Brand Header */}
         <Link to="/" className="flex items-center gap-2 sm:gap-3.5 group min-w-0">
           <div className="bg-white p-1 rounded-xl border border-slate-200 shadow-sm group-hover:scale-105 transition-transform shrink-0">
-            <img 
-              src="/snist_logo.jpg" 
-              alt="SNIST logo" 
-              className="h-8 sm:h-11 w-auto object-contain rounded-lg"
-              onError={(e) => {
-                (e.target as HTMLElement).style.display = 'none';
-              }}
-            />
+            <picture>
+              <source srcSet="/snist_logo.webp" type="image/webp" />
+              <img 
+                src="/snist_logo.jpg" 
+                alt="SNIST logo" 
+                className="h-8 sm:h-11 w-auto object-contain rounded-lg"
+                loading="lazy"
+                decoding="async"
+                onError={(e) => {
+                  (e.target as HTMLElement).style.display = 'none';
+                }}
+              />
+            </picture>
           </div>
           <div className="min-w-0">
             <h1 className="font-heading font-bold text-xs sm:text-base lg:text-xl text-[#15347e] leading-tight tracking-tight truncate">

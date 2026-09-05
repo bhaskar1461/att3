@@ -4,7 +4,7 @@ from typing import Optional, List
 from datetime import datetime
 
 from app.core.database import get_db
-from app.api.auth import get_current_user
+from app.api.auth import get_current_user, require_teacher, require_admin
 from app.models.models import User, UserRole, AttendanceRecord, AttendanceSession, Student, Department, Section, Subject
 from app.services.report_service import ReportService
 
@@ -77,6 +77,11 @@ def get_report_user(
     user = db.query(User).filter(User.username == username).first()
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User inactive or not found")
+    if user.role not in [UserRole.TEACHER, UserRole.SUPER_ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Report access and export is restricted to faculty and administrators."
+        )
     return user
 
 @router.get("/export/excel")
@@ -137,7 +142,7 @@ def export_pdf_report(
     )
 
 @router.get("/low-attendance")
-def get_low_attendance_report(threshold: float = 75.0, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_low_attendance_report(threshold: float = 75.0, db: Session = Depends(get_db), current_user: User = Depends(require_teacher)):
     students = db.query(Student).all()
     low_att_list = []
 
@@ -168,7 +173,7 @@ def get_class_sheet_matrix(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_teacher)
 ):
     """
     Returns an Excel-style attendance register matrix for specific classes/sections.

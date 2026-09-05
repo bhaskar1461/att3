@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SNIST ERP — Complete Your Onboarding</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f4f8;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 600px; margin: 0 auto; background-color: #ffffff;">
+        <!-- Header -->
+        <tr>
+            <td style="background: linear-gradient(135deg, #001e40 0%, #15347e 50%, #2f53d7 100%); padding: 32px 24px; text-align: center;">
+                <h1 style="color: #ffffff; font-size: 20px; margin: 0; letter-spacing: 1px;">SREENIDHI INSTITUTE OF SCIENCE &amp; TECHNOLOGY</h1>
+                <p style="color: #a8c4e6; font-size: 12px; margin: 8px 0 0; text-transform: uppercase; letter-spacing: 2px;">AI QR ATTENDANCE SYSTEM — STUDENT ONBOARDING</p>
+            </td>
+        </tr>
+
+        <!-- Body -->
+        <tr>
+            <td style="padding: 32px 24px;">
+                <p style="color: #15347e; font-size: 16px; font-weight: 600; margin: 0 0 16px;">Dear {{ student_name }},</p>
+
+                <p style="color: #333; font-size: 14px; line-height: 1.6;">
+                    You have been enrolled in the SNIST AI QR Attendance System. Please complete your onboarding to activate your student portal account.
+                </p>
+
+                <!-- Details Card -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="background: #f0f4ff; border: 1px solid #d4dff7; border-radius: 12px; margin: 20px 0;">
+                    <tr>
+                        <td style="padding: 16px 20px;">
+                            <p style="margin: 0 0 4px; color: #6a7894; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;">Roll Number</p>
+                            <p style="margin: 0 0 12px; color: #15347e; font-size: 16px; font-weight: 700; font-family: monospace;">{{ roll_number }}</p>
+                            {% if department %}
+                            <p style="margin: 0 0 4px; color: #6a7894; font-size: 11px; text-transform: uppercase;">Department</p>
+                            <p style="margin: 0 0 12px; color: #333; font-size: 14px;">{{ department }}{% if section %} — Section {{ section }}{% endif %}</p>
+                            {% endif %}
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- CTA Button -->
+                <table width="100%" cellpadding="0" cellspacing="0">
+                    <tr>
+                        <td align="center" style="padding: 8px 0 24px;">
+                            <a href="{{ magic_link }}" 
+                               style="display: inline-block; background: linear-gradient(135deg, #2f53d7, #15347e); color: #ffffff; text-decoration: none; padding: 14px 36px; font-size: 15px; font-weight: 700; border-radius: 10px; letter-spacing: 0.5px;">
+                                Complete Your Onboarding →
+                            </a>
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- Security Notes -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="background: #fff9e6; border: 1px solid #f5e6a3; border-radius: 8px;">
+                    <tr>
+                        <td style="padding: 14px 16px;">
+                            <p style="margin: 0 0 8px; color: #8a6d00; font-size: 12px; font-weight: 700;">⚠️ IMPORTANT SECURITY NOTES</p>
+                            <ul style="margin: 0; padding-left: 16px; color: #666; font-size: 12px; line-height: 1.8;">
+                                <li>This link expires in <strong>{{ expiry_hours }} hours</strong></li>
+                                <li>This link can only be used <strong>once</strong> — do NOT share it</li>
+                                <li>Your device will be permanently bound during onboarding</li>
+                                <li>You will need to set a 4-6 digit PIN for daily login</li>
+                            </ul>
+                        </td>
+                    </tr>
+                </table>
+
+                <p style="color: #999; font-size: 11px; margin: 24px 0 0; line-height: 1.6;">
+                    If you did not expect this email, please ignore it. If you have questions, contact your class in-charge or the IT helpdesk.
+                </p>
+            </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+            <td style="background: #f0f4f8; padding: 16px 24px; text-align: center; border-top: 1px solid #e2e8f0;">
+                <p style="color: #6a7894; font-size: 11px; margin: 0;">
+                    Sreenidhi Institute of Science &amp; Technology — Yamnampet, Ghatkesar, Hyderabad — 501301
+                </p>
+                <p style="color: #999; font-size: 10px; margin: 6px 0 0;">
+                    This is an automated email from the SNIST ERP System. Please do not reply.
+                </p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

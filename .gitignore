@@ -1,4 +1,7 @@
 # Credentials & Tokens
+.env
+backend/.env
+*.env
 credentials.json
 backend/credentials.json
 token.pickle
@@ -35,6 +38,11 @@ node_modules/
 dist/
 .output/
 .vite/
+*.tar.gz
+*.tar
+*.zip
+*_bundle.tar.gz
+snist_deploy.tar.gz
 
 # Logs & Tunnels
 *.log
@@ -46,3 +54,6 @@ cf_tunnel_err.log
 .idea/
 .DS_Store
 Thumbs.db
+
+# Scratch & Temporary Scripts
+scratch/

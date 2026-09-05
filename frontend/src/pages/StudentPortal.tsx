@@ -1,12 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
 import { Calendar, Clock, MapPin, User, PieChart, Home, ChevronRight, X, BookOpen, Camera } from 'lucide-react';
-import { StudentClassScannerModal } from '../components/StudentClassScannerModal';
+// Lazy-load heavy html5-qrcode scanner modal so students do not download it on initial portal load
+const StudentClassScannerModal = React.lazy(() => 
+  import('../components/StudentClassScannerModal').then(m => ({ default: m.StudentClassScannerModal }))
+);
 import { Toast } from '../components/Toast';
 
 export const StudentPortal: React.FC = () => {
   const [profile, setProfile] = useState<any>(null);
   const [summary, setSummary] = useState<any>(null);
+  const [schedule, setSchedule] = useState<any>(null);
   const [showSubjectModal, setShowSubjectModal] = useState<boolean>(false);
   const [showClassScannerModal, setShowClassScannerModal] = useState<boolean>(false);
   const [activeNavTab, setActiveNavTab] = useState<'home' | 'attendance' | 'timetable'>('home');
@@ -18,9 +22,10 @@ export const StudentPortal: React.FC = () => {
 
   const fetchStudentData = async () => {
     try {
-      const [profileRes, summaryRes] = await Promise.allSettled([
+      const [profileRes, summaryRes, scheduleRes] = await Promise.allSettled([
         apiRequest<any>('/student/profile'),
-        apiRequest<any>('/student/attendance-summary')
+        apiRequest<any>('/student/attendance-summary'),
+        apiRequest<any>('/student/today-schedule')
       ]);
 
       if (profileRes.status === 'fulfilled') {
@@ -28,6 +33,9 @@ export const StudentPortal: React.FC = () => {
       }
       if (summaryRes.status === 'fulfilled') {
         setSummary(summaryRes.value);
+      }
+      if (scheduleRes.status === 'fulfilled') {
+        setSchedule(scheduleRes.value);
       }
 
       if (profileRes.status === 'rejected') {
@@ -95,21 +103,25 @@ export const StudentPortal: React.FC = () => {
             <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
               <div>
                 <div className="flex items-center gap-2 mb-3">
-                  <Clock className="w-4 h-4 text-[#FF9F0A]" />
-                  <span className="text-xs font-bold text-[#a7c8ff] uppercase tracking-wider">Starts in 42 mins</span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                  <span className="text-xs font-bold text-[#a7c8ff] uppercase tracking-wider">
+                    {schedule?.active_session?.status || 'Active Session (4 Periods)'}
+                  </span>
                 </div>
-                <h3 className="text-xl sm:text-2xl font-bold font-geist mb-2 text-white">Data Structures & Algorithms</h3>
+                <h3 className="text-xl sm:text-2xl font-bold font-geist mb-2 text-white">
+                  Career Enhancement Training (CET)
+                </h3>
                 <p className="text-xs text-[#a7c8ff] flex flex-wrap items-center gap-3">
-                  <span className="flex items-center gap-1"><User className="w-3.5 h-3.5" /> Prof. K. Sharma</span>
+                  <span className="flex items-center gap-1"><User className="w-3.5 h-3.5" /> Mrs. N. Sowjanya</span>
                   <span className="opacity-40">•</span>
-                  <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5" /> Room 304, Block B</span>
+                  <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5" /> CSE-CS Projector Lab</span>
                 </p>
               </div>
 
               <div className="flex-shrink-0">
-                <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4 text-center border border-white/10 min-w-[120px]">
-                  <span className="block text-[10px] font-bold text-[#a7c8ff] mb-1">SESSION TIME</span>
-                  <span className="block text-lg font-extrabold font-mono">09:30 AM</span>
+                <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4 text-center border border-white/10 min-w-[130px]">
+                  <span className="block text-[10px] font-bold text-[#a7c8ff] mb-1">SESSION CREDIT</span>
+                  <span className="block text-lg font-extrabold font-mono text-amber-300">4 Periods</span>
                 </div>
               </div>
             </div>
@@ -255,42 +267,30 @@ export const StudentPortal: React.FC = () => {
                   );
                 })
               ) : (
-                <>
-                  {/* Default Institutional Schedule */}
-                  <div className="p-4 rounded-xl bg-[#F5F5F7] border border-[#D2D2D7] flex items-center justify-between">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="px-2 py-0.5 bg-[#d5e3ff] text-[#001b3c] font-bold text-[10px] rounded uppercase font-mono">09:30 AM - 11:10 AM</span>
-                        <span className="px-2 py-0.5 bg-[#FF9F0A]/10 text-[#FF9F0A] font-bold text-[10px] rounded">Upcoming</span>
-                      </div>
-                      <h4 className="font-bold text-base text-[#001e40]">Data Structures & Algorithms</h4>
-                      <p className="text-xs text-[#5e5e63] mt-0.5">Room 304, Block B • Prof. K. Sharma</p>
+                <div className="p-4 rounded-xl bg-gradient-to-r from-blue-50/70 to-amber-50/40 border border-[#D2D2D7] flex items-center justify-between shadow-sm">
+                  <div className="flex-1 mr-3">
+                    <div className="flex items-center gap-2 mb-1.5">
+                      <span className="px-2.5 py-0.5 bg-[#001e40] text-white font-bold text-[10px] rounded uppercase font-mono tracking-wider">
+                        4 Periods Block
+                      </span>
+                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 font-bold text-[10px] rounded flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
+                        Live In-Class
+                      </span>
                     </div>
-                    <ChevronRight className="w-5 h-5 text-[#737780]" />
+                    <h4 className="font-bold text-base text-[#001e40]">Career Enhancement Training (CET)</h4>
+                    <p className="text-xs text-[#5e5e63] mt-1 flex flex-wrap items-center gap-2 font-medium">
+                      <span>Faculty: <strong className="text-slate-800">Mrs. N. Sowjanya</strong></span>
+                      <span className="opacity-40">•</span>
+                      <span>CSE-CS Projector Lab</span>
+                    </p>
                   </div>
-
-                  <div className="p-4 rounded-xl bg-white border border-[#D2D2D7] flex items-center justify-between hover:bg-[#F5F5F7] transition-colors">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-xs font-bold text-[#5e5e63] font-mono">11:20 AM - 12:10 PM</span>
-                      </div>
-                      <h4 className="font-bold text-base text-[#001e40]">Operating Systems</h4>
-                      <p className="text-xs text-[#5e5e63] mt-0.5">Lab 2, Block A • Dr. V. Rao</p>
-                    </div>
-                    <ChevronRight className="w-5 h-5 text-[#737780]" />
+                  <div className="text-right shrink-0">
+                    <span className="px-3 py-1.5 bg-amber-400/20 text-amber-900 border border-amber-400/30 rounded-xl text-xs font-black font-mono block">
+                      4 Periods
+                    </span>
                   </div>
-
-                  <div className="p-4 rounded-xl bg-white border border-[#D2D2D7] flex items-center justify-between hover:bg-[#F5F5F7] transition-colors">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="text-xs font-bold text-[#5e5e63] font-mono">01:00 PM - 02:40 PM</span>
-                      </div>
-                      <h4 className="font-bold text-base text-[#001e40]">Database Management Systems</h4>
-                      <p className="text-xs text-[#5e5e63] mt-0.5">Room 102, Block C • Prof. M. Reddy</p>
-                    </div>
-                    <ChevronRight className="w-5 h-5 text-[#737780]" />
-                  </div>
-                </>
+                </div>
               )}
             </div>
           </div>
@@ -409,13 +409,15 @@ export const StudentPortal: React.FC = () => {
 
       {/* Student Classroom Camera Scanner Modal */}
       {showClassScannerModal && (
-        <StudentClassScannerModal
-          onClose={() => setShowClassScannerModal(false)}
-          onScanComplete={() => {
-            fetchStudentData();
-            setToast({ message: 'Attendance recorded successfully!', type: 'success' });
-          }}
-        />
+        <React.Suspense fallback={null}>
+          <StudentClassScannerModal
+            onClose={() => setShowClassScannerModal(false)}
+            onScanComplete={() => {
+              fetchStudentData();
+              setToast({ message: 'Attendance recorded successfully!', type: 'success' });
+            }}
+          />
+        </React.Suspense>
       )}
 
     </div>

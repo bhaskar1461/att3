@@ -155,7 +155,6 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
             </div>
             <div>
               <h3 className="font-extrabold text-sm text-[#001e40]">Scan Classroom QR</h3>
-              <p className="text-[11px] text-slate-500 font-medium">Point your camera at the projector screen</p>
             </div>
           </div>
           <button
@@ -247,15 +246,10 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
               </div>
 
               {/* Status or Error Notifications */}
-              {scanError ? (
+              {scanError && (
                 <div className="w-full p-3 bg-rose-50 border border-rose-200 rounded-2xl text-xs text-rose-700 flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
                   <p className="font-medium">{scanError}</p>
-                </div>
-              ) : (
-                <div className="flex items-center gap-2 text-xs text-slate-500 font-medium text-center">
-                  <Sparkles className="w-4 h-4 text-amber-500" />
-                  <span>Aim camera directly at the 10-second rotating code</span>
                 </div>
               )}
 

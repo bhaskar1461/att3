@@ -49,12 +49,3 @@ services:
     depends_on:
       - backend
 
-  ngrok:
-    image: ngrok/ngrok:latest
-    container_name: attendance_ngrok_tunnel
-    restart: always
-    command: http frontend:80
-    environment:
-      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
-    depends_on:
-      - frontend

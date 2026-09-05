@@ -1,15 +1,21 @@
+import os
+import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status
-from sqlalchemy.orm import Session
+from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime
 
+from app.core.config import settings
 from app.core.database import get_db, SessionLocal
 from app.api.auth import get_current_user
 from app.models.models import (
     User, UserRole, Teacher, TeacherAssignment, AttendanceSession, 
-    AttendanceRecord, Student, SessionStatus
+    AttendanceRecord, AttendanceStatus, Student, SessionStatus
 )
+
+logger = logging.getLogger("snist_erp.teacher")
 
 router = APIRouter(prefix="/teacher", tags=["Teacher Mobile Workflow"])
 
@@ -204,12 +210,42 @@ def get_historical_sessions(
     if date:
         query = query.filter(AttendanceSession.session_date == date)
     
-    sessions = query.order_by(AttendanceSession.created_at.desc()).all()
+    # Eagerly load subject and section in 1 query
+    sessions = query.options(
+        joinedload(AttendanceSession.subject),
+        joinedload(AttendanceSession.section)
+    ).order_by(AttendanceSession.created_at.desc()).all()
+
+    if not sessions:
+        return []
+
+    # Batch group aggregations to eliminate 2 queries per session inside loop
+    session_ids = [s.id for s in sessions]
+    section_ids = list(set(s.section_id for s in sessions))
+
+    # Single query for section total students count across all sections
+    total_students_map = dict(
+        db.query(Student.section_id, func.count(Student.id))
+        .filter(Student.section_id.in_(section_ids))
+        .group_by(Student.section_id)
+        .all()
+    )
+
+    # Single query for present counts across all sessions
+    present_counts_map = dict(
+        db.query(AttendanceRecord.session_id, func.count(AttendanceRecord.id))
+        .filter(
+            AttendanceRecord.session_id.in_(session_ids),
+            AttendanceRecord.status.in_([AttendanceStatus.PRESENT, "4"])
+        )
+        .group_by(AttendanceRecord.session_id)
+        .all()
+    )
+
     res = []
     for s in sessions:
-        total_students = db.query(Student).filter(Student.section_id == s.section_id).count()
-        records = db.query(AttendanceRecord).filter(AttendanceRecord.session_id == s.id).all()
-        present_count = sum(1 for r in records if r.status.value in ["PRESENT", "4"])
+        total_students = total_students_map.get(s.section_id, 0)
+        present_count = present_counts_map.get(s.id, 0)
         absent_count = max(0, total_students - present_count)
 
         res.append({
@@ -231,7 +267,11 @@ def get_historical_sessions(
 
 @router.get("/sessions/{session_id}")
 def get_session_details(session_id: int, db: Session = Depends(get_db), current_teacher: Teacher = Depends(require_teacher)):
-    session = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+    # Eagerly load subject and section
+    session = db.query(AttendanceSession).options(
+        joinedload(AttendanceSession.subject),
+        joinedload(AttendanceSession.section)
+    ).filter(AttendanceSession.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Attendance session not found")
 
@@ -347,6 +387,78 @@ def get_session_broadcast_token(
 
 from app.api.attendance import invalidate_session_cache
 from app.core.frappe_sync import sync_session_to_frappe
+from app.services.gsheets_service import GoogleSheetsService
+from app.services.excel_service import ExcelAttendanceService
+
+def _async_full_session_sync(session_id: int, target_sheet_id: Optional[str] = None):
+    """
+    Defensively executes asynchronous multi-target sync for a locked attendance session:
+    1. Institutional Frappe ERP
+    2. Google Sheets Attendance Register (atomic single-call batch sync)
+    3. Official Master Excel Register
+    Any individual target failure is logged without impacting other sync targets or the API response.
+    """
+    sync_db = SessionLocal()
+    try:
+        session = sync_db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+        if not session:
+            return
+
+        date_str = session.session_date
+        all_students = sync_db.query(Student).filter(Student.section_id == session.section_id).all()
+        all_rolls = [s.roll_number for s in all_students]
+
+        records = sync_db.query(AttendanceRecord).filter(AttendanceRecord.session_id == session_id).all()
+        present_rolls = [r.roll_number for r in records if getattr(r.status, "value", str(r.status)) in ["PRESENT", "4"]]
+
+        # 1. Sync to Frappe ERP
+        try:
+            sync_session_to_frappe(sync_db, session_id)
+        except Exception as f_err:
+            logger.warning(f"[Frappe Sync Warning] Session {session_id} Frappe sync failed: {f_err}")
+
+        # 2. Sync to Google Sheets (if sheet ID is configured)
+        if target_sheet_id:
+            try:
+                creds_file = settings.GOOGLE_CREDENTIALS_FILE or os.path.join(settings.BACKEND_DIR, "credentials.json")
+                GoogleSheetsService.sync_session_to_gsheet(
+                    credentials_json=creds_file,
+                    spreadsheet_id=target_sheet_id,
+                    date_str=date_str,
+                    present_rolls=present_rolls,
+                    all_section_rolls=all_rolls,
+                    period_total="4"
+                )
+            except Exception as gs_err:
+                logger.warning(f"[Google Sheets Sync Warning] Session {session_id} GSheets sync failed: {gs_err}")
+
+        # 3. Sync to Official Master Excel Register
+        try:
+            master_excel = os.path.join(settings.MASTER_TEMPLATE_DIR, "Official_Attendance_Register.xlsx")
+            if os.path.exists(master_excel):
+                from datetime import datetime as dt
+                try:
+                    d_obj = dt.strptime(date_str, "%Y-%m-%d")
+                    d_formatted = d_obj.strftime("%d/%m/%Y")
+                except Exception:
+                    d_formatted = date_str
+
+                for r_num in all_rolls:
+                    status_val = "4" if r_num in present_rolls else "A"
+                    ExcelAttendanceService.record_attendance_in_excel(
+                        file_path=master_excel,
+                        roll_number=r_num,
+                        date_str=d_formatted,
+                        status_code=status_val,
+                        overwrite=True
+                    )
+        except Exception as ex_err:
+            logger.warning(f"[Excel Sync Warning] Session {session_id} Excel sync failed: {ex_err}")
+
+    except Exception as general_err:
+        logger.error(f"[Async Full Session Sync Error] Session {session_id}: {general_err}", exc_info=True)
+    finally:
+        sync_db.close()
 
 @router.post("/sessions/{session_id}/lock")
 def lock_session(
@@ -359,7 +471,7 @@ def lock_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.teacher_id != current_teacher.id:
+    if session.teacher_id != current_teacher.id and current_teacher.user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Not authorized to lock this session")
     
     session.status = SessionStatus.LOCKED
@@ -367,27 +479,79 @@ def lock_session(
     db.commit()
     invalidate_session_cache(session_id)
 
-    log_security_audit_event(
-        db=db,
-        event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
-        action="SESSION_LOCKED",
-        details=f"Session {session_id} locked by teacher {current_teacher.name}",
-        user_id=current_teacher.user_id
-    )
+    # Determine Google Sheet ID for this teacher
+    teacher_sheet_id = (current_teacher.google_sheet_id or "").strip()
+    if not teacher_sheet_id:
+        from app.models.models import SystemSettings
+        setting = db.query(SystemSettings).filter(SystemSettings.key == "GOOGLE_SPREADSHEET_ID").first()
+        teacher_sheet_id = (setting.value.strip() if (setting and setting.value) else getattr(settings, "GOOGLE_SPREADSHEET_ID", "")).strip()
 
-    # Defensively trigger background sync to Frappe ERP
-    def _async_frappe_sync():
-        sync_db = SessionLocal()
-        try:
-            sync_session_to_frappe(sync_db, session_id)
-        except Exception:
-            pass
-        finally:
-            sync_db.close()
+    has_google_sheet = bool(teacher_sheet_id)
+    warning_msg = None
 
-    background_tasks.add_task(_async_frappe_sync)
+    if not has_google_sheet:
+        warning_msg = "No Google Sheet linked for this faculty. Attendance is safely stored in the institutional database and ready for sync once a Google Sheet URL is linked."
+        log_security_audit_event(
+            db=db,
+            event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
+            action="SESSION_LOCKED_WITHOUT_SHEET",
+            details=f"Session {session_id} locked by {current_teacher.name}. Attendance saved in DB; Google Sheet pending configuration.",
+            user_id=current_teacher.user_id
+        )
+    else:
+        log_security_audit_event(
+            db=db,
+            event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
+            action="SESSION_LOCKED",
+            details=f"Session {session_id} locked by {current_teacher.name}. Full background sync queued.",
+            user_id=current_teacher.user_id
+        )
 
-    return {"message": "Attendance session locked successfully and queued for Frappe ERP sync"}
+    # Always dispatch non-blocking background sync (Frappe + Excel, plus Sheets if configured)
+    background_tasks.add_task(_async_full_session_sync, session_id, teacher_sheet_id if has_google_sheet else None)
+
+    return {
+        "status": "SUCCESS",
+        "message": "Attendance session locked successfully and attendance records committed to institutional database.",
+        "has_google_sheet": has_google_sheet,
+        "warning": warning_msg
+    }
+
+@router.post("/sessions/{session_id}/sync-sheet")
+def trigger_session_sheet_sync(
+    session_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_teacher: Teacher = Depends(require_teacher)
+):
+    """
+    Manually triggers or re-triggers Google Sheet and external register sync for a locked session.
+    Enables faculty to sync past sessions immediately after linking their Google Sheet URL.
+    """
+    session = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if session.teacher_id != current_teacher.id and current_teacher.user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Not authorized to sync this session")
+
+    teacher_sheet_id = (current_teacher.google_sheet_id or "").strip()
+    if not teacher_sheet_id:
+        from app.models.models import SystemSettings
+        setting = db.query(SystemSettings).filter(SystemSettings.key == "GOOGLE_SPREADSHEET_ID").first()
+        teacher_sheet_id = (setting.value.strip() if (setting and setting.value) else getattr(settings, "GOOGLE_SPREADSHEET_ID", "")).strip()
+
+    if not teacher_sheet_id:
+        raise HTTPException(
+            status_code=400,
+            detail="No Google Sheet URL is linked yet. Please update your Google Sheet URL in Settings first."
+        )
+
+    background_tasks.add_task(_async_full_session_sync, session_id, teacher_sheet_id)
+    return {
+        "status": "SUCCESS",
+        "message": f"Sync queued successfully for Session {session_id} to Google Sheet."
+    }
 
 @router.post("/sessions/{session_id}/unlock")
 def unlock_session(session_id: int, db: Session = Depends(get_db), current_teacher: Teacher = Depends(require_teacher)):
@@ -395,7 +559,7 @@ def unlock_session(session_id: int, db: Session = Depends(get_db), current_teach
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    if session.teacher_id != current_teacher.id:
+    if session.teacher_id != current_teacher.id and current_teacher.user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Not authorized to unlock this session")
     
     session.status = SessionStatus.OPEN

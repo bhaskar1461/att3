@@ -1,13 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlalchemy.orm import Session
+from sqlalchemy import or_
+from sqlalchemy.orm import Session, joinedload
 from datetime import timedelta
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict
 
 from app.core.database import get_db
+import logging
 from app.core.security import verify_password, get_password_hash, create_access_token, decode_access_token
-from app.models.models import User, UserRole, Teacher, Student, Department
+from app.models.models import User, UserRole, Teacher, Student, Department, StudentOnboarding
+
+logger = logging.getLogger("snist_erp.auth")
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -47,10 +51,115 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     username: str = payload.get("sub")
     if username is None:
         raise HTTPException(status_code=401, detail="Invalid token payload")
-    user = db.query(User).filter(User.username == username).first()
+    # Eagerly load user profiles in 1 query to prevent lazy loading in downstream endpoints
+    user = db.query(User).options(
+        joinedload(User.student_profile),
+        joinedload(User.teacher_profile)
+    ).filter(User.username == username).first()
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="User inactive or not found")
     return user
+
+def require_teacher(request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+    if current_user.role not in [UserRole.TEACHER, UserRole.SUPER_ADMIN]:
+        # Student JWT attempting privilege escalation to faculty endpoints
+        # WHY: Immediately records and alerts operator on active authorization bypass attempts.
+        if current_user.role == UserRole.STUDENT:
+            try:
+                from app.core.device_security import record_audit_log
+                ip_addr = request.client.host if request.client else None
+                record_audit_log(
+                    db=db,
+                    user_id=current_user.id,
+                    roll_number=current_user.username,
+                    event_type="PRIVESC_ATTEMPT",
+                    action="UNAUTHORIZED_FACULTY_ENDPOINT_ACCESS",
+                    details=f"Student account {current_user.username} attempted unauthorized access to {request.method} {request.url.path}",
+                    ip_address=ip_addr
+                )
+            except Exception as e:
+                logger.warning(f"Failed to log PRIVESC_ATTEMPT: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Faculty or Administrative privileges required"
+        )
+    return current_user
+
+def require_admin(request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:
+    if current_user.role != UserRole.SUPER_ADMIN:
+        # Non-admin attempting access to Super Admin route
+        # WHY: Logs and alerts on unauthorized administrative access attempts.
+        try:
+            from app.core.device_security import record_audit_log
+            ip_addr = request.client.host if request.client else None
+            record_audit_log(
+                db=db,
+                user_id=current_user.id,
+                roll_number=current_user.username,
+                event_type="PRIVESC_ATTEMPT",
+                action="UNAUTHORIZED_ADMIN_ENDPOINT_ACCESS",
+                details=f"User {current_user.username} (Role: {current_user.role}) attempted unauthorized access to {request.method} {request.url.path}",
+                ip_address=ip_addr
+            )
+        except Exception as e:
+            logger.warning(f"Failed to log PRIVESC_ATTEMPT: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super Admin privileges required"
+        )
+    return current_user
+
+import time
+import threading
+from collections import defaultdict
+
+class FailedLoginRateLimiter:
+    """
+    In-memory thread-safe rate limiter tracking consecutive failed login attempts per client IP.
+    Blocks any IP accumulating 5 failed attempts within 300 seconds (5 minutes) to protect against
+    pre-class lockout storms and credential spraying.
+    """
+    def __init__(self, max_failures: int = 5, block_duration_seconds: int = 300):
+        self.max_failures = max_failures
+        self.block_duration = block_duration_seconds
+        self._failures: Dict[str, List[float]] = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def check_rate_limit(self, ip_address: Optional[str]) -> None:
+        if not ip_address:
+            return
+        now = time.time()
+        with self._lock:
+            valid_attempts = [t for t in self._failures[ip_address] if now - t < self.block_duration]
+            self._failures[ip_address] = valid_attempts
+            if len(valid_attempts) >= self.max_failures:
+                retry_after = int(self.block_duration - (now - valid_attempts[0]))
+                # Hook rate-limit trigger for security digest tracking
+                # WHY: Tracks credential spraying attempts for rollup in hourly digest.
+                try:
+                    from app.services.security_alert_service import alert_tracker, EVENT_LOGIN_RATE_LIMIT
+                    alert_tracker.record_and_evaluate(EVENT_LOGIN_RATE_LIMIT, ip_address or "UNKNOWN_IP", ip_address or "UNKNOWN_IP")
+                except Exception:
+                    pass
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Too many failed login attempts from this network. Please wait {max(1, retry_after)} seconds before trying again."
+                )
+
+    def record_failure(self, ip_address: Optional[str]) -> None:
+        if not ip_address:
+            return
+        now = time.time()
+        with self._lock:
+            self._failures[ip_address].append(now)
+
+    def record_success(self, ip_address: Optional[str]) -> None:
+        if not ip_address:
+            return
+        with self._lock:
+            self._failures.pop(ip_address, None)
+
+failed_login_limiter = FailedLoginRateLimiter(max_failures=5, block_duration_seconds=300)
 
 from app.core.device_security import (
     register_or_get_device,
@@ -95,9 +204,18 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
     password = (password or "").strip()
     ip_address = request.client.host if request.client else None
 
-    user = db.query(User).filter(User.username == username).first()
-    if not user:
-        user = db.query(User).filter(User.username.ilike(username)).first()
+    # Enforce IP-based rate limiting to thwart pre-class student lockout storms
+    failed_login_limiter.check_rate_limit(ip_address)
+
+    user = db.query(User).filter(
+        or_(
+            User.username == username,
+            User.email == username,
+            User.username.ilike(username),
+            User.email.ilike(username),
+            User.email.ilike(f"{username}@%")
+        )
+    ).first()
 
     # 1. Enforce Student Device Binding Security LOCKOUT BEFORE/DURING login
     if user and user.role == UserRole.STUDENT:
@@ -124,7 +242,6 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
             roll_number = user.student_profile.roll_number.upper()
 
         # Enforce 30-minute device lock & 5-attempt limit
-        # MUST happen before password check if switching accounts, but check password first for correct account
         enforce_device_binding(
             db=db,
             device=device,
@@ -132,16 +249,26 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
             ip_address=ip_address
         )
 
-    # 2. Verify password
+    # 2. Verify password (strict - no hardcoded student backdoor)
     is_valid_pw = False
     if user:
         is_valid_pw = verify_password(password, user.password_hash)
+        # Self-healing fallback: Check student onboarding PIN if out of sync
         if not is_valid_pw and user.role == UserRole.STUDENT:
-            # Allow students to log in with their roll number (case-insensitive) or default 'student123'
-            if password.strip().upper() == username.strip().upper() or password == "student123":
-                is_valid_pw = True
+            try:
+                onboarding_rec = db.query(StudentOnboarding).filter(
+                    StudentOnboarding.roll_number == user.username
+                ).first()
+                if onboarding_rec and onboarding_rec.pin_hash:
+                    if verify_password(password, onboarding_rec.pin_hash):
+                        is_valid_pw = True
+                        user.password_hash = onboarding_rec.pin_hash
+                        db.commit()
+            except Exception as sync_err:
+                logger.warning(f"Failed to check onboarding pin_hash fallback: {sync_err}")
 
     if not user or not is_valid_pw:
+        failed_login_limiter.record_failure(ip_address)
         log_security_audit_event(
             db=db,
             event_type=SecurityEventType.LOGIN_FAILURE,
@@ -155,6 +282,8 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    failed_login_limiter.record_success(ip_address)
 
     full_name = user.username
     if user.role == UserRole.TEACHER and user.teacher_profile:
@@ -280,3 +409,161 @@ def change_password(req: PasswordChangeRequest, current_user: User = Depends(get
     current_user.password_hash = get_password_hash(req.new_password)
     db.commit()
     return {"message": "Password updated successfully"}
+
+
+# --- Faculty & User Magic Link Login with Password Setting ---
+
+class MagicLoginRequest(BaseModel):
+    token: str
+    new_password: Optional[str] = None
+    device_public_id: Optional[str] = None
+    device_secret: Optional[str] = None
+
+class GenerateMagicLinkRequest(BaseModel):
+    identifier: str
+    expires_days: int = 7
+
+
+@router.get("/magic-token-info")
+def get_magic_token_info(token: str, db: Session = Depends(get_db)):
+    """Validates a magic login token and returns user details before signing in."""
+    from app.core.security import verify_magic_login_token
+    payload = verify_magic_login_token(token)
+    if not payload or not payload.get("sub"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired magic link. Please use your username & password or request a new link."
+        )
+
+    username = payload["sub"]
+    user = db.query(User).options(
+        joinedload(User.student_profile),
+        joinedload(User.teacher_profile)
+    ).filter(User.username == username).first()
+
+    if not user or not user.is_active:
+        raise HTTPException(status_code=400, detail="User account is inactive or not found.")
+
+    full_name = user.username
+    if user.role == UserRole.TEACHER and user.teacher_profile:
+        full_name = user.teacher_profile.name
+    elif user.role == UserRole.STUDENT and user.student_profile:
+        full_name = user.student_profile.name
+
+    return {
+        "valid": True,
+        "username": user.username,
+        "full_name": full_name,
+        "email": user.email,
+        "role": user.role.value
+    }
+
+
+@router.post("/magic-login")
+def login_via_magic_link(req: MagicLoginRequest, request: Request, db: Session = Depends(get_db)):
+    """
+    Authenticates a user via secure magic link token.
+    Allows the user (e.g. Mrs. N. Sowjanya) to choose / update their password directly.
+    """
+    from app.core.security import verify_magic_login_token, get_password_hash, create_access_token
+    payload = verify_magic_login_token(req.token)
+    if not payload or not payload.get("sub"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired magic link. Please sign in with your username and password."
+        )
+
+    username = payload["sub"]
+    user = db.query(User).options(
+        joinedload(User.student_profile),
+        joinedload(User.teacher_profile)
+    ).filter(User.username == username).first()
+
+    if not user or not user.is_active:
+        raise HTTPException(status_code=400, detail="User account is inactive or not found.")
+
+    # Update password if user chose one
+    password_updated = False
+    if req.new_password and req.new_password.strip():
+        pwd = req.new_password.strip()
+        if len(pwd) < 4:
+            raise HTTPException(status_code=400, detail="Password must be at least 4 characters long.")
+        user.password_hash = get_password_hash(pwd)
+        user.must_change_password = False
+        password_updated = True
+        db.commit()
+
+    # Track device if student
+    if user.role == UserRole.STUDENT:
+        device_public_id = (req.device_public_id or "").strip()
+        device_secret = (req.device_secret or "").strip()
+        ip_address = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent")
+        if device_public_id:
+            device = register_or_get_device(db, device_public_id, device_secret, ip_address, user_agent)
+            lock_success, lockout_remaining, bound_sap = enforce_device_binding(db, device.id, user.username)
+            if not lock_success:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Device locked to another student account ({bound_sap}). Please wait {lockout_remaining} minute(s)."
+                )
+
+    access_token = create_access_token(data={"sub": user.username, "role": user.role.value})
+
+    full_name = user.username
+    if user.role == UserRole.TEACHER and user.teacher_profile:
+        full_name = user.teacher_profile.name
+    elif user.role == UserRole.STUDENT and user.student_profile:
+        full_name = user.student_profile.name
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "role": user.role.value,
+        "username": user.username,
+        "full_name": full_name,
+        "user_id": user.id,
+        "password_updated": password_updated,
+    }
+
+
+@router.post("/generate-magic-link")
+def generate_magic_link_endpoint(
+    req: GenerateMagicLinkRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Generates a secure login magic link for a teacher or user (Admin only)."""
+    if current_user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Super Admin permission required.")
+
+    from app.core.security import create_magic_login_token
+    from app.core.config import settings
+
+    ident = req.identifier.strip()
+    user = db.query(User).filter(
+        or_(User.username == ident, User.email == ident)
+    ).first()
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User '{ident}' not found.")
+
+    token = create_magic_login_token(username=user.username, role=user.role.value, expires_days=req.expires_days)
+
+    frontend_url = settings.FRONTEND_URL
+    if not frontend_url:
+        host = request.headers.get("host", "localhost:8000")
+        scheme = request.headers.get("x-forwarded-proto", "https")
+        frontend_url = f"{scheme}://{host}"
+
+    magic_link = f"{frontend_url.rstrip('/')}/login?magic_token={token}"
+    return {
+        "status": "SUCCESS",
+        "username": user.username,
+        "email": user.email,
+        "role": user.role.value,
+        "magic_link": magic_link,
+        "token": token,
+        "expires_days": req.expires_days
+    }
+

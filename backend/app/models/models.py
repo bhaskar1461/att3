@@ -24,6 +24,27 @@ class BindingStatus(str, enum.Enum):
     REVOKED = "REVOKED"
     LOCKED = "LOCKED"
 
+# --- Onboarding & Credential Dispatch Enums ---
+
+class OnboardingState(str, enum.Enum):
+    PENDING_ONBOARDING = "PENDING_ONBOARDING"
+    LINK_SENT = "LINK_SENT"
+    LINK_OPENED = "LINK_OPENED"
+    ACTIVATED = "ACTIVATED"
+    EXPIRED = "EXPIRED"
+    SUSPENDED = "SUSPENDED"
+
+class CredentialEmailStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    SENT = "SENT"
+    FAILED = "FAILED"
+
+class RebindRequestStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    DENIED = "DENIED"
+    AUTO_APPROVED = "AUTO_APPROVED"
+
 class SecurityEventType(str, enum.Enum):
     LOGIN_SUCCESS = "LOGIN_SUCCESS"
     LOGIN_FAILURE = "LOGIN_FAILURE"
@@ -46,6 +67,7 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     role = Column(SQLEnum(UserRole), default=UserRole.STUDENT, nullable=False)
     is_active = Column(Boolean, default=True)
+    must_change_password = Column(Boolean, default=False)  # Enforced on first login after credential dispatch
     created_at = Column(DateTime, default=datetime.utcnow)
 
     teacher_profile = relationship("Teacher", primaryjoin="User.id==Teacher.user_id", foreign_keys="[Teacher.user_id]", uselist=False)
@@ -118,6 +140,10 @@ class Teacher(Base):
 
 class Student(Base):
     __tablename__ = "qr_students"
+    __table_args__ = (
+        Index("idx_student_section", "section_id"),
+        Index("idx_student_dept_year_sec", "department_id", "academic_year_id", "section_id"),
+    )
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, unique=True, nullable=True)
@@ -160,7 +186,7 @@ class AttendanceSession(Base):
     teacher_id = Column(Integer, nullable=False)
     subject_id = Column(Integer, nullable=False)
     section_id = Column(Integer, nullable=False)
-    period = Column(String(20), nullable=False) # e.g. Period 1, Period 2
+    period = Column(String(100), nullable=False) # e.g. Period 1, Period 1-4 (4 Periods)
     session_date = Column(String(20), nullable=False) # YYYY-MM-DD
     status = Column(SQLEnum(SessionStatus), default=SessionStatus.OPEN, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -231,6 +257,10 @@ class DeviceRegistration(Base):
 
 class DeviceAccountBinding(Base):
     __tablename__ = "qr_device_account_bindings"
+    __table_args__ = (
+        Index("idx_dev_bind_lookup", "device_id", "status", "expires_at"),
+        Index("idx_dev_bind_roll", "roll_number"),
+    )
 
     id = Column(Integer, primary_key=True)
     device_id = Column(Integer, nullable=False, index=True)
@@ -247,6 +277,12 @@ class DeviceAccountBinding(Base):
 
 class AuditLog(Base):
     __tablename__ = "qr_audit_logs"
+    __table_args__ = (
+        Index("idx_audit_created_at", "created_at"),
+        Index("idx_audit_created_user", "created_at", "user_id"),
+        Index("idx_audit_roll", "roll_number"),
+        Index("idx_audit_event_type", "event_type"),
+    )
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, nullable=True)
@@ -260,3 +296,155 @@ class AuditLog(Base):
 
     user = relationship("User", primaryjoin="AuditLog.user_id==User.id", foreign_keys="[AuditLog.user_id]", back_populates="audit_logs")
 
+
+# ============================================================
+# ONBOARDING & CREDENTIAL DISPATCH MODELS
+# ============================================================
+
+class StudentOnboarding(Base):
+    """Tracks each student's onboarding state machine. One row per student."""
+    __tablename__ = "qr_student_onboarding"
+    __table_args__ = (
+        Index("idx_onboard_roll", "roll_number"),
+        Index("idx_onboard_state", "state"),
+        Index("idx_onboard_device_uuid", "device_uuid"),
+        Index("idx_onboard_section", "section_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, nullable=True, unique=True)  # FK to qr_students.id — set on activation
+    roll_number = Column(String(50), unique=True, nullable=False)  # Canonical identity key
+    name = Column(String(100), nullable=False)
+    email = Column(String(150), nullable=True)  # Generated college email (pattern-based)
+    section = Column(String(50), nullable=True)  # Section letter from Excel
+    department = Column(String(50), nullable=True)  # Department code
+    gender = Column(String(20), nullable=True)
+    academic_year = Column(String(50), nullable=True)
+    semester = Column(String(20), nullable=True)
+    state = Column(SQLEnum(OnboardingState), default=OnboardingState.PENDING_ONBOARDING, nullable=False)
+    class_incharge_email = Column(String(150), nullable=True)  # Admin-provided at import time
+    mobile_number = Column(String(20), nullable=True)  # Set during onboarding Step 2
+    mobile_verified = Column(Boolean, default=False)
+    pin_hash = Column(String(255), nullable=True)  # Set during onboarding Step 3 (4-6 digit PIN)
+    device_uuid = Column(String(100), nullable=True)  # Bound device from Step 4
+    department_id = Column(Integer, nullable=True)  # FK to qr_departments.id
+    academic_year_id = Column(Integer, nullable=True)  # FK to qr_academic_years.id
+    section_id = Column(Integer, nullable=True)  # FK to qr_sections.id
+    import_batch_ref = Column(String(50), nullable=True)  # Links to import batch for traceability
+    link_sent_at = Column(DateTime, nullable=True)
+    link_opened_at = Column(DateTime, nullable=True)
+    activated_at = Column(DateTime, nullable=True)
+    rebind_count = Column(Integer, default=0)  # Incremented on each device rebind; capped per semester
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    tokens = relationship("OnboardingToken", primaryjoin="StudentOnboarding.id==OnboardingToken.onboarding_id", foreign_keys="[OnboardingToken.onboarding_id]", back_populates="onboarding")
+    otps = relationship("OnboardingOTP", primaryjoin="StudentOnboarding.id==OnboardingOTP.onboarding_id", foreign_keys="[OnboardingOTP.onboarding_id]", back_populates="onboarding")
+
+
+class OnboardingToken(Base):
+    """Magic link tokens — raw token NEVER stored, only SHA-256 hash."""
+    __tablename__ = "qr_onboarding_tokens"
+    __table_args__ = (
+        Index("idx_onboard_token_hash", "token_hash", unique=True),
+        Index("idx_onboard_token_active", "onboarding_id", "is_active"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    onboarding_id = Column(Integer, nullable=False)  # FK to qr_student_onboarding.id
+    token_hash = Column(String(128), unique=True, nullable=False)  # SHA-256 hash of raw token
+    is_consumed = Column(Boolean, default=False)  # Atomic single-use guard
+    is_active = Column(Boolean, default=True)  # Set False when regenerated (invalidates prior links)
+    expires_at = Column(DateTime, nullable=False)  # Default now + 48h (configurable)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    consumed_at = Column(DateTime, nullable=True)  # Set on successful redemption
+
+    onboarding = relationship("StudentOnboarding", primaryjoin="OnboardingToken.onboarding_id==StudentOnboarding.id", foreign_keys="[OnboardingToken.onboarding_id]", back_populates="tokens")
+
+
+class OnboardingOTP(Base):
+    """Email OTP records for verification during onboarding wizard."""
+    __tablename__ = "qr_onboarding_otps"
+
+    id = Column(Integer, primary_key=True)
+    onboarding_id = Column(Integer, nullable=False)  # FK to qr_student_onboarding.id
+    email = Column(String(150), nullable=False)  # Target email for OTP delivery
+    otp_hash = Column(String(128), nullable=False)  # SHA-256 hash of 6-digit OTP code
+    attempts = Column(Integer, default=0)  # Max 5 before lockout
+    is_verified = Column(Boolean, default=False)
+    expires_at = Column(DateTime, nullable=False)  # Default now + 10 minutes
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    onboarding = relationship("StudentOnboarding", primaryjoin="OnboardingOTP.onboarding_id==StudentOnboarding.id", foreign_keys="[OnboardingOTP.onboarding_id]", back_populates="otps")
+
+
+class DeviceRebindRequest(Base):
+    """Admin-approval device rebinding flow."""
+    __tablename__ = "qr_device_rebind_requests"
+
+    id = Column(Integer, primary_key=True)
+    onboarding_id = Column(Integer, nullable=False)  # FK to qr_student_onboarding.id
+    roll_number = Column(String(50), nullable=False, index=True)
+    old_device_uuid = Column(String(100), nullable=True)  # Current bound device
+    new_device_uuid = Column(String(100), nullable=True)  # Requested new device
+    reason = Column(Text, nullable=True)  # Student-provided reason
+    status = Column(SQLEnum(RebindRequestStatus), default=RebindRequestStatus.PENDING, nullable=False)
+    reviewed_by = Column(Integer, nullable=True)  # Admin user_id who approved/denied
+    reviewed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    onboarding = relationship("StudentOnboarding", primaryjoin="DeviceRebindRequest.onboarding_id==StudentOnboarding.id", foreign_keys="[DeviceRebindRequest.onboarding_id]")
+
+
+class CredentialBatch(Base):
+    """Batch tracking for Module 2 credential email dispatch."""
+    __tablename__ = "qr_credential_batches"
+
+    id = Column(Integer, primary_key=True)
+    batch_id = Column(String(50), unique=True, nullable=False, index=True)  # UUID-based identifier
+    target_role = Column(String(20), nullable=False)  # "student" or "teacher"
+    total_count = Column(Integer, default=0)
+    sent_count = Column(Integer, default=0)
+    failed_count = Column(Integer, default=0)
+    is_dry_run = Column(Boolean, default=False)
+    created_by = Column(Integer, nullable=True)  # Admin user_id
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    items = relationship("CredentialItem", primaryjoin="CredentialBatch.batch_id==CredentialItem.batch_id", foreign_keys="[CredentialItem.batch_id]", back_populates="batch")
+
+
+class CredentialItem(Base):
+    """Per-recipient status within a credential batch."""
+    __tablename__ = "qr_credential_items"
+    __table_args__ = (
+        Index("idx_cred_item_batch", "batch_id"),
+        Index("idx_cred_item_sap", "sap_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    batch_id = Column(String(50), nullable=False)  # FK to qr_credential_batches.batch_id
+    sap_id = Column(String(50), nullable=False)  # Roll number / teacher code
+    name = Column(String(100), nullable=True)  # Recipient name for email personalization
+    email = Column(String(150), nullable=False)  # Target email address
+    temp_password_hash = Column(String(255), nullable=True)  # bcrypt hash — plaintext ONLY in email body
+    status = Column(SQLEnum(CredentialEmailStatus), default=CredentialEmailStatus.PENDING, nullable=False)
+    error_detail = Column(Text, nullable=True)  # Failure reason if FAILED
+    sent_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    batch = relationship("CredentialBatch", primaryjoin="CredentialItem.batch_id==CredentialBatch.batch_id", foreign_keys="[CredentialItem.batch_id]", back_populates="items")
+
+
+class OnboardingAuditLog(Base):
+    """Dedicated onboarding audit trail — follows qr_audit_logs pattern."""
+    __tablename__ = "qr_onboarding_audit_log"
+
+    id = Column(Integer, primary_key=True)
+    roll_number = Column(String(50), nullable=True, index=True)
+    event_type = Column(String(50), nullable=False)  # LINK_GENERATED, LINK_REDEEMED, OTP_SENT, etc.
+    action = Column(String(100), nullable=False)
+    details = Column(Text, nullable=True)
+    ip_address = Column(String(50), nullable=True)
+    performed_by = Column(Integer, nullable=True)  # Admin user_id or null for student self-service
+    created_at = Column(DateTime, default=datetime.utcnow)  # Server IST
