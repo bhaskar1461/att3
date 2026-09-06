@@ -4,7 +4,7 @@ import { TeacherAssignment, AttendanceSession, HistoricalAttendanceSession } fro
 import { 
   Camera, Lock, Unlock, RefreshCw, Search, Calendar, History, 
   FileSpreadsheet, ExternalLink, Users, Zap, CheckCircle, X,
-  UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Maximize2
+  UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Maximize2, Smartphone
 } from 'lucide-react';
 // Lazy-load heavy camera scanner and excel register modals
 const QRScannerModal = React.lazy(() => import('../components/QRScannerModal').then(m => ({ default: m.QRScannerModal })));
@@ -13,11 +13,51 @@ import { ManualSearchModal } from '../components/ManualSearchModal';
 import { ProjectorBroadcastModal } from '../components/ProjectorBroadcastModal';
 import { Toast } from '../components/Toast';
 
+const PERIOD_LIST = [
+  { num: 1, label: 'Period 1', time: '09:10 - 10:00' },
+  { num: 2, label: 'Period 2', time: '10:00 - 10:50' },
+  { num: 3, label: 'Period 3', time: '10:50 - 11:40' },
+  { num: 4, label: 'Period 4', time: '11:40 - 12:30' },
+  { num: 5, label: 'Period 5', time: '01:10 - 02:00' },
+  { num: 6, label: 'Period 6', time: '02:00 - 02:50' },
+  { num: 7, label: 'Period 7', time: '02:50 - 03:40' },
+  { num: 8, label: 'Period 8', time: '03:40 - 04:30' },
+];
+
+const formatPeriodsString = (periods: number[]): string => {
+  if (!periods || periods.length === 0) return 'Period 1';
+  const sorted = [...periods].sort((a, b) => a - b);
+  if (sorted.length === 1) return `Period ${sorted[0]}`;
+  const isConsecutive = sorted.every((val, idx) => idx === 0 || val === sorted[idx - 1] + 1);
+  if (isConsecutive) {
+    return `Period ${sorted[0]}-${sorted[sorted.length - 1]} (${sorted.length} Periods)`;
+  }
+  return `Period ${sorted.join(', ')} (${sorted.length} Periods)`;
+};
+
+const extractPeriodCount = (periodStr?: string): number => {
+  if (!periodStr) return 1;
+  const match = periodStr.match(/\((\d+)\s*periods?\)/i);
+  if (match) return parseInt(match[1], 10);
+  if (periodStr.includes('-')) {
+    const parts = periodStr.replace(/periods?/gi, '').split('-');
+    if (parts.length >= 2) {
+      const p0 = parseInt(parts[0].replace(/\D/g, ''), 10);
+      const p1 = parseInt(parts[1].replace(/\D/g, ''), 10);
+      if (!isNaN(p0) && !isNaN(p1)) return Math.max(1, p1 - p0 + 1);
+    }
+  }
+  const digits = periodStr.match(/\d+/g);
+  if (digits && digits.length > 1) return digits.length;
+  if (digits && digits.length === 1) return 1;
+  return 1;
+};
+
 export const TeacherDashboard: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'today' | 'historical' | 'settings'>('today');
   const [assignments, setAssignments] = useState<TeacherAssignment[]>([]);
   const [selectedAssignment, setSelectedAssignment] = useState<TeacherAssignment | null>(null);
-  const [period, setPeriod] = useState('Period 1');
+  const [selectedPeriods, setSelectedPeriods] = useState<number[]>([1, 2, 3, 4]); // Defaults to 4-period CET/Lab block
   
   const todayStr = new Date().toISOString().split('T')[0];
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
@@ -44,6 +84,31 @@ export const TeacherDashboard: React.FC = () => {
   const [rosterFilter, setRosterFilter] = useState<'ALL' | 'PRESENT' | 'ABSENT'>('ALL');
   const [isSyncingRoster, setIsSyncingRoster] = useState(false);
   const [isStartingSession, setIsStartingSession] = useState(false);
+  const [resetConfirmStudent, setResetConfirmStudent] = useState<any | null>(null);
+  const [isResettingDevice, setIsResettingDevice] = useState(false);
+
+  const handleConfirmResetDevice = async () => {
+    if (!resetConfirmStudent) return;
+    setIsResettingDevice(true);
+    try {
+      await apiRequest('/devices/reset-student-enrollment', {
+        method: 'POST',
+        body: JSON.stringify({ roll_number: resetConfirmStudent.roll_number })
+      });
+      setToast({
+        message: `Device unlinked for ${resetConfirmStudent.roll_number}. Student will auto-enroll on next login.`,
+        type: 'success'
+      });
+      setResetConfirmStudent(null);
+    } catch (err: any) {
+      setToast({
+        message: err.message || 'Failed to reset device binding.',
+        type: 'error'
+      });
+    } finally {
+      setIsResettingDevice(false);
+    }
+  };
 
   useEffect(() => {
     fetchAssignedClasses();
@@ -107,12 +172,30 @@ export const TeacherDashboard: React.FC = () => {
     }
   };
 
+  const togglePeriod = (num: number) => {
+    setSelectedPeriods(prev => {
+      if (prev.includes(num)) {
+        if (prev.length === 1) return prev; // Keep at least one period selected
+        return prev.filter(p => p !== num).sort((a, b) => a - b);
+      } else {
+        return [...prev, num].sort((a, b) => a - b);
+      }
+    });
+  };
+
+  const setPeriodPreset = (nums: number[]) => {
+    setSelectedPeriods([...nums].sort((a, b) => a - b));
+  };
+
   const handleStartSession = async (targetDate?: string) => {
     if (!selectedAssignment) {
       setToast({ message: 'Please select a class first.', type: 'warning' });
       return;
     }
     const sessionDate = targetDate || selectedDate;
+    const periodStr = formatPeriodsString(selectedPeriods);
+    const periodCount = selectedPeriods.length;
+
     setIsStartingSession(true);
     try {
       const response: any = await apiRequest('/teacher/sessions/start', {
@@ -120,7 +203,8 @@ export const TeacherDashboard: React.FC = () => {
         body: JSON.stringify({
           subject_id: selectedAssignment.subject_id,
           section_id: selectedAssignment.section_id,
-          period: period,
+          period: periodStr,
+          period_count: periodCount,
           date: sessionDate
         })
       });
@@ -128,7 +212,10 @@ export const TeacherDashboard: React.FC = () => {
       fetchHistoricalSessions();
       fetchCurrentClass();
       setIsScannerOpen(true);
-      setToast({ message: `Session started for ${period}!`, type: 'success' });
+      setToast({ 
+        message: `Session started for ${periodStr}! (${periodCount} Period${periodCount > 1 ? 's' : ''} credit)`, 
+        type: 'success' 
+      });
     } catch (err: any) {
       setToast({ message: err.message || 'Failed to start session', type: 'error' });
     } finally {
@@ -212,14 +299,15 @@ export const TeacherDashboard: React.FC = () => {
 
   const handleQuickMarkUnmarkedPresent = async (studentId: number, rollNumber: string) => {
     if (!activeSession) return;
+    const sessionPeriodCount = activeSession.period_count || extractPeriodCount(activeSession.period) || 1;
     try {
-      await apiRequest('/attendance/manual', {
+      await apiRequest('/attendance/manual-mark', {
         method: 'POST',
         body: JSON.stringify({
           session_id: activeSession.session_id,
           roll_number: rollNumber,
           status: 'PRESENT',
-          period_count: 4
+          period_count: sessionPeriodCount
         })
       });
       setUnmarkedData((prev: any) => {
@@ -232,7 +320,7 @@ export const TeacherDashboard: React.FC = () => {
         };
       });
       fetchSessionDetails(activeSession.session_id);
-      setToast({ message: `Roll ${rollNumber} marked Present!`, type: 'success' });
+      setToast({ message: `Roll ${rollNumber} marked Present (${sessionPeriodCount} Period${sessionPeriodCount > 1 ? 's' : ''})!`, type: 'success' });
     } catch (err: any) {
       setToast({ message: err.message || 'Failed to mark present', type: 'error' });
     }
@@ -240,21 +328,22 @@ export const TeacherDashboard: React.FC = () => {
 
   const handleToggleStudentAttendance = async (rollNumber: string, currentStatus: string) => {
     if (!activeSession) return;
-    const isPresent = currentStatus === 'PRESENT' || currentStatus === '4';
+    const isPresent = ['PRESENT', '1', '2', '3', '4', '5', '6', '7', '8'].includes(currentStatus);
     const nextStatus = isPresent ? 'ABSENT' : 'PRESENT';
+    const sessionPeriodCount = activeSession.period_count || extractPeriodCount(activeSession.period) || 1;
     try {
-      await apiRequest('/attendance/manual', {
+      await apiRequest('/attendance/manual-mark', {
         method: 'POST',
         body: JSON.stringify({
           session_id: activeSession.session_id,
           roll_number: rollNumber,
           status: nextStatus,
-          period_count: nextStatus === 'PRESENT' ? 4 : 0
+          period_count: nextStatus === 'PRESENT' ? sessionPeriodCount : 0
         })
       });
       fetchSessionDetails(activeSession.session_id);
       setToast({ 
-        message: `${rollNumber} marked ${nextStatus}!`, 
+        message: `${rollNumber} marked ${nextStatus}${nextStatus === 'PRESENT' ? ` (${sessionPeriodCount} Periods)` : ''}!`, 
         type: nextStatus === 'PRESENT' ? 'success' : 'warning' 
       });
     } catch (err: any) {
@@ -612,7 +701,7 @@ export const TeacherDashboard: React.FC = () => {
                 </p>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1.5">Assigned Class / Subject</label>
                   <select
@@ -631,22 +720,121 @@ export const TeacherDashboard: React.FC = () => {
                   </select>
                 </div>
 
-                <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1.5">Class Period</label>
-                  <select
-                    value={period}
-                    onChange={(e) => setPeriod(e.target.value)}
-                    className="snist-input w-full font-semibold"
-                  >
-                    <option value="Period 1">Period 1 (09:10 - 10:00)</option>
-                    <option value="Period 2">Period 2 (10:00 - 10:50)</option>
-                    <option value="Period 3">Period 3 (10:50 - 11:40)</option>
-                    <option value="Period 4">Period 4 (11:40 - 12:30)</option>
-                    <option value="Period 5">Period 5 (01:10 - 02:00)</option>
-                    <option value="Period 6">Period 6 (02:00 - 02:50)</option>
-                    <option value="Period 7">Period 7 (02:50 - 03:40)</option>
-                    <option value="Period 8">Period 8 (03:40 - 04:30)</option>
-                  </select>
+                {/* Multi-Select Period Interface */}
+                <div className="space-y-2.5 p-4 rounded-xl bg-slate-50 border border-slate-200">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <label className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <span>Select Class Periods</span>
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-100 text-[#15347e] font-extrabold border border-blue-200">
+                          Multi-Select
+                        </span>
+                      </label>
+                      <p className="text-[11px] text-slate-500">
+                        Choose multiple periods to award simultaneous attendance credit with one scan.
+                      </p>
+                    </div>
+
+                    {/* Active Selection Summary Badge */}
+                    <span className="px-3 py-1 bg-gradient-to-r from-[#001e40] to-[#15347e] text-white rounded-lg text-xs font-bold font-mono shadow-sm flex items-center gap-1.5">
+                      <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+                      {selectedPeriods.length} Period{selectedPeriods.length > 1 ? 's' : ''} ({formatPeriodsString(selectedPeriods)})
+                    </span>
+                  </div>
+
+                  {/* Fast Presets */}
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Presets:</span>
+                    <button
+                      type="button"
+                      onClick={() => setPeriodPreset([1, 2, 3, 4])}
+                      className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border transition ${
+                        selectedPeriods.length === 4 && [1, 2, 3, 4].every(p => selectedPeriods.includes(p))
+                          ? 'bg-[#15347e] text-white border-[#15347e] shadow-sm'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      ⚡ 4-Period Block (P1–P4)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPeriodPreset([1, 2])}
+                      className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border transition ${
+                        selectedPeriods.length === 2 && [1, 2].every(p => selectedPeriods.includes(p))
+                          ? 'bg-[#15347e] text-white border-[#15347e] shadow-sm'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      ⚡ Double (P1–P2)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPeriodPreset([3, 4])}
+                      className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border transition ${
+                        selectedPeriods.length === 2 && [3, 4].every(p => selectedPeriods.includes(p))
+                          ? 'bg-[#15347e] text-white border-[#15347e] shadow-sm'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      ⚡ Double (P3–P4)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPeriodPreset([5, 6, 7])}
+                      className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border transition ${
+                        selectedPeriods.length === 3 && [5, 6, 7].every(p => selectedPeriods.includes(p))
+                          ? 'bg-[#15347e] text-white border-[#15347e] shadow-sm'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      ⚡ Afternoon Lab (P5–P7)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPeriodPreset([1])}
+                      className={`px-2 py-1 text-[11px] font-bold rounded-lg border transition ${
+                        selectedPeriods.length === 1 && selectedPeriods[0] === 1
+                          ? 'bg-[#15347e] text-white border-[#15347e] shadow-sm'
+                          : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      Single (P1)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPeriodPreset([1, 2, 3, 4, 5, 6, 7, 8])}
+                      className="px-2 py-1 text-[11px] font-semibold text-blue-600 hover:underline ml-auto"
+                    >
+                      Select All 8
+                    </button>
+                  </div>
+
+                  {/* Interactive Period Chips Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 pt-1">
+                    {PERIOD_LIST.map((item) => {
+                      const isSelected = selectedPeriods.includes(item.num);
+                      return (
+                        <button
+                          key={item.num}
+                          type="button"
+                          onClick={() => togglePeriod(item.num)}
+                          className={`relative p-2.5 rounded-xl border text-center transition-all duration-150 flex flex-col items-center justify-center gap-0.5 cursor-pointer ${
+                            isSelected
+                              ? 'bg-gradient-to-b from-[#15347e] to-[#001e40] text-white border-[#001e40] shadow-md ring-2 ring-blue-500/30 font-bold'
+                              : 'bg-white text-slate-700 border-slate-200 hover:border-slate-300 hover:bg-slate-50 shadow-sm'
+                          }`}
+                        >
+                          <div className="flex items-center gap-1">
+                            <span className="font-extrabold text-sm tracking-tight">{item.label}</span>
+                            {isSelected && <CheckCircle className="w-3 h-3 text-emerald-400 shrink-0" />}
+                          </div>
+                          <span className={`text-[10px] font-mono ${isSelected ? 'text-blue-200' : 'text-slate-400'}`}>
+                            {item.time}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
@@ -742,6 +930,13 @@ export const TeacherDashboard: React.FC = () => {
 
                         <div className="flex items-center gap-1.5 shrink-0">
                           <button
+                            onClick={() => setResetConfirmStudent(s)}
+                            className="p-1.5 rounded-lg bg-slate-100 hover:bg-amber-100 text-slate-500 hover:text-amber-800 transition"
+                            title="Reset Device Binding (phone replacement)"
+                          >
+                            <Smartphone className="w-3.5 h-3.5" />
+                          </button>
+                          <button
                             onClick={() => handleToggleStudentAttendance(s.roll_number, s.status)}
                             disabled={activeSession.status !== 'OPEN'}
                             className={`px-3 py-1 rounded-lg text-xs font-black transition-colors ${
@@ -760,6 +955,42 @@ export const TeacherDashboard: React.FC = () => {
                 </div>
               )}
 
+            </div>
+          )}
+
+          {/* Teacher Device Reset Confirmation Modal */}
+          {resetConfirmStudent && (
+            <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4 font-sans">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center font-bold shrink-0">
+                    <Smartphone className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm text-slate-900">Reset Device Binding</h4>
+                    <p className="text-xs text-slate-500">{resetConfirmStudent.name} ({resetConfirmStudent.roll_number})</p>
+                  </div>
+                </div>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  This will unbind the student's registered phone. Their next login will automatically enroll their new device.
+                </p>
+                <div className="flex items-center gap-2 pt-2">
+                  <button
+                    onClick={() => setResetConfirmStudent(null)}
+                    disabled={isResettingDevice}
+                    className="flex-1 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleConfirmResetDevice}
+                    disabled={isResettingDevice}
+                    className="flex-1 py-2 rounded-xl text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white shadow transition"
+                  >
+                    {isResettingDevice ? 'Resetting...' : 'Confirm Reset'}
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 

@@ -27,7 +27,7 @@ try:
                 pass
         salt = "attendance_salt_2026"
         sha_hash = hashlib.sha256(f"{plain_password}{salt}".encode()).hexdigest()
-        if sha_hash == hashed_password or plain_password == hashed_password:
+        if sha_hash == hashed_password:
             return True
         return False
 except ImportError:
@@ -40,7 +40,7 @@ except ImportError:
             return False
         salt = "attendance_salt_2026"
         sha_hash = hashlib.sha256(f"{plain_password}{salt}".encode()).hexdigest()
-        if sha_hash == hashed_password or plain_password == hashed_password:
+        if sha_hash == hashed_password:
             return True
         return False
 

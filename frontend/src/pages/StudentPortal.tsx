@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
-import { Calendar, Clock, MapPin, User, PieChart, Home, ChevronRight, X, BookOpen, Camera } from 'lucide-react';
+import { Calendar, Clock, MapPin, User, PieChart, Home, ChevronRight, X, BookOpen, Camera, CheckCircle, ShieldCheck } from 'lucide-react';
 // Lazy-load heavy html5-qrcode scanner modal so students do not download it on initial portal load
 const StudentClassScannerModal = React.lazy(() => 
   import('../components/StudentClassScannerModal').then(m => ({ default: m.StudentClassScannerModal }))
@@ -47,9 +47,12 @@ export const StudentPortal: React.FC = () => {
     }
   };
 
-  const overallPercent = summary?.overall_percentage || 82.4;
-  const presentCount = summary?.total_present || 83;
-  const absentCount = summary?.total_absent || 18;
+  const hasConducted = (summary?.total_conducted ?? 0) > 0;
+  const overallPercent = hasConducted ? (summary?.overall_percentage ?? 0) : 0;
+  const presentCount = summary?.total_present ?? 0;
+  const absentCount = summary?.total_absent ?? 0;
+  const myAttendance = schedule?.my_attendance;
+  const isMarkedToday = Boolean(myAttendance?.is_marked);
 
   // Circle SVG calculations (radius = 45, circumference = 2 * pi * 45 = 282.7)
   const strokeDashoffset = 282.7 - (282.7 * overallPercent) / 100;
@@ -103,9 +106,11 @@ export const StudentPortal: React.FC = () => {
             <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
               <div>
                 <div className="flex items-center gap-2 mb-3">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                  <span className="text-xs font-bold text-[#a7c8ff] uppercase tracking-wider">
-                    {schedule?.active_session?.status || 'Active Session (4 Periods)'}
+                  <span className={`w-2 h-2 rounded-full ${isMarkedToday ? 'bg-emerald-400' : 'bg-emerald-400 animate-pulse'}`}></span>
+                  <span className="text-xs font-bold text-[#a7c8ff] uppercase tracking-wider font-mono">
+                    {isMarkedToday 
+                      ? `✅ Attendance Credited (${myAttendance?.period_count || 4} Periods)` 
+                      : (schedule?.active_session?.status || 'Active Session (4 Periods)')}
                   </span>
                 </div>
                 <h3 className="text-xl sm:text-2xl font-bold font-geist mb-2 text-white">
@@ -120,8 +125,12 @@ export const StudentPortal: React.FC = () => {
 
               <div className="flex-shrink-0">
                 <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4 text-center border border-white/10 min-w-[130px]">
-                  <span className="block text-[10px] font-bold text-[#a7c8ff] mb-1">SESSION CREDIT</span>
-                  <span className="block text-lg font-extrabold font-mono text-amber-300">4 Periods</span>
+                  <span className="block text-[10px] font-bold text-[#a7c8ff] mb-1">
+                    {isMarkedToday ? 'STATUS' : 'SESSION CREDIT'}
+                  </span>
+                  <span className={`block text-lg font-extrabold font-mono ${isMarkedToday ? 'text-emerald-300' : 'text-amber-300'}`}>
+                    {isMarkedToday ? 'PRESENT ✅' : `${myAttendance?.period_count || 4} Periods`}
+                  </span>
                 </div>
               </div>
             </div>
@@ -134,49 +143,98 @@ export const StudentPortal: React.FC = () => {
             )}
           </div>
 
-          {/* Primary Action Card: Scan Classroom Projector QR */}
-          <div className="col-span-1 md:col-span-4 bg-gradient-to-br from-[#001e40] via-[#093268] to-[#15347e] text-white rounded-2xl p-6 border border-blue-900/40 shadow-sm flex flex-col justify-between relative overflow-hidden min-h-[180px]">
-            <div className="absolute top-0 right-0 w-32 h-32 bg-[#FF9F0A]/10 rounded-full blur-2xl pointer-events-none"></div>
+          {/* Primary Action Card: Scan Classroom Projector QR / Attendance Confirmed */}
+          {isMarkedToday ? (
+            <div className="col-span-1 md:col-span-4 bg-gradient-to-br from-[#022c22] via-[#064e3b] to-[#047857] text-white rounded-2xl p-6 border border-emerald-500/40 shadow-sm flex flex-col justify-between relative overflow-hidden min-h-[180px]">
+              <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-400/10 rounded-full blur-2xl pointer-events-none"></div>
 
-            <div>
-              <div className="flex items-center justify-between gap-2 mb-3">
-                <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono font-bold flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                  LIVE IN-CLASS
-                </span>
-                <span className="text-amber-300 text-xs font-bold">⚡ 10s Token Sync</span>
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-3">
+                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-400/20 text-emerald-300 border border-emerald-400/40 text-[10px] font-mono font-bold flex items-center gap-1.5">
+                    <CheckCircle className="w-3.5 h-3.5 text-emerald-300" />
+                    ATTENDANCE CONFIRMED
+                  </span>
+                  <span className="text-emerald-200 text-xs font-bold font-mono">
+                    {myAttendance?.marked_at || 'IST Recorded'}
+                  </span>
+                </div>
+
+                <h3 className="text-xl font-bold font-geist mb-1.5 text-white flex items-center gap-2">
+                  Marked Present ✅
+                </h3>
+                <p className="text-xs text-emerald-100/90 leading-relaxed font-medium">
+                  Verified for <strong className="text-white">{myAttendance?.subject_name || 'Career Enhancement Training (CET)'}</strong> ({myAttendance?.period_count || 4} Periods Credited).
+                </p>
               </div>
 
-              <h3 className="text-xl font-bold font-geist mb-1.5 text-white">
-                Class Attendance
-              </h3>
-              <p className="text-xs text-blue-200 leading-relaxed font-medium">
-                Scan the classroom projector screen to mark attendance for today's active periods.
-              </p>
-            </div>
-
-            <div className="pt-4 mt-2">
-              <button
-                onClick={() => setShowClassScannerModal(true)}
-                className="w-full py-3 px-4 bg-gradient-to-r from-amber-400 via-[#FF9F0A] to-orange-500 hover:from-amber-300 hover:to-orange-400 text-[#001e40] font-black text-xs sm:text-sm rounded-xl shadow-xl transition active:scale-98 flex items-center justify-center gap-2"
-              >
-                <Camera className="w-4 h-4 text-[#001e40]" /> Open Camera Scanner
-              </button>
-              <div className="flex items-center justify-center gap-2 mt-2 text-[10px] text-blue-200/80 font-mono">
-                <span>🔐 Device Bound</span>
-                <span>•</span>
-                <span>⚡ Instant IST Mark</span>
+              <div className="pt-4 mt-2">
+                <button
+                  onClick={() => setShowClassScannerModal(true)}
+                  className="w-full py-3 px-4 bg-emerald-400 hover:bg-emerald-300 text-[#022c22] font-black text-xs sm:text-sm rounded-xl shadow-xl transition active:scale-98 flex items-center justify-center gap-2"
+                >
+                  <CheckCircle className="w-4 h-4 text-[#022c22]" /> Verified Present (View Receipt)
+                </button>
+                <div className="flex items-center justify-center gap-2 mt-2 text-[10px] text-emerald-200/80 font-mono">
+                  <span>🔐 Device Locked</span>
+                  <span>•</span>
+                  <span>⚡ {myAttendance?.period_count || 4} Credits Saved</span>
+                </div>
               </div>
             </div>
-          </div>
+          ) : (
+            <div className="col-span-1 md:col-span-4 bg-gradient-to-br from-[#001e40] via-[#093268] to-[#15347e] text-white rounded-2xl p-6 border border-blue-900/40 shadow-sm flex flex-col justify-between relative overflow-hidden min-h-[180px]">
+              <div className="absolute top-0 right-0 w-32 h-32 bg-[#FF9F0A]/10 rounded-full blur-2xl pointer-events-none"></div>
+
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-3">
+                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono font-bold flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                    LIVE IN-CLASS
+                  </span>
+                  <span className="text-amber-300 text-xs font-bold">⚡ 10s Token Sync</span>
+                </div>
+
+                <h3 className="text-xl font-bold font-geist mb-1.5 text-white">
+                  Class Attendance
+                </h3>
+                <p className="text-xs text-blue-200 leading-relaxed font-medium">
+                  Scan the classroom projector screen to mark attendance for today's active periods.
+                </p>
+              </div>
+
+              <div className="pt-4 mt-2">
+                <button
+                  onClick={() => setShowClassScannerModal(true)}
+                  className="w-full py-3 px-4 bg-gradient-to-r from-amber-400 via-[#FF9F0A] to-orange-500 hover:from-amber-300 hover:to-orange-400 text-[#001e40] font-black text-xs sm:text-sm rounded-xl shadow-xl transition active:scale-98 flex items-center justify-center gap-2"
+                >
+                  <Camera className="w-4 h-4 text-[#001e40]" /> Open Camera Scanner
+                </button>
+                <div className="flex items-center justify-center gap-2 mt-2 text-[10px] text-blue-200/80 font-mono">
+                  <span>🔐 Device Bound</span>
+                  <span>•</span>
+                  <span>⚡ Instant IST Mark</span>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Attendance Overview Card */}
           <div className="col-span-1 md:col-span-5 bg-white rounded-2xl p-6 border border-[#D2D2D7] shadow-sm flex flex-col justify-between">
             <div className="flex justify-between items-center mb-4">
               <h3 className="font-bold text-lg text-[#001e40] font-geist">Attendance Metrics</h3>
-              <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 text-xs font-bold rounded-full border border-emerald-200">
-                On Track
-              </span>
+              {hasConducted ? (
+                <span className={`px-2.5 py-1 text-xs font-bold rounded-full border ${
+                  overallPercent >= 75 
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                    : 'bg-amber-50 text-amber-700 border-amber-200'
+                }`}>
+                  {overallPercent >= 75 ? 'On Track' : 'Needs Attention'}
+                </span>
+              ) : (
+                <span className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-bold rounded-full border border-blue-200">
+                  Ready for Class
+                </span>
+              )}
             </div>
 
             <div className="flex flex-col items-center justify-center py-2">
@@ -197,7 +255,9 @@ export const StudentPortal: React.FC = () => {
                 </svg>
                 <div className="absolute inset-0 flex flex-col items-center justify-center">
                   <span className="text-2xl font-extrabold text-[#001e40] font-geist">{overallPercent}%</span>
-                  <span className="text-[10px] font-bold text-[#5e5e63] uppercase">Overall</span>
+                  <span className="text-[10px] font-bold text-[#5e5e63] uppercase">
+                    {hasConducted ? 'Overall' : 'New Session'}
+                  </span>
                 </div>
               </div>
 
@@ -211,6 +271,11 @@ export const StudentPortal: React.FC = () => {
                   <span className="block text-lg font-bold text-[#E22126]">{absentCount}</span>
                 </div>
               </div>
+              {!hasConducted && (
+                <p className="text-[10px] text-center text-[#5e5e63] mt-2 font-medium">
+                  Tracking begins with today's live session
+                </p>
+              )}
             </div>
 
             <button 
@@ -271,12 +336,19 @@ export const StudentPortal: React.FC = () => {
                   <div className="flex-1 mr-3">
                     <div className="flex items-center gap-2 mb-1.5">
                       <span className="px-2.5 py-0.5 bg-[#001e40] text-white font-bold text-[10px] rounded uppercase font-mono tracking-wider">
-                        4 Periods Block
+                        {myAttendance?.period_count || 4} Periods Block
                       </span>
-                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 font-bold text-[10px] rounded flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
-                        Live In-Class
-                      </span>
+                      {isMarkedToday ? (
+                        <span className="px-2.5 py-0.5 bg-emerald-100 text-emerald-800 font-bold text-[10px] rounded flex items-center gap-1 font-mono">
+                          <CheckCircle className="w-3 h-3 text-emerald-600" />
+                          Marked Present ({myAttendance?.period_count || 4} Periods)
+                        </span>
+                      ) : (
+                        <span className="px-2.5 py-0.5 bg-emerald-100 text-emerald-800 font-bold text-[10px] rounded flex items-center gap-1 font-mono">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
+                          Live In-Class
+                        </span>
+                      )}
                     </div>
                     <h4 className="font-bold text-base text-[#001e40]">Career Enhancement Training (CET)</h4>
                     <p className="text-xs text-[#5e5e63] mt-1 flex flex-wrap items-center gap-2 font-medium">
@@ -286,8 +358,12 @@ export const StudentPortal: React.FC = () => {
                     </p>
                   </div>
                   <div className="text-right shrink-0">
-                    <span className="px-3 py-1.5 bg-amber-400/20 text-amber-900 border border-amber-400/30 rounded-xl text-xs font-black font-mono block">
-                      4 Periods
+                    <span className={`px-3 py-1.5 rounded-xl text-xs font-black font-mono block border ${
+                      isMarkedToday 
+                        ? 'bg-emerald-100 text-emerald-900 border-emerald-300' 
+                        : 'bg-amber-400/20 text-amber-900 border-amber-400/30'
+                    }`}>
+                      {isMarkedToday ? 'Credited' : `${myAttendance?.period_count || 4} Periods`}
                     </span>
                   </div>
                 </div>

@@ -10,7 +10,8 @@ from app.models.models import (
     DeviceAccountBinding,
     BindingStatus,
     AuditLog,
-    SecurityEventType
+    SecurityEventType,
+    Student
 )
 
 def hash_device_secret(secret: str) -> str:
@@ -227,8 +228,8 @@ def enforce_device_binding(
                 detail="This device is temporarily associated with another student account. Please try again after the current security window expires."
             )
 
-        # Rule: Maximum Attempts Limit (extended for active testing roll 23311A05Y6)
-        max_attempts = 100 if clean_roll == "23311A05Y6" else getattr(settings, "MAX_BINDING_AUTH_ATTEMPTS", 5)
+        # Rule: Maximum Attempts Limit (5 attempts per 30-min security window)
+        max_attempts = getattr(settings, "MAX_BINDING_AUTH_ATTEMPTS", 5)
         if binding.attempt_count >= max_attempts:
             log_security_audit_event(
                 db=db,
@@ -373,3 +374,129 @@ def revoke_device_by_admin(
         ip_address=ip_address
     )
     return True
+
+
+def enforce_student_device_enrollment(
+    db: Session,
+    student: "Student",
+    device: DeviceRegistration,
+    ip_address: Optional[str] = None
+) -> bool:
+    """
+    Enforces bi-directional student-to-device binding (Layer 2 Anti-Proxy Defense).
+
+    Rules:
+    1. First login with no registered device → auto-enroll current device.
+    2. Subsequent logins from registered device → allow.
+    3. Login from a DIFFERENT device when student already has a registered device → HTTP 403.
+
+    Returns True if enrollment check passed.
+    """
+    clean_roll = student.roll_number.strip().upper()
+
+    # Case 1: Student has no registered device yet → auto-enroll
+    if student.registered_device_id is None:
+        student.registered_device_id = device.id
+        db.commit()
+
+        log_security_audit_event(
+            db=db,
+            event_type=SecurityEventType.DEVICE_ENROLLMENT_AUTO,
+            action="DEVICE_ENROLLMENT_AUTO",
+            details=f"Student {clean_roll} auto-enrolled on device {device.device_public_id} (ID: {device.id}) on first login",
+            roll_number=clean_roll,
+            device_id=device.id,
+            ip_address=ip_address
+        )
+        logger.info(f"Auto-enrolled student {clean_roll} to device {device.device_public_id}")
+        return True
+
+    # Case 2: Student's registered device matches current device → allow
+    if student.registered_device_id == device.id:
+        return True
+
+    # Case 3: Student's registered device is DIFFERENT from current device → BLOCK
+    # Fetch the registered device's public ID for the log message
+    registered_device = db.query(DeviceRegistration).filter(
+        DeviceRegistration.id == student.registered_device_id
+    ).first()
+    registered_pub_id = registered_device.device_public_id if registered_device else f"ID:{student.registered_device_id}"
+
+    log_security_audit_event(
+        db=db,
+        event_type=SecurityEventType.UNAPPROVED_DEVICE_LOGIN,
+        action="UNAPPROVED_DEVICE_LOGIN",
+        details=(
+            f"Student {clean_roll} attempted login from unapproved device "
+            f"{device.device_public_id} (ID: {device.id}). "
+            f"Registered device: {registered_pub_id} (ID: {student.registered_device_id})"
+        ),
+        roll_number=clean_roll,
+        device_id=device.id,
+        ip_address=ip_address
+    )
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            "Your account is registered to a different device. "
+            "To protect against proxy attendance, logins from unapproved devices are blocked. "
+            "If you changed your phone, please contact your faculty or admin to reset your device binding."
+        )
+    )
+
+
+def reset_student_device_enrollment(
+    db: Session,
+    roll_number: str,
+    admin_user_id: Optional[int] = None,
+    ip_address: Optional[str] = None
+) -> dict:
+    """
+    Admin/Teacher function to reset a student's registered device binding.
+    Used when a student replaces their phone or needs to re-enroll.
+    """
+    clean_roll = roll_number.strip().upper()
+    student = db.query(Student).filter(
+        Student.roll_number == clean_roll
+    ).first()
+
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with roll number '{clean_roll}' not found."
+        )
+
+    old_device_id = student.registered_device_id
+    old_device_pub_id = None
+    if old_device_id:
+        old_device = db.query(DeviceRegistration).filter(
+            DeviceRegistration.id == old_device_id
+        ).first()
+        old_device_pub_id = old_device.device_public_id if old_device else f"ID:{old_device_id}"
+
+    student.registered_device_id = None
+    db.commit()
+
+    log_security_audit_event(
+        db=db,
+        event_type=SecurityEventType.DEVICE_ENROLLMENT_RESET,
+        action="DEVICE_ENROLLMENT_RESET",
+        details=(
+            f"Device enrollment reset for student {clean_roll}. "
+            f"Previous device: {old_device_pub_id or 'None'} (ID: {old_device_id}). "
+            f"Reset by admin user ID: {admin_user_id}"
+        ),
+        user_id=admin_user_id,
+        roll_number=clean_roll,
+        device_id=old_device_id,
+        ip_address=ip_address
+    )
+
+    logger.info(f"Device enrollment reset for student {clean_roll} by admin {admin_user_id}")
+    return {
+        "status": "success",
+        "roll_number": clean_roll,
+        "previous_device": old_device_pub_id,
+        "message": f"Device binding cleared for {clean_roll}. Student will auto-enroll on next login."
+    }

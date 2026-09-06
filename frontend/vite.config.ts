@@ -16,24 +16,45 @@ export default defineConfig({
       devOptions: {
         enabled: false
       },
-      includeAssets: ['favicon.ico', 'snist_logo.jpg', 'snist_logo.webp', 'apple-touch-icon.png'],
+      includeAssets: ['favicon.ico', 'favicon-32x32.png', 'favicon-16x16.png', 'apple-touch-icon.png', 'apple-touch-icon-precomposed.png', 'pwa-192x192.png', 'pwa-512x512.png', 'snist_logo.jpg'],
       manifest: {
-        name: 'SNIST QR Attendance Management PWA',
-        short_name: 'SNIST QR',
-        description: 'AI-Powered QR Code Attendance System for SNIST',
-        theme_color: '#15347e',
-        background_color: '#f7f9fe',
+        name: 'SNIST Attendance & Academic ERP',
+        short_name: 'SNIST Attendance',
+        description: 'AI-Powered QR Attendance & Academic System for Sreenidhi Institute of Science & Technology',
+        theme_color: '#0b1a3d',
+        background_color: '#08142c',
         display: 'standalone',
+        orientation: 'portrait',
         icons: [
           {
-            src: 'snist_logo.webp',
+            src: 'pwa-192x192.png',
             sizes: '192x192',
-            type: 'image/webp'
+            type: 'image/png',
+            purpose: 'any'
           },
           {
-            src: 'snist_logo.jpg',
+            src: 'pwa-192x192.png',
             sizes: '192x192',
-            type: 'image/jpeg'
+            type: 'image/png',
+            purpose: 'maskable'
+          },
+          {
+            src: 'pwa-512x512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'any'
+          },
+          {
+            src: 'pwa-512x512.png',
+            sizes: '512x512',
+            type: 'image/png',
+            purpose: 'maskable'
+          },
+          {
+            src: 'apple-touch-icon.png',
+            sizes: '180x180',
+            type: 'image/png',
+            purpose: 'any'
           }
         ]
       },

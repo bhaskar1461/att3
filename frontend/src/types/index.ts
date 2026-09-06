@@ -79,6 +79,7 @@ export interface AttendanceSession {
   subject_name: string;
   section_name: string;
   period: string;
+  period_count?: number;
   session_date: string;
   status: 'OPEN' | 'LOCKED';
   total_students: number;
@@ -113,6 +114,7 @@ export interface HistoricalAttendanceSession {
   section_id: number;
   section_name: string;
   period: string;
+  period_count?: number;
   session_date: string;
   status: 'OPEN' | 'LOCKED';
   total_students: number;

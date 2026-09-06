@@ -1,18 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
 import { DashboardStats } from '../types';
-import { Users, UserCheck, BarChart2, Shield, Settings, FileText, CheckCircle2, RefreshCw, Layers, FileSpreadsheet, ClipboardList, Mail } from 'lucide-react';
+import { Users, UserCheck, BarChart2, Shield, Settings, FileText, CheckCircle2, RefreshCw, Layers, FileSpreadsheet, ClipboardList, Mail, Smartphone } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { ClassExcelRegisterModal } from '../components/ClassExcelRegisterModal';
 import { OnboardingManager } from '../components/admin/OnboardingManager';
 import { CredentialDispatcher } from '../components/admin/CredentialDispatcher';
+import { DeviceManager } from '../components/admin/DeviceManager';
 
 export const AdminDashboard: React.FC = () => {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isExcelRegisterOpen, setIsExcelRegisterOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'onboarding' | 'credentials'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'onboarding' | 'credentials' | 'devices'>('dashboard');
 
   // Keyset / Offset Pagination State for Audit Logs
   const [auditPage, setAuditPage] = useState<number>(1);
@@ -101,6 +102,7 @@ export const AdminDashboard: React.FC = () => {
           { key: 'dashboard' as const, label: 'Dashboard', icon: BarChart2 },
           { key: 'onboarding' as const, label: 'Onboarding', icon: ClipboardList },
           { key: 'credentials' as const, label: 'Credentials', icon: Mail },
+          { key: 'devices' as const, label: 'Devices & Telemetry', icon: Smartphone },
         ].map(tab => {
           const Icon = tab.icon;
           return (
@@ -118,6 +120,11 @@ export const AdminDashboard: React.FC = () => {
           );
         })}
       </div>
+
+      {/* Devices & Telemetry Tab */}
+      {activeTab === 'devices' && (
+        <DeviceManager />
+      )}
 
       {/* Onboarding Tab */}
       {activeTab === 'onboarding' && (

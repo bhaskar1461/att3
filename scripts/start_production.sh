@@ -11,6 +11,11 @@ pkill -f "dev_server.py" 2>/dev/null || true
 pkill -f "cloudflared tunnel.*8088" 2>/dev/null || true
 sleep 1
 
+echo "=== Running Idempotent Database Migrations ==="
+source "$APP_DIR/venv/bin/activate" 2>/dev/null || source "$APP_DIR/backend/venv/bin/activate" 2>/dev/null || true
+export PYTHONPATH="$APP_DIR/backend:$PYTHONPATH"
+python3 "$APP_DIR/scripts/migrate_db.py" || echo "[WARNING] Schema migration returned non-zero exit code (continuing gracefully)"
+
 echo "=== Starting SNIST Backend on port 8001 ==="
 tmux new-session -d -s snist_app -n backend "bash -c 'cd $APP_DIR/backend && source $APP_DIR/venv/bin/activate && export PYTHONPATH=$APP_DIR/backend:$PYTHONPATH && while true; do uvicorn app.main:app --host 0.0.0.0 --port 8001; sleep 1; done; exec bash'"
 

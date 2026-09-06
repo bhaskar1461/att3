@@ -147,7 +147,7 @@ class ManualMarkRequest(BaseModel):
     session_id: int
     roll_number: str
     status: str # PRESENT or ABSENT
-    period_count: Optional[int] = 4
+    period_count: Optional[int] = None
 
 def _async_post_scan_tasks(
     roll_number: str,
@@ -693,11 +693,24 @@ def manual_mark_attendance(
         AttendanceRecord.student_id == student.id
     ).first()
 
+    status_enum = AttendanceStatus.PRESENT if req.status.upper() in ["PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"] else AttendanceStatus.ABSENT
+
+    from app.api.teacher import _extract_period_count
+    session_periods = _extract_period_count(session.period)
+    effective_periods = req.period_count if req.period_count is not None else session_periods
+    
+    if status_enum == AttendanceStatus.PRESENT:
+        record_period_count = max(1, min(8, effective_periods))
+        status_code = str(record_period_count)
+    else:
+        record_period_count = 0
+        status_code = "A"
+
     old_status_str = existing.status.value if existing else "NONE"
-    status_enum = AttendanceStatus.PRESENT if req.status.upper() in ["PRESENT", "1", "2", "3", "4"] else AttendanceStatus.ABSENT
 
     if existing:
         existing.status = status_enum
+        existing.period_count = record_period_count
     else:
         new_record = AttendanceRecord(
             session_id=req.session_id,
@@ -705,6 +718,7 @@ def manual_mark_attendance(
             roll_number=student.roll_number,
             session_date=session.session_date,
             status=status_enum,
+            period_count=record_period_count,
             scan_mode="MANUAL"
         )
         db.add(new_record)
@@ -714,7 +728,7 @@ def manual_mark_attendance(
         db=db,
         event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
         action="HISTORICAL_EDIT",
-        details=f"User {current_user.username} edited {student.roll_number} status from {old_status_str} to {status_enum.value} for session {session.id} ({session.session_date})",
+        details=f"User {current_user.username} edited {student.roll_number} status from {old_status_str} to {status_enum.value} ({status_code} periods) for session {session.id} ({session.session_date})",
         user_id=current_user.id,
         roll_number=student.roll_number
     )
@@ -723,7 +737,6 @@ def manual_mark_attendance(
 
     # Queue Google Sheets & Master Excel background updates
     date_formatted = datetime.now().strftime("%d/%m/%Y")
-    status_code = str(req.period_count or 4) if status_enum == AttendanceStatus.PRESENT else "A"
 
     gs_id = _get_effective_gsheet_id(db, session)
 
@@ -743,6 +756,15 @@ def manual_mark_attendance(
     )
 
     return {"status": "SUCCESS", "message": f"Updated {student.name} ({student.roll_number}) to {status_code}"}
+
+@router.post("/manual", include_in_schema=False)
+def manual_mark_attendance_alias(
+    req: ManualMarkRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    return manual_mark_attendance(req, background_tasks, db, current_user)
 
 @router.post("/mark-all-absent")
 def mark_all_students_absent(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):

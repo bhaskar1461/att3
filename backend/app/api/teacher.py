@@ -28,6 +28,7 @@ class StartSessionRequest(BaseModel):
     subject_id: int
     section_id: int
     period: str
+    period_count: Optional[int] = None
     date: Optional[str] = None # Defaults to YYYY-MM-DD
 
 from app.core.security import get_server_ist_date, get_server_ist_datetime
@@ -147,6 +148,34 @@ def get_assigned_classes(db: Session = Depends(get_db), current_teacher: Teacher
         })
     return res
 
+def _extract_period_count(period_str: str) -> int:
+    try:
+        if not period_str:
+            return 1
+        import re
+        m = re.search(r'\((\d+)\s*periods?\)', period_str, re.I)
+        if m:
+            return max(1, min(8, int(m.group(1))))
+        if "-" in period_str:
+            cleaned = period_str.lower().replace("periods", "").replace("period", "").strip()
+            parts = cleaned.split("-")
+            if len(parts) >= 2:
+                p0 = re.findall(r'\d+', parts[0])
+                p1 = re.findall(r'\d+', parts[1])
+                if p0 and p1:
+                    return max(1, min(8, int(p1[0]) - int(p0[0]) + 1))
+        periods_found = re.findall(r'\b(?:Period\s*)?(\d+)\b', period_str, re.I)
+        if len(periods_found) > 1:
+            return max(1, min(8, len(periods_found)))
+        elif len(periods_found) == 1:
+            return 1
+        digits = [int(s) for s in period_str.split() if s.isdigit()]
+        if digits:
+            return max(1, min(8, digits[0]))
+    except Exception:
+        pass
+    return 1
+
 @router.post("/sessions/start")
 def start_attendance_session(req: StartSessionRequest, db: Session = Depends(get_db), current_teacher: Teacher = Depends(require_teacher)):
     # 1. Authorize: Verify teacher assignment
@@ -163,21 +192,27 @@ def start_attendance_session(req: StartSessionRequest, db: Session = Depends(get
         )
 
     date_str = req.date or get_server_ist_date()
+    p_count = req.period_count or _extract_period_count(req.period)
+    period_label = req.period.strip()
+    if p_count > 1 and f"({p_count} Period" not in period_label and "periods" not in period_label.lower():
+        period_label = f"{period_label} ({p_count} Periods)"
 
-    # Check existing active session for same subject/section/period/date
+    # Check existing active session for same subject/section/date
     existing = db.query(AttendanceSession).filter(
         AttendanceSession.teacher_id == current_teacher.id,
         AttendanceSession.subject_id == req.subject_id,
         AttendanceSession.section_id == req.section_id,
-        AttendanceSession.period == req.period,
-        AttendanceSession.session_date == date_str
-    ).first()
+        AttendanceSession.session_date == date_str,
+        AttendanceSession.status == SessionStatus.OPEN
+    ).order_by(AttendanceSession.id.desc()).first()
 
     if existing:
         return {
             "session_id": existing.id,
             "status": existing.status.value,
             "session_date": existing.session_date,
+            "period": existing.period,
+            "period_count": _extract_period_count(existing.period),
             "message": "Resumed existing attendance session"
         }
 
@@ -185,7 +220,7 @@ def start_attendance_session(req: StartSessionRequest, db: Session = Depends(get
         teacher_id=current_teacher.id,
         subject_id=req.subject_id,
         section_id=req.section_id,
-        period=req.period,
+        period=period_label,
         session_date=date_str,
         status=SessionStatus.OPEN
     )
@@ -197,7 +232,9 @@ def start_attendance_session(req: StartSessionRequest, db: Session = Depends(get
         "session_id": new_session.id,
         "status": new_session.status.value,
         "session_date": new_session.session_date,
-        "message": "Started new attendance session"
+        "period": new_session.period,
+        "period_count": p_count,
+        "message": f"Started new attendance session for {p_count} period{'s' if p_count > 1 else ''}"
     }
 
 @router.get("/historical-sessions")
@@ -256,6 +293,7 @@ def get_historical_sessions(
             "section_id": s.section_id,
             "section_name": s.section.name if s.section else "",
             "period": s.period,
+            "period_count": _extract_period_count(s.period),
             "session_date": s.session_date,
             "status": s.status.value,
             "total_students": total_students,
@@ -288,7 +326,7 @@ def get_session_details(session_id: int, db: Session = Depends(get_db), current_
 
     for s in total_section_students:
         status_val = scanned_rolls.get(s.roll_number, "ABSENT")
-        if status_val in ["PRESENT", "4"]:
+        if status_val in ["PRESENT", "4", "1", "2", "3", "5", "6", "7", "8"]:
             present_count += 1
         else:
             absent_count += 1
@@ -306,6 +344,7 @@ def get_session_details(session_id: int, db: Session = Depends(get_db), current_
         "subject_name": session.subject.name if session.subject else "",
         "section_name": session.section.name if session.section else "",
         "period": session.period,
+        "period_count": _extract_period_count(session.period),
         "session_date": session.session_date,
         "status": session.status.value,
         "total_students": len(total_section_students),
@@ -316,20 +355,6 @@ def get_session_details(session_id: int, db: Session = Depends(get_db), current_
 
 from app.core.security import generate_projector_session_token
 from app.services.qr_service import QRService
-
-def _extract_period_count(period_str: str) -> int:
-    try:
-        if "-" in period_str:
-            cleaned = period_str.lower().replace("periods", "").replace("period", "").strip()
-            parts = cleaned.split("-")
-            if len(parts) == 2 and parts[0].strip().isdigit() and parts[1].strip().isdigit():
-                return max(1, int(parts[1].strip()) - int(parts[0].strip()) + 1)
-        digits = [int(s) for s in period_str.split() if s.isdigit()]
-        if digits:
-            return digits[0]
-    except Exception:
-        pass
-    return 1
 
 @router.get("/sessions/{session_id}/broadcast-token")
 def get_session_broadcast_token(

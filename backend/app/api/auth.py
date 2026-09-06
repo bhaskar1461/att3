@@ -10,7 +10,7 @@ from app.core.database import get_db
 from app.core.config import settings
 import logging
 from app.core.security import verify_password, get_password_hash, create_access_token, decode_access_token
-from app.models.models import User, UserRole, Teacher, Student, Department, StudentOnboarding
+from app.models.models import User, UserRole, Teacher, Student, Department, StudentOnboarding, DeviceRegistration
 
 logger = logging.getLogger("snist_erp.auth")
 
@@ -169,6 +169,7 @@ failed_login_limiter = FailedLoginRateLimiter(max_failures=5, block_duration_sec
 from app.core.device_security import (
     register_or_get_device,
     enforce_device_binding,
+    enforce_student_device_enrollment,
     log_security_audit_event,
     SecurityEventType
 )
@@ -355,7 +356,29 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
     elif user.role == UserRole.STUDENT and user.student_profile:
         full_name = user.student_profile.name
 
-    # 3. Create short-lived token for students (30 seconds) or standard for staff
+    # 3. Enforce bi-directional student-to-device enrollment (Layer 2 Anti-Proxy)
+    #    WHY: Even if a student opens a second browser (different device fingerprint),
+    #    their account is permanently bound to their FIRST enrolled device.
+    if user.role == UserRole.STUDENT and user.student_profile and device_binding:
+        try:
+            # device_binding was set during the existing enforce_device_binding call above;
+            # 'device' is the DeviceRegistration object from register_or_get_device.
+            device = db.query(DeviceRegistration).filter(
+                DeviceRegistration.device_public_id == device_public_id.strip()
+            ).first()
+            if device:
+                enforce_student_device_enrollment(
+                    db=db,
+                    student=user.student_profile,
+                    device=device,
+                    ip_address=ip_address
+                )
+        except HTTPException:
+            raise  # Re-raise the 403 from enrollment enforcement
+        except Exception as enrollment_err:
+            logger.warning(f"Non-fatal enrollment enforcement error for {user.username}: {enrollment_err}")
+
+    # 4. Create short-lived token for students (30 seconds) or standard for staff
     access_token = create_access_token(
         data={"sub": user.username, "role": user.role.value, "user_id": user.id}
     )

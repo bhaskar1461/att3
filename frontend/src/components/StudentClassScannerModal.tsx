@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { apiRequest } from '../services/api';
 import { getOrCreateDeviceCredentials } from '../services/deviceCredential';
+import { PwaInstallGuard } from './PwaInstallGuard';
 
 interface StudentClassScannerModalProps {
   onClose: () => void;
@@ -200,6 +201,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
   };
 
   return (
+    <PwaInstallGuard onDismiss={() => { stopCamera(); onClose(); }}>
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
       <div className="bg-white text-slate-900 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl flex flex-col max-h-[90vh] font-sans">
         
@@ -400,5 +402,6 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
       </div>
     </div>
+    </PwaInstallGuard>
   );
 };

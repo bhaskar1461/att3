@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api import auth, admin, teacher, attendance, student, reports, devices
+from app.api import auth, admin, teacher, attendance, student, reports, devices, telemetry
 
 # Onboarding & Credential Dispatch routers (defensive import — never crash if module has issues)
 try:
@@ -26,27 +26,9 @@ logger = logging.getLogger("snist_erp")
 # Create DB tables automatically with defensive error logging
 try:
     Base.metadata.create_all(bind=engine)
-    from sqlalchemy import text
-    with engine.connect() as conn:
-        for col_sql in [
-            "ALTER TABLE qr_audit_logs ADD COLUMN roll_number VARCHAR(50) NULL",
-            "ALTER TABLE qr_audit_logs ADD COLUMN device_id INT NULL",
-            "ALTER TABLE qr_audit_logs ADD COLUMN event_type VARCHAR(50) NULL",
-            "ALTER TABLE qr_audit_logs ADD COLUMN ip_address VARCHAR(50) NULL",
-            "ALTER TABLE qr_audit_logs ADD COLUMN created_at DATETIME NULL",
-            "ALTER TABLE qr_teachers ADD COLUMN google_sheet_id VARCHAR(255) NULL",
-            "ALTER TABLE qr_attendance_records ADD COLUMN period_count INT DEFAULT 4 NULL",
-            "ALTER TABLE qr_attendance_records MODIFY COLUMN scan_mode VARCHAR(50) DEFAULT 'QR'",
-            "ALTER TABLE qr_attendance_sessions MODIFY COLUMN period VARCHAR(100) NOT NULL"
-        ]:
-            try:
-                conn.execute(text(col_sql))
-                conn.commit()
-            except Exception:
-                pass
-    logger.info("Database schemas verified successfully.")
+    logger.info("Database base tables verified successfully.")
 except Exception as err:
-    logger.warning(f"Database DDL/Index initialization warning (non-fatal): {err}")
+    logger.warning(f"Database table verification warning (non-fatal): {err}")
 
 import os
 import asyncio
@@ -181,7 +163,8 @@ for r_module, name in [
     (teacher.router, "Teacher"),
     (attendance.router, "Attendance"),
     (student.router, "Student"),
-    (reports.router, "Reports")
+    (reports.router, "Reports"),
+    (telemetry.router, "Telemetry")
 ]:
     try:
         app.include_router(r_module, prefix=settings.API_V1_STR)

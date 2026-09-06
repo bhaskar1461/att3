@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from pydantic import BaseModel
 
 from app.core.database import get_db
@@ -41,10 +41,19 @@ def get_student_qr(
     device_public_id = request.headers.get("x-device-public-id", "").strip()
     if device_public_id:
         device = db.query(DeviceRegistration).filter(DeviceRegistration.device_public_id == device_public_id).first()
-        if device and not device.is_active:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Device has been revoked or disabled by system administrator."
+        if device:
+            if not device.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Device has been revoked or disabled by system administrator."
+                )
+            # Layer 2 enforcement on QR code retrieval: student can only fetch QR from bound device
+            from app.core.device_security import enforce_student_device_enrollment
+            enforce_student_device_enrollment(
+                db=db,
+                student=current_student,
+                device=device,
+                ip_address=request.client.host if request.client else None
             )
     server_today = get_server_ist_date()
     target_date = date or server_today
@@ -110,13 +119,32 @@ def get_student_pure_qr(
 
 @router.get("/attendance-summary")
 def get_student_attendance_summary(db: Session = Depends(get_db), current_student: Student = Depends(require_student)):
+    from app.api.teacher import _extract_period_count
+
     records = db.query(AttendanceRecord).options(
         joinedload(AttendanceRecord.session).joinedload(AttendanceSession.subject)
     ).filter(AttendanceRecord.student_id == current_student.id).all()
     
-    total_conducted = len(records)
-    total_present = sum(1 for r in records if r.status.value in ["PRESENT", "4"])
-    overall_percentage = round((total_present / total_conducted * 100), 1) if total_conducted > 0 else 100.0
+    present_records = [
+        r for r in records 
+        if r.status.value in ["PRESENT", "4", "1", "2", "3", "5", "6", "7", "8"]
+    ]
+    total_present = sum(r.period_count or 1 for r in present_records)
+    
+    server_today = get_server_ist_date()
+    
+    # Query all sessions conducted for this student's section up to today
+    section_sessions = db.query(AttendanceSession).filter(
+        AttendanceSession.section_id == current_student.section_id,
+        AttendanceSession.session_date <= server_today
+    ).all()
+    
+    # Total conducted periods across all section sessions up to today
+    total_conducted = sum(_extract_period_count(s.period) for s in section_sessions)
+    total_conducted = max(total_conducted, total_present)
+    total_absent = max(0, total_conducted - total_present)
+    
+    overall_percentage = round((total_present / total_conducted * 100), 1) if total_conducted > 0 else 0.0
 
     # Group by subject
     subject_stats = {}
@@ -124,9 +152,10 @@ def get_student_attendance_summary(db: Session = Depends(get_db), current_studen
         subj_name = r.session.subject.name if r.session and r.session.subject else "General"
         if subj_name not in subject_stats:
             subject_stats[subj_name] = {"conducted": 0, "present": 0}
-        subject_stats[subj_name]["conducted"] += 1
-        if r.status.value in ["PRESENT", "4"]:
-            subject_stats[subj_name]["present"] += 1
+        p_count = r.period_count or 1
+        subject_stats[subj_name]["conducted"] += p_count
+        if r.status.value in ["PRESENT", "4", "1", "2", "3", "5", "6", "7", "8"]:
+            subject_stats[subj_name]["present"] += p_count
 
     subject_list = []
     for s_name, data in subject_stats.items():
@@ -141,7 +170,9 @@ def get_student_attendance_summary(db: Session = Depends(get_db), current_studen
     return {
         "total_conducted": total_conducted,
         "total_present": total_present,
+        "total_absent": total_absent,
         "overall_percentage": overall_percentage,
+        "has_records": total_conducted > 0,
         "subjects": subject_list
     }
 
@@ -152,17 +183,54 @@ def get_student_today_schedule(
     current_student: Student = Depends(require_student)
 ):
     """
-    Returns today's active schedule for the student's section.
-    For CS Security testing, returns Career Enhancement Training (CET) (4 Periods).
+    Returns today's active schedule and personal attendance confirmation status for student.
     """
+    from app.api.teacher import _extract_period_count
     server_today = get_server_ist_date()
     
-    # Check if there is an active session for the student's section today
+    # Check if there is an active/open session for student's section
     active_session = db.query(AttendanceSession).filter(
         AttendanceSession.section_id == current_student.section_id,
-        AttendanceSession.session_date == server_today,
         AttendanceSession.status == SessionStatus.OPEN
     ).order_by(AttendanceSession.id.desc()).first()
+
+    today_session = active_session or db.query(AttendanceSession).filter(
+        AttendanceSession.section_id == current_student.section_id,
+        AttendanceSession.session_date == server_today
+    ).order_by(AttendanceSession.id.desc()).first()
+
+    # Check student's personal attendance record for today's session
+    my_record = None
+    if today_session:
+        my_record = db.query(AttendanceRecord).filter(
+            AttendanceRecord.session_id == today_session.id,
+            AttendanceRecord.student_id == current_student.id
+        ).first()
+
+    is_marked = my_record is not None and my_record.status.value in [
+        "PRESENT", "4", "1", "2", "3", "5", "6", "7", "8"
+    ]
+
+    ist_marked_time = None
+    if is_marked and my_record and my_record.scanned_at:
+        try:
+            ist_dt = my_record.scanned_at + timedelta(hours=5, minutes=30)
+            ist_marked_time = ist_dt.strftime("%I:%M %p IST")
+        except Exception:
+            ist_marked_time = "IST Verified"
+
+    active_p_count = _extract_period_count(today_session.period) if today_session else 4
+
+    my_attendance = {
+        "is_marked": is_marked,
+        "status": "PRESENT" if is_marked else "UNMARKED",
+        "period_count": (my_record.period_count if my_record else None) or active_p_count,
+        "marked_at": ist_marked_time,
+        "session_id": today_session.id if today_session else None,
+        "scan_mode": my_record.scan_mode if my_record else None,
+        "subject_name": today_session.subject.name if today_session and today_session.subject else "Career Enhancement Training (CET)",
+        "teacher_name": today_session.teacher.name if today_session and today_session.teacher else "Mrs. N. Sowjanya"
+    }
 
     schedule_items = [
         {
@@ -170,33 +238,37 @@ def get_student_today_schedule(
             "subject_code": "CS(CET)",
             "teacher_name": "Mrs. N. Sowjanya",
             "timing": "09:30 AM - 01:00 PM",
-            "period": "4 Periods",
-            "period_count": 4,
+            "period": f"{active_p_count} Periods",
+            "period_count": active_p_count,
             "room": "CSE-CS Projector Lab",
             "is_live": active_session is not None,
+            "is_marked": is_marked,
             "session_id": active_session.id if active_session else None,
-            "status": "Live In-Class" if active_session else "Scheduled"
+            "status": f"Marked Present ({active_p_count} Periods)" if is_marked else ("Live In-Class" if active_session else "Scheduled")
         }
     ]
 
     return {
         "today_date": server_today,
         "schedule": schedule_items,
+        "my_attendance": my_attendance,
         "active_session": {
             "session_id": active_session.id,
             "subject_name": active_session.subject.name if active_session.subject else "Career Enhancement Training (CET)",
             "teacher_name": active_session.teacher.name if active_session.teacher else "Mrs. N. Sowjanya",
-            "period": active_session.period or "4 Periods",
-            "period_count": 4,
+            "period": active_session.period or f"{active_p_count} Periods",
+            "period_count": active_p_count,
             "room": "CSE-CS Projector Lab",
-            "status": "LIVE IN-CLASS"
+            "status": "LIVE IN-CLASS",
+            "is_marked": is_marked
         } if active_session else {
             "subject_name": "Career Enhancement Training (CET)",
             "teacher_name": "Mrs. N. Sowjanya",
-            "period": "4 Periods",
-            "period_count": 4,
+            "period": f"{active_p_count} Periods",
+            "period_count": active_p_count,
             "room": "CSE-CS Projector Lab",
-            "status": "Scheduled"
+            "status": "Scheduled",
+            "is_marked": is_marked
         }
     }
 
@@ -258,6 +330,23 @@ def student_scan_session(
         roll_number=clean_roll,
         ip_address=ip_addr
     )
+
+    # Layer 2: Bi-directional student-to-device enrollment (blocks cross-browser proxy)
+    try:
+        from app.core.device_security import enforce_student_device_enrollment
+        enforce_student_device_enrollment(
+            db=db,
+            student=current_student,
+            device=device,
+            ip_address=ip_addr
+        )
+    except HTTPException:
+        raise  # Re-raise the 403 from enrollment enforcement
+    except Exception as enrollment_err:
+        import logging
+        logging.getLogger("snist_erp.student").warning(
+            f"Non-fatal enrollment check error for {clean_roll}: {enrollment_err}"
+        )
 
     # 2. Validate rotating session token with 10s + 10s sliding window
     try:
@@ -354,6 +443,54 @@ def student_scan_session(
         details=f"Student {current_student.roll_number} scanned teacher projector QR for session {session_id} (Period count: {period_count})",
         roll_number=current_student.roll_number
     )
+
+    # 7b. Layer 3: Concurrent Scan Telemetry — detect proxy attendance patterns
+    #     WHY: If two different students scan the same session from the same IP within 60 seconds,
+    #     it's extremely likely one student is scanning for an absent friend on the same phone/network.
+    try:
+        from sqlalchemy import and_
+        concurrent_window_start = now_utc - timedelta(seconds=60)
+        concurrent_scans = db.query(AttendanceRecord).filter(
+            and_(
+                AttendanceRecord.session_id == session_id,
+                AttendanceRecord.student_id != current_student.id,
+                AttendanceRecord.status == AttendanceStatus.PRESENT,
+                AttendanceRecord.scan_mode == "PROJECTOR_SCAN",
+                AttendanceRecord.scanned_at >= concurrent_window_start,
+                AttendanceRecord.scanned_at <= now_utc
+            )
+        ).all()
+
+        if concurrent_scans and ip_addr:
+            # Check if any of those other scans came from the same device
+            for other_scan in concurrent_scans:
+                # Query the device binding for this other student around the same time
+                other_student_binding = db.query(DeviceAccountBinding).filter(
+                    DeviceAccountBinding.roll_number == other_scan.roll_number,
+                    DeviceAccountBinding.status == BindingStatus.ACTIVE,
+                    DeviceAccountBinding.expires_at > now_utc
+                ).first()
+
+                if other_student_binding and other_student_binding.device_id == device.id:
+                    # SAME device used by two different students — definitive proxy indicator
+                    log_security_audit_event(
+                        db=db,
+                        event_type=SecurityEventType.SUSPICIOUS_CONCURRENT_SCAN,
+                        action="SUSPICIOUS_CONCURRENT_SCAN",
+                        details=(
+                            f"PROXY ALERT: Students {current_student.roll_number} and {other_scan.roll_number} "
+                            f"scanned session {session_id} from SAME device (ID: {device.id}) "
+                            f"within 60 seconds. IP: {ip_addr}"
+                        ),
+                        roll_number=current_student.roll_number,
+                        device_id=device.id,
+                        ip_address=ip_addr
+                    )
+    except Exception as concurrent_err:
+        import logging
+        logging.getLogger("snist_erp.student").warning(
+            f"Non-fatal concurrent scan check error: {concurrent_err}"
+        )
 
     # 8. Asynchronous multi-target sync with pre-resolved session_meta (0 DB queries)
     background_tasks.add_task(

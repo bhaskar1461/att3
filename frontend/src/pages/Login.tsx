@@ -1,8 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { ArrowRight, Eye, EyeOff, Lock, Mail, Clock, AlertTriangle } from 'lucide-react';
+import { ArrowRight, Eye, EyeOff, Lock, Mail, Clock, AlertTriangle, Smartphone, Download, PlusSquare, X } from 'lucide-react';
 import { Toast } from '../components/Toast';
 import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/deviceCredential';
+import { IosSafariInterstitial } from '../components/IosSafariInterstitial';
+import { SelfServiceDeviceResetModal } from '../components/SelfServiceDeviceResetModal';
+import { initPwaTelemetryListeners } from '../services/telemetryService';
+import { usePwaInstall } from '../hooks/usePwaInstall';
+import { IosInstallGuideModal } from '../components/IosInstallGuideModal';
 
 export const Login: React.FC = () => {
   const { login } = useAuth();
@@ -14,6 +19,25 @@ export const Login: React.FC = () => {
   const [onboardingWarning, setOnboardingWarning] = useState(false);
   const [lockoutSecondsRemaining, setLockoutSecondsRemaining] = useState<number | null>(null);
   const [attemptsRemaining, setAttemptsRemaining] = useState<number | null>(null);
+  const [showResetModal, setShowResetModal] = useState<boolean>(false);
+  const [deviceMismatchError, setDeviceMismatchError] = useState<boolean>(false);
+  const [installBannerDismissed, setInstallBannerDismissed] = useState<boolean>(false);
+  const {
+    isStandalone,
+    platform,
+    browser,
+    canInstallPrompt,
+    isInstalling,
+    showIosGuide,
+    copied,
+    setShowIosGuide,
+    promptInstall,
+    copyLink,
+  } = usePwaInstall();
+
+  useEffect(() => {
+    initPwaTelemetryListeners();
+  }, []);
 
   // Magic link state (for faculty/students logging in via magic link)
   const [magicToken, setMagicToken] = useState<string | null>(null);
@@ -173,6 +197,13 @@ export const Login: React.FC = () => {
           return;
         }
 
+        // Detect unapproved device lockout (HTTP 403)
+        if (res.status === 403 && (msg.toLowerCase().includes('different device') || msg.toLowerCase().includes('unapproved device') || msg.toLowerCase().includes('reset your device binding'))) {
+          setDeviceMismatchError(true);
+          setToast({ message: msg, type: 'error', duration: 10000 } as any);
+          return;
+        }
+
         // Handle HTTP 429: Account Lockout / Rate Limit
         if (res.status === 429) {
           const retryAfterHeader = res.headers.get('Retry-After');
@@ -270,6 +301,67 @@ export const Login: React.FC = () => {
           {magicUserInfo ? 'Faculty Direct Access & Password Setup' : 'SNIST Academic Attendance Portal'}
         </p>
 
+        {/* 1-Tap Quick Install Banner for Mobile & Supported Browsers */}
+        {!isStandalone && !installBannerDismissed && (platform !== 'desktop' || canInstallPrompt) && (
+          <div className="w-full mb-6 bg-gradient-to-r from-[#001e40] to-[#0a2e5c] text-white rounded-2xl p-3.5 shadow-lg border border-blue-900/40 animate-in fade-in">
+            <div className="flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-9 h-9 rounded-xl overflow-hidden bg-[#08142c] p-0.5 shrink-0 border border-amber-400/40 shadow-sm flex items-center justify-center">
+                  <img src="/apple-touch-icon.png" alt="SNIST Icon" className="w-full h-full object-contain rounded-lg" />
+                </div>
+                <div className="text-left min-w-0">
+                  <p className="text-xs font-bold text-white truncate flex items-center gap-1.5">
+                    Install SNIST App
+                    <span className="text-[9px] bg-amber-400 text-slate-950 font-black px-1.5 py-0.5 rounded-full uppercase leading-none">1-Tap</span>
+                  </p>
+                  <p className="text-[10px] text-blue-200 truncate">
+                    {platform === 'ios' ? 'Create home screen shortcut' : '1-tap install to device'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                {platform === 'ios' && browser !== 'safari' ? (
+                  <button
+                    type="button"
+                    onClick={() => copyLink()}
+                    className="py-1.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition shadow cursor-pointer"
+                  >
+                    {copied ? 'Copied!' : 'Copy Link'}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => promptInstall()}
+                    disabled={isInstalling}
+                    className="py-1.5 px-3 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 rounded-xl text-xs font-black transition shadow active:scale-95 flex items-center gap-1 cursor-pointer"
+                  >
+                    {platform === 'ios' ? (
+                      <>
+                        <PlusSquare className="w-3.5 h-3.5" />
+                        <span>Add to Home</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-3.5 h-3.5" />
+                        <span>{isInstalling ? 'Opening...' : 'Install App'}</span>
+                      </>
+                    )}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setInstallBannerDismissed(true)}
+                  aria-label="Dismiss banner"
+                  className="p-1 rounded-lg text-slate-400 hover:text-white transition cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {isVerifyingMagic ? (
           <div className="w-full bg-white border border-[#D2D2D7] rounded-xl p-8 text-center shadow-sm">
             <div className="w-8 h-8 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
@@ -362,6 +454,31 @@ export const Login: React.FC = () => {
         ) : (
           /* Standard Login Form */
           <form onSubmit={handleLoginSubmit} className="w-full space-y-4">
+
+            {/* Device Mismatch Recovery Prompt (HTTP 403) — Prominent Top Placement */}
+            {deviceMismatchError && (
+              <div className="bg-rose-50 border-2 border-rose-400 rounded-2xl p-4 text-center shadow-sm animate-in fade-in duration-300">
+                <div className="w-10 h-10 bg-rose-100 text-rose-800 rounded-full flex items-center justify-center mx-auto mb-2 border border-rose-300">
+                  <Smartphone className="w-5 h-5 animate-pulse" />
+                </div>
+                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-rose-200 text-rose-900 mb-1">
+                  Device Lockout (L2 Defense)
+                </span>
+                <p className="text-xs font-bold text-rose-950 mt-1">
+                  Your account is registered to another device.
+                </p>
+                <p className="text-[11px] text-rose-800 mt-1 leading-relaxed">
+                  To bind this phone to your account instead, reset your binding with a secure email verification code.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowResetModal(true)}
+                  className="mt-3 w-full py-3 px-4 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-md active:scale-98"
+                >
+                  <Smartphone className="w-4 h-4" /> Reset Device Binding via Email OTP
+                </button>
+              </div>
+            )}
 
             {/* Account Lockout Countdown Card (HTTP 429) */}
             {lockoutSecondsRemaining !== null && lockoutSecondsRemaining > 0 && (
@@ -493,11 +610,45 @@ export const Login: React.FC = () => {
                 )}
               </button>
             </div>
+
+            {/* Always accessible self-service recovery link */}
+            <div className="pt-3 text-center">
+              <button
+                type="button"
+                onClick={() => setShowResetModal(true)}
+                className="text-xs text-slate-500 hover:text-[#15347e] font-medium transition inline-flex items-center gap-1.5"
+              >
+                <Smartphone className="w-3.5 h-3.5 text-slate-400" />
+                Lost or replaced phone? Reset device
+              </button>
+            </div>
           </form>
         )}
 
-
       </div>
+
+      {/* iOS Non-Safari Interstitial */}
+      <IosSafariInterstitial />
+
+      {/* iOS Safari Native Toolbar Install Guide */}
+      <IosInstallGuideModal
+        isOpen={showIosGuide}
+        onClose={() => setShowIosGuide(false)}
+      />
+
+      {/* Self-Service Device Reset Modal */}
+      {showResetModal && (
+        <SelfServiceDeviceResetModal
+          initialRollNumber={username}
+          onClose={() => setShowResetModal(false)}
+          onSuccess={(roll) => {
+            setShowResetModal(false);
+            setDeviceMismatchError(false);
+            setUsername(roll);
+            setToast({ message: 'Device successfully authorized! You can now sign in.', type: 'success' });
+          }}
+        />
+      )}
 
     </div>
   );

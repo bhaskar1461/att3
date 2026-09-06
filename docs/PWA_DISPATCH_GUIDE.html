@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SNIST Academic Attendance Portal — PWA Setup & Dispatch Guide</title>
+  <style>
+    :root {
+      --primary: #15347e;
+      --secondary: #2f53d7;
+      --accent: #d97706;
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text: #0f172a;
+      --text-muted: #475569;
+      --border: #e2e8f0;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 24px;
+    }
+
+    .container {
+      max-width: 860px;
+      margin: 0 auto;
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.04);
+    }
+
+    header {
+      border-bottom: 2px solid var(--primary);
+      padding-bottom: 20px;
+      margin-bottom: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .header-text h1 {
+      font-size: 22px;
+      font-weight: 800;
+      color: var(--primary);
+      letter-spacing: -0.5px;
+    }
+
+    .header-text p {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 500;
+      margin-top: 4px;
+    }
+
+    .badge {
+      background-color: #eff6ff;
+      color: var(--secondary);
+      border: 1px solid #bfdbfe;
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--primary);
+      margin: 20px 0 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      background: #fafafa;
+    }
+
+    .card-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+      margin-bottom: 12px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    ol {
+      padding-left: 20px;
+      font-size: 12px;
+      color: var(--text);
+    }
+
+    li {
+      margin-bottom: 8px;
+    }
+
+    .placeholder-box {
+      border: 2px dashed #cbd5e1;
+      border-radius: 8px;
+      background: #ffffff;
+      padding: 24px 12px;
+      text-align: center;
+      font-size: 11px;
+      color: #64748b;
+      margin-top: 12px;
+      font-weight: 600;
+    }
+
+    .alert-box {
+      background: #fffbeb;
+      border-left: 4px solid var(--accent);
+      padding: 12px 16px;
+      border-radius: 6px;
+      font-size: 12px;
+      color: #92400e;
+      margin: 16px 0;
+    }
+
+    .alert-box strong {
+      color: #78350f;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 12px;
+    }
+
+    th, td {
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      text-align: left;
+    }
+
+    th {
+      background: #f1f5f9;
+      font-weight: 700;
+      color: var(--primary);
+    }
+
+    .highlight {
+      font-weight: 700;
+      color: var(--primary);
+    }
+
+    .footer {
+      margin-top: 28px;
+      border-top: 1px solid var(--border);
+      padding-top: 16px;
+      font-size: 11px;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    @media print {
+      body {
+        padding: 0;
+        background: none;
+      }
+      .container {
+        border: none;
+        box-shadow: none;
+        max-width: 100%;
+        padding: 0;
+      }
+      .placeholder-box {
+        border: 1px solid #cbd5e1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="header-text">
+        <h1>SNIST Academic Attendance Portal</h1>
+        <p>1-Time Mobile PWA Installation & Attendance Setup • Academic Year 2026</p>
+      </div>
+      <div class="badge">Official Guide</div>
+    </header>
+
+    <div class="alert-box">
+      <strong>Important Requirement:</strong> To prevent attendance fraud, the attendance camera scanner activates <strong>only inside the installed Home Screen app</strong>. Do not scan from inside browser tabs.
+    </div>
+
+    <h2>📱 Step 1: Install App on Your Phone (Takes 10 Seconds)</h2>
+    <div class="grid-2">
+      <!-- Android -->
+      <div class="card">
+        <div class="card-title">Android (Google Chrome)</div>
+        <ol>
+          <li>Open <strong>Chrome</strong> and go to: <code>https://ather-os.de5.net</code></li>
+          <li>Tap the <strong>three dots menu (⋮)</strong> in top right.</li>
+          <li>Tap <strong>"Install app"</strong> or <strong>"Add to Home screen"</strong>.</li>
+          <li>Confirm install. Open <strong>SNIST ERP</strong> from your home screen.</li>
+        </ol>
+        <div class="placeholder-box">
+          [ SCREENSHOT: Chrome ⋮ Menu &gt; Install app ]
+        </div>
+      </div>
+
+      <!-- iOS -->
+      <div class="card">
+        <div class="card-title">iPhone / iPad (Apple Safari)</div>
+        <ol>
+          <li>Open <strong>Safari</strong> and go to: <code>https://ather-os.de5.net</code></li>
+          <li>Tap the <strong>Share button</strong> (square with up arrow at bottom).</li>
+          <li>Scroll down and tap <strong>"Add to Home Screen"</strong>.</li>
+          <li>Tap <strong>"Add"</strong>. Open <strong>SNIST ERP</strong> from your home screen.</li>
+        </ol>
+        <div class="placeholder-box">
+          [ SCREENSHOT: Safari Share &gt; Add to Home Screen ]
+        </div>
+      </div>
+    </div>
+
+    <h2>🔐 Step 2: First Login & Automatic Device Binding</h2>
+    <ol style="margin-bottom: 20px;">
+      <li>Launch the app by tapping the <strong>SNIST ERP</strong> icon on your home screen.</li>
+      <li>Log in with your <strong>Roll Number / SAP ID</strong> and <strong>Portal Password</strong>.</li>
+      <li>Upon successful login, your phone is automatically registered to your student account.</li>
+      <li>Future scans will only be accepted from this physical device.</li>
+    </ol>
+
+    <h2>🔄 Step 3: Changed or Replaced Your Phone? (Self-Service Reset)</h2>
+    <div class="card" style="margin-bottom: 20px;">
+      <p style="font-size: 12px; margin-bottom: 8px;">
+        If you replace your phone or get locked out with <em>"Account registered to a different device"</em>:
+      </p>
+      <ol>
+        <li>On the login page of your new phone, click <strong>"Lost or replaced phone? Reset device"</strong>.</li>
+        <li>Enter your Roll Number and Password &gt; Click <strong>"Send Verification Code"</strong>.</li>
+        <li>Enter the 6-digit code sent to your official college email and tap <strong>"Authorize This Phone"</strong>.</li>
+        <li>Your new phone is immediately bound. (Limit: 5 self-resets per semester).</li>
+      </ol>
+    </div>
+
+    <h2>🛠️ Quick Troubleshooting FAQ</h2>
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 32%;">Symptom</th>
+          <th style="width: 68%;">Action to Resolve</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>"Install App to Scan" prompt appears</strong></td>
+          <td>You opened the portal in a browser tab. Close your browser and launch the app from the <strong>SNIST ERP icon on your home screen</strong>.</td>
+        </tr>
+        <tr>
+          <td><strong>"Registered to a different device"</strong></td>
+          <td>Click the <strong>"Reset Device Binding via Email OTP"</strong> link on the login screen to authorize your current phone.</td>
+        </tr>
+        <tr>
+          <td><strong>"Session Token Expired"</strong></td>
+          <td>The classroom projector rotates QR codes every 10 seconds. Keep camera pointed at the projector screen.</td>
+        </tr>
+        <tr>
+          <td><strong>Phone broken / dead battery</strong></td>
+          <td>Inform your class teacher. Faculty can mark your attendance manually on their class roster.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="footer">
+      <span>Portal URL: https://ather-os.de5.net</span>
+      <span>Sreenidhi Institute of Science & Technology (SNIST)</span>
+    </div>
+  </div>
+</body>
+</html>

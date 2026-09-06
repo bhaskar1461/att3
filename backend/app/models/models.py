@@ -57,6 +57,14 @@ class SecurityEventType(str, enum.Enum):
     DEVICE_REVOKED = "DEVICE_REVOKED"
     ATTENDANCE_SUBMITTED = "ATTENDANCE_SUBMITTED"
     ATTENDANCE_REJECTED = "ATTENDANCE_REJECTED"
+    SUSPICIOUS_CONCURRENT_SCAN = "SUSPICIOUS_CONCURRENT_SCAN"
+    UNAPPROVED_DEVICE_LOGIN = "UNAPPROVED_DEVICE_LOGIN"
+    DEVICE_ENROLLMENT_AUTO = "DEVICE_ENROLLMENT_AUTO"
+    DEVICE_ENROLLMENT_RESET = "DEVICE_ENROLLMENT_RESET"
+    DEVICE_SELF_RESET = "DEVICE_SELF_RESET"
+    DEVICE_SELF_RESET_CAP_EXCEEDED = "DEVICE_SELF_RESET_CAP_EXCEEDED"
+    DEVICE_ADMIN_RESET = "DEVICE_ADMIN_RESET"
+    PWA_TELEMETRY = "PWA_TELEMETRY"
 
 class User(Base):
     __tablename__ = "qr_users"
@@ -155,6 +163,7 @@ class Student(Base):
     email = Column(String(100), nullable=True)
     mobile = Column(String(20), nullable=True)
     agency = Column(String(100), default="Regular")
+    registered_device_id = Column(Integer, nullable=True)  # Bi-directional device binding (Layer 2 anti-proxy)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", primaryjoin="Student.user_id==User.id", foreign_keys="[Student.user_id]", back_populates="student_profile")
@@ -376,6 +385,24 @@ class OnboardingOTP(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     onboarding = relationship("StudentOnboarding", primaryjoin="OnboardingOTP.onboarding_id==StudentOnboarding.id", foreign_keys="[OnboardingOTP.onboarding_id]", back_populates="otps")
+
+
+class DeviceResetOTP(Base):
+    """Email OTP records for self-service device reset with atomic single-use guard."""
+    __tablename__ = "qr_device_reset_otps"
+    __table_args__ = (
+        Index("idx_dev_reset_roll", "roll_number"),
+        Index("idx_dev_reset_created", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    roll_number = Column(String(50), nullable=False, index=True)
+    email = Column(String(150), nullable=False)
+    otp_hash = Column(String(128), nullable=False)
+    attempts = Column(Integer, default=0, nullable=False)
+    is_consumed = Column(Boolean, default=False, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class DeviceRebindRequest(Base):

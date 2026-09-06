@@ -36,6 +36,9 @@ EVENT_SCAN_FLOOD_429 = "SCAN_FLOOD_429"
 EVENT_LOGIN_RATE_LIMIT = "RATE_LIMIT_TRIGGERED"
 EVENT_UNACTIVATED_LOGIN = "PREMATURE_LOGIN_UNACTIVATED"
 EVENT_ALERT_SENT = "SECURITY_ALERT_SENT"
+EVENT_DEVICE_ENROLLMENT_RESET = "DEVICE_ENROLLMENT_RESET"
+EVENT_DEVICE_ADMIN_RESET = "DEVICE_ADMIN_RESET"
+EVENT_DEVICE_SELF_RESET_CAP = "DEVICE_SELF_RESET_CAP_EXCEEDED"
 
 # Configured Threshold Definitions: (count_threshold, window_seconds, is_digest_only)
 THRESHOLDS: Dict[str, Tuple[int, int, bool]] = {
@@ -46,6 +49,9 @@ THRESHOLDS: Dict[str, Tuple[int, int, bool]] = {
     EVENT_SCAN_FLOOD_429: (30, 300, False),    # >30 per source in 5 minutes
     EVENT_LOGIN_RATE_LIMIT: (20, 900, True),   # >20 per IP in 15 minutes (hourly digest only)
     EVENT_UNACTIVATED_LOGIN: (1, 300, False),  # Immediate alert on unactivated student login attempt (10m cooldown per student)
+    EVENT_DEVICE_ENROLLMENT_RESET: (1, 60, False), # Immediate alert on admin/faculty device unbinding
+    EVENT_DEVICE_ADMIN_RESET: (1, 60, False),  # Immediate alert on admin/faculty device unbinding
+    EVENT_DEVICE_SELF_RESET_CAP: (1, 60, False), # Immediate alert on student exceeding semester self-reset cap
 }
 
 
@@ -239,6 +245,9 @@ class SecurityAlertService:
             EVENT_PRIVESC_ATTEMPT: ("Unauthorized Privilege Escalation Attempt", "CRITICAL", "Student account attempted to access faculty/admin API. Verify student identity immediately."),
             EVENT_SCAN_FLOOD_429: ("Attendance Scan Rate-Limit Exhaustion", "HIGH", "Possible automated scan script or denial-of-service attack on attendance engine."),
             EVENT_UNACTIVATED_LOGIN: ("Premature Student Login Attempt (Unactivated Account)", "MEDIUM", "Student attempted portal login before completing email OTP verification or PIN setup. Advise student to open their college email and complete the onboarding magic link."),
+            EVENT_DEVICE_ENROLLMENT_RESET: ("Student Device Unbound by Faculty/Admin", "HIGH", "A faculty member or administrator has unlinked a student device. Verify this reset matches a legitimate student phone change request."),
+            EVENT_DEVICE_ADMIN_RESET: ("Student Device Unbound by Faculty/Admin", "HIGH", "A faculty member or administrator has unlinked a student device. Verify this reset matches a legitimate student phone change request."),
+            EVENT_DEVICE_SELF_RESET_CAP: ("Student Exceeded Self-Service Device Reset Limit", "HIGH", "Student attempted to exceed the semester limit of 5 device resets. Account requires manual faculty/admin verification."),
         }
 
         title, severity, recommendation = title_map.get(
