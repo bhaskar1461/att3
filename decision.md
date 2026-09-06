@@ -160,3 +160,20 @@ Deploy a multi-stage production ingress architecture:
 
 ### Consequences
 * Delivers enterprise-grade TLS security, zero open inbound firewall ports, and seamless public/private campus domain connectivity.
+
+---
+
+## ADR-011: Offline Scan Honesty Policy & Network Disconnection Handling
+
+### Context
+In classroom environments with fluctuating campus Wi-Fi or cellular dead zones, client devices can disconnect mid-period. Previously, thin-client scanner interfaces simulated success by queuing unvalidated raw scan tokens in local storage with success audio chimes. However, because in-class attendance relies on short-lived (10–20 second) HMAC rotating projector tokens and real-time section enrollment checks, queued tokens replayed after class will fail validation, causing silent attendance loss. Furthermore, students scanning projector screens offline were shown generic failure errors that did not guide them to manual resolution.
+
+### Decision
+1. **Prohibition of Deceptive Offline Queuing for Time-Bound Tokens**: The system strictly forbids displaying success states or claiming "Saved offline" for scans that cannot be cryptographically verified post-facto.
+2. **Student Offline Guidance**: When a student device lacks connectivity during classroom scanning, the interface immediately pauses the camera and displays an unambiguous, actionable status: *"No internet connection — cannot verify live attendance. Please connect to campus Wi-Fi or ask your teacher to mark you present manually."*
+3. **Faculty Thin-Client Safety**: When a teacher's scanning device is offline, scanning is paused with an alert banner (*"Offline — Live Verification Paused"*), accompanied by an instant 1-tap shortcut to open the manual classroom roster for direct, authoritative attendance marking.
+4. **Transparent Reconnection Feedback**: Any historical batch queue sync upon network restoration must present an explicit summary toast indicating exact counts of verified and rejected scans.
+
+### Consequences
+* **Pros**: Completely eliminates phantom attendance records and silent record loss. Gives students and instructors actionable, real-time guidance under time pressure.
+* **Cons**: Requires active connectivity for instant cryptographic validation, or direct fallback to manual classroom roster.

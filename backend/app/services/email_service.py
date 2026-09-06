@@ -152,9 +152,12 @@ def send_single_email(
                     server.starttls()
 
             server.login(cfg["user"], cfg["password"])
-            recipients = [to_email]
+            recipients = [addr.strip() for addr in to_email.split(",") if addr.strip()]
             if cc:
-                recipients.append(cc)
+                for c in cc.split(","):
+                    clean_c = c.strip()
+                    if clean_c and clean_c not in recipients:
+                        recipients.append(clean_c)
             server.sendmail(cfg["sender"], recipients, msg.as_string())
             server.quit()
             return {"status": "SENT", "channel": cfg["name"]}

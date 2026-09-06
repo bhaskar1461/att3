@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict
 
 from app.core.database import get_db
+from app.core.config import settings
 import logging
 from app.core.security import verify_password, get_password_hash, create_access_token, decode_access_token
 from app.models.models import User, UserRole, Teacher, Student, Department, StudentOnboarding
@@ -143,7 +144,11 @@ class FailedLoginRateLimiter:
                     pass
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=f"Too many failed login attempts from this network. Please wait {max(1, retry_after)} seconds before trying again."
+                    detail=f"Too many failed login attempts from this network. Please wait {max(1, retry_after)} seconds before trying again.",
+                    headers={
+                        "Retry-After": str(max(1, retry_after)),
+                        "X-Retry-After-Seconds": str(max(1, retry_after))
+                    }
                 )
 
     def record_failure(self, ip_address: Optional[str]) -> None:
@@ -217,6 +222,7 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
         )
     ).first()
 
+    device_binding = None
     # 1. Enforce Student Device Binding Security LOCKOUT BEFORE/DURING login
     if user and user.role == UserRole.STUDENT:
         if not device_public_id or not device_secret:
@@ -242,7 +248,7 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
             roll_number = user.student_profile.roll_number.upper()
 
         # Enforce 30-minute device lock & 5-attempt limit
-        enforce_device_binding(
+        device_binding = enforce_device_binding(
             db=db,
             device=device,
             roll_number=roll_number,
@@ -268,6 +274,52 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
                 logger.warning(f"Failed to check onboarding pin_hash fallback: {sync_err}")
 
     if not user or not is_valid_pw:
+        # --- Premature Login Detection for Unactivated Students ---
+        # WHY: Students who received the onboarding magic link but haven't completed activation
+        # attempt to log in directly on /login. Instead of a confusing "Incorrect username or password",
+        # provide explicit guidance directing them to complete onboarding via their college email.
+        if not user:
+            try:
+                from app.models.models import OnboardingState
+                onboarding_check = db.query(StudentOnboarding).filter(
+                    or_(
+                        StudentOnboarding.roll_number.ilike(username),
+                        StudentOnboarding.email.ilike(username),
+                        StudentOnboarding.email.ilike(f"{username}@%")
+                    )
+                ).first()
+                if onboarding_check and onboarding_check.state != OnboardingState.ACTIVATED:
+                    # Record audit event for premature login attempt
+                    log_security_audit_event(
+                        db=db,
+                        event_type=SecurityEventType.LOGIN_FAILURE,
+                        action="PREMATURE_LOGIN_UNACTIVATED",
+                        details=f"Unactivated student '{onboarding_check.roll_number}' (state={onboarding_check.state.value}) attempted direct login on /login before completing onboarding",
+                        roll_number=onboarding_check.roll_number,
+                        ip_address=ip_address
+                    )
+                    # Fire non-blocking security alert bot hook
+                    try:
+                        from app.services.security_alert_service import SecurityAlertService, EVENT_UNACTIVATED_LOGIN
+                        SecurityAlertService.hook_audit_event(
+                            event_type=EVENT_UNACTIVATED_LOGIN,
+                            roll_number=onboarding_check.roll_number,
+                            ip_address=ip_address,
+                            details=f"State: {onboarding_check.state.value}, Name: {onboarding_check.name}"
+                        )
+                    except Exception as alert_err:
+                        logger.warning(f"Failed to dispatch unactivated login alert: {alert_err}")
+                    logger.info(f"[PREMATURE-LOGIN] Unactivated student {onboarding_check.roll_number} (state={onboarding_check.state.value}) attempted login from IP {ip_address}")
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Your account has not been activated yet. Please click the onboarding link sent to your college email to set your PIN.",
+                    )
+            except HTTPException:
+                raise  # Re-raise the 403 we just created
+            except Exception as onboard_check_err:
+                # Defensive boundary: onboarding check failure must never crash the login endpoint
+                logger.warning(f"Error during premature login onboarding check: {onboard_check_err}")
+
         failed_login_limiter.record_failure(ip_address)
         log_security_audit_event(
             db=db,
@@ -277,10 +329,22 @@ async def login_for_access_token(request: Request, db: Session = Depends(get_db)
             user_id=user.id if user else None,
             ip_address=ip_address
         )
+        err_headers = {"WWW-Authenticate": "Bearer"}
+        if device_binding:
+            max_attempts = 100 if roll_number == "23311A05Y6" else getattr(settings, "MAX_BINDING_AUTH_ATTEMPTS", 5)
+            attempts_remaining = max(0, max_attempts - device_binding.attempt_count)
+            err_headers["X-Attempts-Remaining"] = str(attempts_remaining)
+            err_headers["X-Lockout-Minutes"] = "30"
+        else:
+            ip_fails = len(failed_login_limiter._failures.get(ip_address, []))
+            ip_remaining = max(0, failed_login_limiter.max_failures - ip_fails)
+            err_headers["X-Attempts-Remaining"] = str(ip_remaining)
+            err_headers["X-Lockout-Minutes"] = "5"
+
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
+            headers=err_headers,
         )
 
     failed_login_limiter.record_success(ip_address)

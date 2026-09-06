@@ -730,7 +730,7 @@ def send_test_security_alert(
         "trigger_reason": "Manual operator verification from Admin Dashboard",
         "client_ip": "127.0.0.1",
         "audit_id": 9999,
-        "details": "This is a synthetic verification alert to confirm end-to-end email delivery, dual-channel SMTP failover, and HTML template rendering.",
+        "details": "This is a synthetic verification alert to confirm end-to-end email delivery via Proofsy Zoho Mail channel and responsive HTML template rendering.",
         "recommended_action": "Verify email arrival in your inbox; confirm responsive HTML formatting and severity card display.",
         "timestamp_ist": now_ist,
         "admin_url": f"{getattr(settings, 'FRONTEND_URL', 'https://ather-os.de5.net').rstrip('/')}/admin"
@@ -743,7 +743,7 @@ def send_test_security_alert(
         to_email=target_email,
         subject=subject,
         html_body=html_content,
-        channel="DEFAULT"
+        channel="PROOFSY"
     )
 
     latency_ms = round((time.perf_counter() - t0) * 1000, 2)

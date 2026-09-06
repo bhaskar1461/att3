@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
 import { 
   X, Camera, CheckCircle, AlertTriangle, RefreshCw, Zap, 
-  Sparkles, Award, BookOpen, Clock, ShieldCheck 
+  Sparkles, Award, BookOpen, Clock, ShieldCheck, WifiOff 
 } from 'lucide-react';
 import { apiRequest } from '../services/api';
 import { getOrCreateDeviceCredentials } from '../services/deviceCredential';
@@ -21,28 +21,59 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [successResult, setSuccessResult] = useState<any>(null);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [isOffline, setIsOffline] = useState<boolean>(!navigator.onLine);
+  const [qrExpiredCountdown, setQrExpiredCountdown] = useState<number | null>(null);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
 
   const html5QrcodeRef = useRef<Html5Qrcode | null>(null);
   const scannerContainerId = 'student-class-qr-reader';
   const isScanningLockedRef = useRef<boolean>(false);
 
-  // Sound and Haptic feedback
+  // Online/Offline network state listener
+  useEffect(() => {
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => setIsOffline(true);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  // Live QR expiry countdown ticker
+  useEffect(() => {
+    if (qrExpiredCountdown === null || qrExpiredCountdown <= 0) return;
+    const timer = setInterval(() => {
+      setQrExpiredCountdown((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(timer);
+          isScanningLockedRef.current = false;
+          setIsSubmitting(false);
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [qrExpiredCountdown]);
+
+  // Sound and Haptic feedback: 2 short pulses for success, 3 distinct pulses for error
   const triggerFeedback = (isSuccess: boolean) => {
     try {
       if (navigator.vibrate) {
-        navigator.vibrate(isSuccess ? [100, 50, 100] : [300]);
+        navigator.vibrate(isSuccess ? [100, 50, 100] : [150, 80, 150, 80, 200]);
       }
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const osc = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
       osc.type = isSuccess ? 'sine' : 'sawtooth';
-      osc.frequency.setValueAtTime(isSuccess ? 880 : 250, audioCtx.currentTime);
+      osc.frequency.setValueAtTime(isSuccess ? 880 : 220, audioCtx.currentTime);
       gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
       osc.connect(gain);
       gain.connect(audioCtx.destination);
       osc.start();
-      osc.stop(audioCtx.currentTime + (isSuccess ? 0.2 : 0.35));
+      osc.stop(audioCtx.currentTime + (isSuccess ? 0.2 : 0.4));
     } catch {}
   };
 
@@ -55,9 +86,18 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       return;
     }
 
+    // Honest offline check: classroom QR rotation requires instantaneous server verification
+    if (!navigator.onLine) {
+      triggerFeedback(false);
+      setIsOffline(true);
+      setScanError(null);
+      return;
+    }
+
     isScanningLockedRef.current = true;
     setIsSubmitting(true);
     setScanError(null);
+    setQrExpiredCountdown(null);
 
     try {
       const deviceCred = getOrCreateDeviceCredentials();
@@ -76,13 +116,28 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       stopCamera();
     } catch (err: any) {
       triggerFeedback(false);
-      const msg = err.message || 'Scan verification failed. Please try again.';
-      setScanError(msg);
-      // Unlock after 2 seconds to allow rescanning the fresh code
-      setTimeout(() => {
+      const rawMsg = err.message || '';
+      const lowerMsg = rawMsg.toLowerCase();
+
+      // Check if network connection dropped
+      if (!navigator.onLine || lowerMsg.includes('failed to fetch') || lowerMsg.includes('networkerror')) {
+        setIsOffline(true);
         isScanningLockedRef.current = false;
         setIsSubmitting(false);
-      }, 2000);
+        return;
+      }
+
+      // Check for rotating token expiry (Task 1)
+      if (lowerMsg.includes('expired') || lowerMsg.includes('invalid') || lowerMsg.includes('session token')) {
+        setQrExpiredCountdown(5);
+      } else {
+        setScanError(rawMsg || 'Scan verification failed. Please try again.');
+        // Unlock after 2 seconds to allow rescanning
+        setTimeout(() => {
+          isScanningLockedRef.current = false;
+          setIsSubmitting(false);
+        }, 2000);
+      }
     }
   };
 
@@ -116,7 +171,8 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       setCameraActive(true);
     } catch (err: any) {
       console.error('Camera initialization error:', err);
-      setCameraError(err.message || 'Unable to access device camera. Please check camera permissions.');
+      triggerFeedback(false);
+      setCameraError(err.message || 'Unable to access device camera. Please check camera permissions in browser settings.');
       setCameraActive(false);
     }
   };
@@ -183,10 +239,10 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                     ? 'bg-amber-100 text-amber-800'
                     : 'bg-emerald-100 text-emerald-800'
                 }`}>
-                  {successResult.status === 'ALREADY_MARKED' ? 'Already Recorded' : 'Verified Present'}
+                  {successResult.status === 'ALREADY_MARKED' ? 'Already Present' : 'Verified Present'}
                 </span>
                 <h2 className="text-2xl font-black text-[#001e40]">
-                  {successResult.status === 'ALREADY_MARKED' ? 'Attendance Recorded' : 'Marked Present!'}
+                  {successResult.status === 'ALREADY_MARKED' ? "You're Already Marked Present ✅" : 'Marked Present!'}
                 </h2>
                 <p className="text-xs text-slate-600 font-medium mt-1">
                   {successResult.message}
@@ -228,6 +284,56 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
             /* Active Camera Scanner View */
             <div className="w-full flex flex-col items-center space-y-4">
               
+              {/* Task 0: Honest Offline Amber Card */}
+              {isOffline && (
+                <div className="w-full p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl text-center space-y-2.5 animate-in fade-in">
+                  <div className="w-9 h-9 bg-amber-100 text-amber-800 rounded-full flex items-center justify-center mx-auto border border-amber-300">
+                    <WifiOff className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-amber-950 uppercase tracking-wide">Offline — Live Verification Required</h4>
+                    <p className="text-xs font-semibold text-amber-900 mt-1">
+                      No connection — ask your teacher to mark you present manually.
+                    </p>
+                    <p className="text-[11px] text-amber-700 mt-1">
+                      Classroom QR codes rotate every few seconds and require instant server verification to prevent proxy attendance.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (navigator.onLine) {
+                        setIsOffline(false);
+                        isScanningLockedRef.current = false;
+                        setIsSubmitting(false);
+                      } else {
+                        triggerFeedback(false);
+                      }
+                    }}
+                    className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 mx-auto shadow-sm active:scale-95"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Check Connection &amp; Rescan</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Task 1: Actionable QR Expiry Countdown Ticker */}
+              {qrExpiredCountdown !== null && qrExpiredCountdown > 0 && (
+                <div className="w-full p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl text-center space-y-2 animate-in fade-in">
+                  <div className="w-9 h-9 bg-amber-100 text-amber-800 rounded-full flex items-center justify-center mx-auto border border-amber-300">
+                    <Clock className="w-5 h-5 animate-pulse" />
+                  </div>
+                  <h4 className="text-xs font-bold text-amber-950">QR Code Expired</h4>
+                  <p className="text-xs text-amber-900 font-semibold">
+                    QR expired — code refreshes automatically. Rescan in a few seconds ⏳
+                  </p>
+                  <div className="inline-block px-3 py-1 bg-amber-200 text-amber-900 rounded-full text-xs font-mono font-extrabold">
+                    Rescanning in {qrExpiredCountdown}s...
+                  </div>
+                </div>
+              )}
+
               {/* Camera Video Viewfinder */}
               <div className="relative w-full max-w-[280px] h-[280px] rounded-3xl overflow-hidden bg-slate-950 border-4 border-[#001e40] shadow-xl">
                 <div id={scannerContainerId} className="w-full h-full" />
@@ -265,9 +371,26 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                 </button>
               </div>
 
+              {/* Task 5: Camera Error & Permission Recovery */}
               {cameraError && (
-                <div className="p-3 bg-rose-50 border border-rose-200 rounded-2xl text-xs text-rose-600 text-center">
-                  {cameraError}
+                <div className="w-full p-4 bg-rose-50 border border-rose-200 rounded-2xl text-center space-y-3">
+                  <div className="w-9 h-9 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto">
+                    <Camera className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-rose-900">Camera Permission Required</h4>
+                    <p className="text-[11px] text-rose-700 mt-1">
+                      To scan classroom QR, enable camera access in browser settings (tap the lock icon in the address bar → Site permissions → Allow camera).
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={startCamera}
+                    className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 mx-auto shadow-sm active:scale-95"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Retry Camera Permission</span>
+                  </button>
                 </div>
               )}
 

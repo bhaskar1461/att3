@@ -240,9 +240,14 @@ def enforce_device_binding(
                 ip_address=ip_address
             )
             db.commit()
+            seconds_left = max(1, int((binding.expires_at - now).total_seconds())) if binding.expires_at else 1800
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Maximum authentication attempts reached for this security window. Please try again after the binding window expires."
+                detail="Maximum authentication attempts reached for this security window. Please try again after the binding window expires.",
+                headers={
+                    "Retry-After": str(seconds_left),
+                    "X-Retry-After-Seconds": str(seconds_left)
+                }
             )
 
         # Valid re-authentication for same bound roll number

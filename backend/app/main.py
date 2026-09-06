@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import engine, Base
@@ -102,6 +102,34 @@ app = FastAPI(
     redoc_url=None if is_prod else "/redoc",
     lifespan=lifespan,
 )
+
+# Additive error contract handler for HTTPException (preserves string detail while adding top-level structured fields)
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    headers = dict(exc.headers or {})
+    if isinstance(exc.detail, dict):
+        content = dict(exc.detail)
+    else:
+        content = {"detail": exc.detail}
+
+    if "X-Attempts-Remaining" in headers:
+        try:
+            content["attempts_remaining"] = int(headers["X-Attempts-Remaining"])
+        except (ValueError, TypeError):
+            pass
+    if "X-Lockout-Minutes" in headers:
+        try:
+            content["lockout_minutes"] = int(headers["X-Lockout-Minutes"])
+        except (ValueError, TypeError):
+            pass
+    if "X-Retry-After-Seconds" in headers or "Retry-After" in headers:
+        try:
+            raw_sec = headers.get("X-Retry-After-Seconds") or headers.get("Retry-After")
+            content["retry_after_seconds"] = int(raw_sec)
+        except (ValueError, TypeError):
+            pass
+
+    return JSONResponse(status_code=exc.status_code, content=content, headers=headers)
 
 # Global defensive exception handler to prevent unhandled process crashes
 @app.exception_handler(Exception)

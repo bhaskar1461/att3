@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Html5Qrcode } from 'html5-qrcode';
-import { X, Camera, Search, CheckCircle, AlertTriangle, RefreshCw, Clock, Zap, Activity, ShieldCheck, Flame } from 'lucide-react';
+import { X, Camera, Search, CheckCircle, AlertTriangle, RefreshCw, Clock, Zap, Activity, ShieldCheck, Flame, WifiOff } from 'lucide-react';
 import { apiRequest } from '../services/api';
 import { saveScanToOfflineQueue, addScanToBatchQueue, getBatchQueueSize } from '../services/offlineSync';
 import { MultiQRDecoder, DecodedQRResult } from '../services/qrDecoder';
@@ -43,6 +43,19 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
   const periodCountRef = useRef<number>(initialPeriodCount || 4);
   const [periodToast, setPeriodToast] = useState<string | null>(null);
 
+  // Online network connectivity state
+  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   const handleSelectPeriod = (n: number) => {
     setPeriodCount(n);
     periodCountRef.current = n;
@@ -50,10 +63,12 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
     setTimeout(() => setPeriodToast(null), 1500);
   };
 
-  // Real-time Performance HUD metrics
+  // Real-time Performance HUD & Verification metrics
   const [fps, setFps] = useState<number>(60);
   const [decodeTimeMs, setDecodeTimeMs] = useState<number>(12);
   const [totalScanned, setTotalScanned] = useState<number>(0);
+  const [totalRejected, setTotalRejected] = useState<number>(0);
+  const [isRejectPulsing, setIsRejectPulsing] = useState<boolean>(false);
   const [queueSize, setQueueSize] = useState<number>(0);
   const [showStats, setShowStats] = useState<boolean>(true);
 
@@ -67,23 +82,36 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
   const animFrameIdRef = useRef<number | null>(null);
   const multiDecoderRef = useRef<MultiQRDecoder>(new MultiQRDecoder());
 
-  // Fast Sound & Haptic Feedback
+  // Fast Sound & Haptic Feedback: 2 short pulses for success, 3 distinct pulses for error
   const triggerFeedback = (isSuccess: boolean) => {
     try {
       if (navigator.vibrate) {
-        navigator.vibrate(isSuccess ? [80, 40, 80] : [300]);
+        navigator.vibrate(isSuccess ? [80, 40, 80] : [150, 80, 150, 80, 200]);
       }
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const osc = audioCtx.createOscillator();
       const gain = audioCtx.createGain();
       osc.type = isSuccess ? 'sine' : 'sawtooth';
-      osc.frequency.setValueAtTime(isSuccess ? 880 : 300, audioCtx.currentTime);
+      osc.frequency.setValueAtTime(isSuccess ? 880 : 250, audioCtx.currentTime);
       gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
       osc.connect(gain);
       gain.connect(audioCtx.destination);
       osc.start();
-      osc.stop(audioCtx.currentTime + (isSuccess ? 0.15 : 0.3));
+      osc.stop(audioCtx.currentTime + (isSuccess ? 0.15 : 0.35));
     } catch {}
+  };
+
+  // Helper to trigger 300ms red border pulse & increment rejected counter
+  const recordRejection = (status: string, message: string) => {
+    triggerFeedback(false);
+    setTotalRejected(prev => prev + 1);
+    setIsRejectPulsing(true);
+    setTimeout(() => setIsRejectPulsing(false), 350);
+    setLastScannedResult({
+      status: status || 'REJECTED',
+      message: message || 'Scan Rejected'
+    });
+    setTimeout(() => setLastScannedResult(null), 1600);
   };
 
   // Local Fast Validation (<5ms)
@@ -118,26 +146,24 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
 
     const isValid = isPayloadValidLocally(qrPayload);
     if (!isValid) {
-      triggerFeedback(false);
-      setLastScannedResult({ status: 'ERROR', message: 'Invalid or Tampered QR Payload' });
-      setTimeout(() => setLastScannedResult(null), 1200);
+      recordRejection('INVALID_QR', 'Invalid or Unrecognized QR Code');
       return;
     }
 
+    // Task 0: Honest Offline Handling
     if (!navigator.onLine) {
       saveScanToOfflineQueue({
         session_id: sessionId,
         qr_payload: qrPayload,
         scanned_at: new Date().toISOString()
       });
-      triggerFeedback(true);
-      setTotalScanned(prev => prev + 1);
+      triggerFeedback(false);
       setLastScannedResult({
         status: 'OFFLINE_QUEUED',
-        message: 'Saved offline to queue.'
+        message: 'Saved to offline sync queue (verification pending).'
       });
       setQueueSize(getBatchQueueSize());
-      setTimeout(() => setLastScannedResult(null), 1200);
+      setTimeout(() => setLastScannedResult(null), 1500);
       return;
     }
 
@@ -157,22 +183,17 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
       console.log(`[PERF_LOG] QR API verification completed in ${tScanDuration}ms`);
 
       if (response.status === 'ALREADY_MARKED') {
-        triggerFeedback(false);
-      } else {
-        triggerFeedback(true);
-        setTotalScanned(prev => prev + 1);
+        recordRejection('ALREADY_MARKED', response.message || 'Student already marked present today');
+        return;
       }
 
+      triggerFeedback(true);
+      setTotalScanned(prev => prev + 1);
       setLastScannedResult(response);
       onScanSuccess(response);
       setTimeout(() => setLastScannedResult(null), 1200);
     } catch (err: any) {
-      triggerFeedback(false);
-      setLastScannedResult({
-        status: 'ERROR',
-        message: err.message || 'Verification Failed'
-      });
-      setTimeout(() => setLastScannedResult(null), 1500);
+      recordRejection('ERROR', err.message || 'Verification Failed');
     }
   };
 
@@ -409,6 +430,13 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Persistent Marked / Rejected Chip */}
+          <div className="px-2.5 py-1 rounded-xl bg-slate-900/90 border border-slate-700/80 text-[11px] font-mono font-bold flex items-center gap-2">
+            <span className="text-emerald-400">✅ {totalScanned}</span>
+            <span className="text-slate-600">·</span>
+            <span className="text-rose-400">⚠️ {totalRejected}</span>
+          </div>
+
           {/* Stats Toggle */}
           <button
             onClick={() => setShowStats(!showStats)}
@@ -427,6 +455,23 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Task 0: Teacher Offline Warning Banner */}
+      {!isOnline && (
+        <div className="flex items-center justify-between px-4 py-2 bg-amber-500/20 border-b border-amber-500/40 text-amber-300 text-xs shrink-0 animate-in fade-in">
+          <span className="flex items-center gap-1.5 font-bold">
+            <WifiOff className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span>Offline — Live verification paused</span>
+          </span>
+          <button
+            type="button"
+            onClick={onOpenManualSearch}
+            className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-extrabold text-[11px] shadow-sm hover:bg-amber-400 transition"
+          >
+            Open Manual Roster
+          </button>
+        </div>
+      )}
 
       {/* Make-up Mode Banner for Past Sessions */}
       {isPastSession && (
@@ -478,16 +523,33 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
           </div>
         ))}
 
-        {/* Center Scanner Frame & Laser */}
+        {/* Center Scanner Frame & Laser with 300ms Red Border Pulse on Rejection */}
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-          <div className="relative" style={{ width: '74vw', height: '74vw', maxWidth: '340px', maxHeight: '340px' }}>
-            <div className="absolute top-0 left-0 w-8 h-8 border-t-[3px] border-l-[3px] border-cyan-400 rounded-tl-xl" />
-            <div className="absolute top-0 right-0 w-8 h-8 border-t-[3px] border-r-[3px] border-cyan-400 rounded-tr-xl" />
-            <div className="absolute bottom-0 left-0 w-8 h-8 border-b-[3px] border-l-[3px] border-cyan-400 rounded-bl-xl" />
-            <div className="absolute bottom-0 right-0 w-8 h-8 border-b-[3px] border-r-[3px] border-cyan-400 rounded-br-xl" />
+          <div 
+            className={`relative transition-all duration-200 ${
+              isRejectPulsing 
+                ? 'scale-105 ring-4 ring-rose-500 shadow-[0_0_35px_#f43f5e] rounded-2xl bg-rose-500/10' 
+                : ''
+            }`} 
+            style={{ width: '74vw', height: '74vw', maxWidth: '340px', maxHeight: '340px' }}
+          >
+            <div className={`absolute top-0 left-0 w-8 h-8 border-t-[3px] border-l-[3px] rounded-tl-xl transition-colors ${
+              isRejectPulsing ? 'border-rose-500' : 'border-cyan-400'
+            }`} />
+            <div className={`absolute top-0 right-0 w-8 h-8 border-t-[3px] border-r-[3px] rounded-tr-xl transition-colors ${
+              isRejectPulsing ? 'border-rose-500' : 'border-cyan-400'
+            }`} />
+            <div className={`absolute bottom-0 left-0 w-8 h-8 border-b-[3px] border-l-[3px] rounded-bl-xl transition-colors ${
+              isRejectPulsing ? 'border-rose-500' : 'border-cyan-400'
+            }`} />
+            <div className={`absolute bottom-0 right-0 w-8 h-8 border-b-[3px] border-r-[3px] rounded-br-xl transition-colors ${
+              isRejectPulsing ? 'border-rose-500' : 'border-cyan-400'
+            }`} />
 
             {/* Laser Line */}
-            <div className="absolute left-2 right-2 height-0.5 bg-cyan-400 shadow-[0_0_15px_#22d3ee] animate-pulse" style={{ top: '50%' }} />
+            <div className={`absolute left-2 right-2 height-0.5 shadow-[0_0_15px_#22d3ee] animate-pulse transition-colors ${
+              isRejectPulsing ? 'bg-rose-500 shadow-[0_0_15px_#f43f5e]' : 'bg-cyan-400'
+            }`} style={{ top: '50%' }} />
           </div>
         </div>
 
@@ -518,20 +580,35 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
               <span className="text-slate-500">Scanned Count:</span>
               <span className="font-bold text-orange-400">{totalScanned}</span>
             </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-slate-500">Rejected Count:</span>
+              <span className="font-bold text-rose-400">{totalRejected}</span>
+            </div>
           </div>
         )}
 
-        {/* Error State */}
+        {/* Error State with Camera Permission Recovery */}
         {cameraError && (
           <div className="absolute inset-0 bg-slate-900/95 flex flex-col items-center justify-center p-6 text-center z-40">
             <AlertTriangle className="w-12 h-12 text-rose-500 mb-3" />
-            <p className="text-sm font-semibold text-rose-200 mb-4">{cameraError}</p>
-            <button
-              onClick={onOpenManualSearch}
-              className="px-5 py-2.5 bg-cyan-500 text-slate-950 font-bold rounded-xl text-sm"
-            >
-              Use Manual Search
-            </button>
+            <p className="text-sm font-semibold text-rose-200 mb-2">{cameraError}</p>
+            <p className="text-xs text-slate-400 mb-4 max-w-xs">
+              If blocked, tap the lock icon in the browser address bar and set Camera to Allow.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setFacingMode(prev => prev === 'environment' ? 'user' : 'environment')}
+                className="px-4 py-2.5 bg-slate-800 text-slate-200 border border-slate-700 font-bold rounded-xl text-xs flex items-center gap-1.5 hover:bg-slate-700 active:scale-95 transition"
+              >
+                <RefreshCw className="w-3.5 h-3.5" /> Retry Camera
+              </button>
+              <button
+                onClick={onOpenManualSearch}
+                className="px-5 py-2.5 bg-cyan-500 text-slate-950 font-bold rounded-xl text-xs hover:bg-cyan-400 active:scale-95 transition"
+              >
+                Use Manual Search
+              </button>
+            </div>
           </div>
         )}
 
@@ -544,12 +621,11 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
 
         {/* Scanned Result Banner Overlay */}
         {lastScannedResult && (
-          <div className={`absolute inset-0 z-40 flex flex-col items-center justify-center p-6 text-center backdrop-blur-md transition-all ${
+          <div className={`absolute inset-0 z-40 flex flex-col items-center justify-center p-6 text-center backdrop-blur-md transition-all animate-in fade-in ${
             lastScannedResult.status === 'SUCCESS' ? 'bg-emerald-950/90 text-emerald-200' :
             lastScannedResult.status === 'PERIOD_UPDATED' ? 'bg-cyan-950/90 text-cyan-200' :
-            (lastScannedResult.status === 'DUPLICATE' || lastScannedResult.status === 'ALREADY_MARKED') ? 'bg-amber-950/90 text-amber-200' :
-            lastScannedResult.status === 'OFFLINE_QUEUED' ? 'bg-cyan-950/90 text-cyan-200' :
-            'bg-rose-950/90 text-rose-200'
+            lastScannedResult.status === 'OFFLINE_QUEUED' ? 'bg-amber-950/90 text-amber-200' :
+            'bg-rose-950/95 text-rose-200'
           }`}>
             {lastScannedResult.status === 'SUCCESS' ? (
               <>
@@ -569,10 +645,26 @@ export const QRScannerModal: React.FC<QRScannerModalProps> = ({
                   <Zap className="w-3.5 h-3.5 text-cyan-300" /> {lastScannedResult.message || 'PERIOD COUNT UPDATED'}
                 </span>
               </>
-            ) : (
+            ) : lastScannedResult.status === 'OFFLINE_QUEUED' ? (
               <>
-                <AlertTriangle className="w-14 h-14 text-amber-400 mb-2" />
-                <h3 className="text-lg font-bold text-white">{lastScannedResult.message || lastScannedResult.status}</h3>
+                <WifiOff className="w-14 h-14 text-amber-400 mb-2 animate-pulse" />
+                <span className="px-3 py-1 bg-amber-500/20 rounded-full text-xs font-bold text-amber-300 mb-2">
+                  OFFLINE SCAN STORED
+                </span>
+                <h3 className="text-base font-bold text-white max-w-xs">{lastScannedResult.message}</h3>
+                <p className="text-xs text-amber-300/80 mt-2 font-mono">Will sync automatically upon reconnection</p>
+              </>
+            ) : (
+              /* Task 4: Rejection Awareness Overlay with prominent badge & reason */
+              <>
+                <div className="w-16 h-16 bg-rose-900/60 border-2 border-rose-500 rounded-full flex items-center justify-center mb-3 animate-pulse">
+                  <AlertTriangle className="w-9 h-9 text-rose-400" />
+                </div>
+                <span className="px-3 py-1 bg-rose-500/30 border border-rose-400/50 rounded-full text-xs font-black uppercase tracking-wider text-rose-300 mb-2">
+                  ⚠️ SCAN REJECTED
+                </span>
+                <h3 className="text-lg font-bold text-white max-w-xs">{lastScannedResult.message || lastScannedResult.status}</h3>
+                <p className="text-xs text-rose-300 mt-2 font-mono">⚠️ Rejection counted in session tally</p>
               </>
             )}
           </div>

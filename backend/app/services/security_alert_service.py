@@ -34,6 +34,7 @@ EVENT_FAILED_HMAC = "FAILED_HMAC"
 EVENT_PRIVESC_ATTEMPT = "PRIVESC_ATTEMPT"
 EVENT_SCAN_FLOOD_429 = "SCAN_FLOOD_429"
 EVENT_LOGIN_RATE_LIMIT = "RATE_LIMIT_TRIGGERED"
+EVENT_UNACTIVATED_LOGIN = "PREMATURE_LOGIN_UNACTIVATED"
 EVENT_ALERT_SENT = "SECURITY_ALERT_SENT"
 
 # Configured Threshold Definitions: (count_threshold, window_seconds, is_digest_only)
@@ -44,6 +45,7 @@ THRESHOLDS: Dict[str, Tuple[int, int, bool]] = {
     EVENT_PRIVESC_ATTEMPT: (1, 60, False),     # Immediate alert on unauthorized privilege escalation
     EVENT_SCAN_FLOOD_429: (30, 300, False),    # >30 per source in 5 minutes
     EVENT_LOGIN_RATE_LIMIT: (20, 900, True),   # >20 per IP in 15 minutes (hourly digest only)
+    EVENT_UNACTIVATED_LOGIN: (1, 300, False),  # Immediate alert on unactivated student login attempt (10m cooldown per student)
 }
 
 
@@ -236,6 +238,7 @@ class SecurityAlertService:
             EVENT_FAILED_HMAC: ("Cryptographic QR Token Tampering Detected", "HIGH", "Investigate client device and network logs for unauthorized QR manipulation."),
             EVENT_PRIVESC_ATTEMPT: ("Unauthorized Privilege Escalation Attempt", "CRITICAL", "Student account attempted to access faculty/admin API. Verify student identity immediately."),
             EVENT_SCAN_FLOOD_429: ("Attendance Scan Rate-Limit Exhaustion", "HIGH", "Possible automated scan script or denial-of-service attack on attendance engine."),
+            EVENT_UNACTIVATED_LOGIN: ("Premature Student Login Attempt (Unactivated Account)", "MEDIUM", "Student attempted portal login before completing email OTP verification or PIN setup. Advise student to open their college email and complete the onboarding magic link."),
         }
 
         title, severity, recommendation = title_map.get(
@@ -261,13 +264,13 @@ class SecurityAlertService:
         html_content = render_email_template("security_alert_email.html", context)
         subject = f"[SNIST SECURITY ALERT] [{severity}] {title} ({subject_id})"
 
-        # Reuse existing dual SMTP transport with automatic failover
+        # Reuse existing dual SMTP transport with automatic failover via Proofsy Zoho Mail
         # WHY: Leverages proven SMTP pipeline with zero duplicate network logic.
         res = send_single_email(
             to_email=target_email,
             subject=subject,
             html_body=html_content,
-            channel="DEFAULT"
+            channel="PROOFSY"
         )
         logger.info(f"Dispatched security alert for {event_type} to {target_email}: status={res.get('status')}")
 
@@ -382,7 +385,7 @@ class SecurityAlertService:
                     to_email=target_email,
                     subject=subject,
                     html_body=html_content,
-                    channel="DEFAULT"
+                    channel="PROOFSY"
                 )
 
                 # Record digest audit log

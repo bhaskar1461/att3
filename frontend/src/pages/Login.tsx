@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { ArrowRight, Eye, EyeOff, Lock, Mail } from 'lucide-react';
+import { ArrowRight, Eye, EyeOff, Lock, Mail, Clock, AlertTriangle } from 'lucide-react';
 import { Toast } from '../components/Toast';
 import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/deviceCredential';
 
@@ -10,7 +10,10 @@ export const Login: React.FC = () => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
+  const [onboardingWarning, setOnboardingWarning] = useState(false);
+  const [lockoutSecondsRemaining, setLockoutSecondsRemaining] = useState<number | null>(null);
+  const [attemptsRemaining, setAttemptsRemaining] = useState<number | null>(null);
 
   // Magic link state (for faculty/students logging in via magic link)
   const [magicToken, setMagicToken] = useState<string | null>(null);
@@ -46,6 +49,27 @@ export const Login: React.FC = () => {
         });
     }
   }, []);
+
+  // Live lockout countdown timer
+  useEffect(() => {
+    if (lockoutSecondsRemaining === null || lockoutSecondsRemaining <= 0) return;
+    const timer = setInterval(() => {
+      setLockoutSecondsRemaining((prev) => {
+        if (prev === null || prev <= 1) {
+          clearInterval(timer);
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [lockoutSecondsRemaining]);
+
+  const formatMMSS = (totalSeconds: number) => {
+    const m = Math.floor(totalSeconds / 60);
+    const s = totalSeconds % 60;
+    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
 
   const handleMagicLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -103,7 +127,16 @@ export const Login: React.FC = () => {
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (lockoutSecondsRemaining !== null && lockoutSecondsRemaining > 0) {
+      setToast({ 
+        message: `Account is temporarily locked. Please wait ${formatMMSS(lockoutSecondsRemaining)} before retrying.`, 
+        type: 'warning' 
+      });
+      return;
+    }
+
     setIsLoading(true);
+    setOnboardingWarning(false);
     try {
       const deviceCreds = getOrCreateDeviceCredentials();
       const deviceHeaders = getDeviceHeaders();
@@ -127,10 +160,46 @@ export const Login: React.FC = () => {
 
       if (!res.ok) {
         let msg = 'Invalid credentials. Please check your username & password.';
+        let errData: any = {};
         try {
-          const errData = JSON.parse(text);
+          errData = JSON.parse(text);
           if (errData.detail) msg = typeof errData.detail === 'string' ? errData.detail : msg;
         } catch {}
+
+        // Detect premature login by unactivated student (HTTP 403)
+        if (res.status === 403 && msg.toLowerCase().includes('activated yet')) {
+          setOnboardingWarning(true);
+          setToast({ message: msg, type: 'warning', duration: 8000 } as any);
+          return;
+        }
+
+        // Handle HTTP 429: Account Lockout / Rate Limit
+        if (res.status === 429) {
+          const retryAfterHeader = res.headers.get('Retry-After');
+          const seconds = errData.retry_after_seconds || (retryAfterHeader ? parseInt(retryAfterHeader, 10) : 1800);
+          setLockoutSecondsRemaining(seconds);
+          setToast({ message: msg, type: 'error', duration: 8000 } as any);
+          return;
+        }
+
+        // Handle HTTP 401: Wrong Password with Attempts Countdown
+        if (res.status === 401) {
+          const attemptsRem = errData.attempts_remaining !== undefined && errData.attempts_remaining !== null
+            ? errData.attempts_remaining
+            : (res.headers.get('X-Attempts-Remaining') ? parseInt(res.headers.get('X-Attempts-Remaining')!, 10) : null);
+          
+          if (attemptsRem !== null && !isNaN(attemptsRem)) {
+            setAttemptsRemaining(attemptsRem);
+            if (attemptsRem > 1) {
+              msg = `Incorrect password — ${attemptsRem} attempts remaining before a 30-minute lockout`;
+            } else if (attemptsRem === 1) {
+              msg = `⚠️ Incorrect password — LAST attempt remaining before a 30-minute lockout!`;
+            } else {
+              msg = `Incorrect password. Account locked for 30 minutes.`;
+            }
+          }
+        }
+
         throw new Error(msg);
       }
 
@@ -168,7 +237,7 @@ export const Login: React.FC = () => {
     <div className="min-h-screen bg-[#FBFBFD] text-[#1b1b1d] font-sans flex flex-col justify-center items-center px-4 sm:px-6 lg:px-8 relative overflow-hidden">
       
       {toast && (
-        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />
+        <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} duration={toast.type === 'warning' ? 8000 : 4000} />
       )}
 
       {/* Ambient Blurred Accents */}
@@ -293,6 +362,52 @@ export const Login: React.FC = () => {
         ) : (
           /* Standard Login Form */
           <form onSubmit={handleLoginSubmit} className="w-full space-y-4">
+
+            {/* Account Lockout Countdown Card (HTTP 429) */}
+            {lockoutSecondsRemaining !== null && lockoutSecondsRemaining > 0 && (
+              <div className="bg-amber-50 border-2 border-amber-400 rounded-2xl p-4 text-center shadow-sm animate-in fade-in duration-300">
+                <div className="w-10 h-10 bg-amber-100 text-amber-800 rounded-full flex items-center justify-center mx-auto mb-2 border border-amber-300">
+                  <Clock className="w-5 h-5 animate-pulse" />
+                </div>
+                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-amber-200 text-amber-900 mb-1">
+                  Account Temporarily Locked
+                </span>
+                <p className="text-sm font-bold text-amber-950 mt-1">
+                  Try again in <span className="font-mono text-base font-black text-amber-900 bg-amber-100 px-2 py-0.5 rounded-md border border-amber-300">{formatMMSS(lockoutSecondsRemaining)}</span>
+                </p>
+                <p className="text-[11px] text-amber-800 mt-2 leading-relaxed">
+                  Too many failed attempts. Need urgent access? Contact your faculty or admin to reset your credentials instantly.
+                </p>
+              </div>
+            )}
+
+            {/* Wrong Password Attempts Remaining Banner (HTTP 401) */}
+            {attemptsRemaining !== null && (!lockoutSecondsRemaining || lockoutSecondsRemaining <= 0) && attemptsRemaining <= 2 && (
+              <div className="bg-rose-50 border border-rose-300 rounded-xl p-3 flex items-center gap-2.5 animate-in fade-in">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <p className="text-xs font-bold text-rose-800 leading-tight">
+                  {attemptsRemaining === 1
+                    ? '⚠️ Warning: Only 1 attempt remaining before a 30-minute device lockout!'
+                    : `⚠️ ${attemptsRemaining} attempts remaining before a 30-minute lockout.`}
+                </p>
+              </div>
+            )}
+
+            {/* Onboarding Activation Required Banner */}
+            {onboardingWarning && (
+              <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-center animate-bounce-in">
+                <span className="inline-block px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wide bg-amber-200 text-amber-900 mb-1.5">
+                  Onboarding Activation Required
+                </span>
+                <p className="text-xs text-amber-950 font-semibold leading-tight">
+                  Your account has not been activated yet.
+                </p>
+                <p className="text-[11px] text-amber-700 mt-1.5 leading-snug">
+                  Please click the onboarding link sent to your <strong>college email</strong> to set your PIN. Once your PIN is set, return here to sign in.
+                </p>
+              </div>
+            )}
+
             {/* Email / ID Input */}
             <div className="relative">
               <label className="sr-only" htmlFor="college-id">College Email or ID</label>
@@ -356,10 +471,26 @@ export const Login: React.FC = () => {
             <div className="pt-2">
               <button
                 type="submit"
-                disabled={isLoading}
-                className="w-full flex justify-center items-center gap-2 py-3.5 px-4 border border-transparent rounded-lg text-white bg-[#001e40] hover:bg-[#003366] active:scale-[0.99] font-medium text-sm transition-all shadow-sm"
+                disabled={isLoading || (lockoutSecondsRemaining !== null && lockoutSecondsRemaining > 0)}
+                className={`w-full flex justify-center items-center gap-2 py-3.5 px-4 border border-transparent rounded-lg text-white font-medium text-sm transition-all shadow-sm ${
+                  lockoutSecondsRemaining && lockoutSecondsRemaining > 0
+                    ? 'bg-slate-400 cursor-not-allowed opacity-80'
+                    : 'bg-[#001e40] hover:bg-[#003366] active:scale-[0.99]'
+                }`}
               >
-                {isLoading ? 'Signing in...' : 'Sign In'} <ArrowRight className="w-4 h-4" />
+                {isLoading ? (
+                  'Signing in...'
+                ) : lockoutSecondsRemaining && lockoutSecondsRemaining > 0 ? (
+                  <>
+                    <Clock className="w-4 h-4 animate-pulse" />
+                    <span>Locked ({formatMMSS(lockoutSecondsRemaining)})</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Sign In</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
               </button>
             </div>
           </form>

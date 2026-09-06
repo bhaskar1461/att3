@@ -63,8 +63,8 @@ class Settings:
     SMTP_OTP_USER: str = os.getenv("SMTP_OTP_USER", os.getenv("SMTP_USER", "bhaskar@proofsy.tech"))
     SMTP_OTP_PASSWORD: str = os.getenv("SMTP_OTP_PASSWORD", os.getenv("SMTP_OTP_PASS", os.getenv("SMTP_PASS", "")))
     SMTP_OTP_USE_SSL: bool = os.getenv("SMTP_OTP_USE_SSL", os.getenv("SMTP_SECURE", "true")).lower() == "true"
-    SMTP_OTP_SENDER: str = os.getenv("SMTP_OTP_SENDER", os.getenv("EMAIL_FROM", "certificates@proofsy.tech"))
-    SMTP_OTP_SENDER_NAME: str = os.getenv("SMTP_OTP_SENDER_NAME", os.getenv("EMAIL_FROM_NAME", "Proofsy Certificates"))
+    SMTP_OTP_SENDER: str = os.getenv("SMTP_OTP_SENDER", os.getenv("EMAIL_FROM", "bhaskar@proofsy.tech"))
+    SMTP_OTP_SENDER_NAME: str = os.getenv("SMTP_OTP_SENDER_NAME", os.getenv("EMAIL_FROM_NAME", "SNIST Security System"))
     SMTP_OTP_REPLY_TO: str = os.getenv("SMTP_OTP_REPLY_TO", os.getenv("EMAIL_REPLY_TO", "support@proofsy.tech"))
 
     # --- Onboarding Configuration ---
