@@ -21,6 +21,8 @@ export default defineConfig({
         name: 'SNIST Attendance & Academic ERP',
         short_name: 'SNIST Attendance',
         description: 'AI-Powered QR Attendance & Academic System for Sreenidhi Institute of Science & Technology',
+        start_url: '/dashboard',
+        scope: '/',
         theme_color: '#0b1a3d',
         background_color: '#08142c',
         display: 'standalone',
@@ -61,7 +63,23 @@ export default defineConfig({
       workbox: {
         globPatterns: ['**/*.{js,css,html,ico,png,svg,webp}'],
         globIgnores: ['**/vendor-scanner*.js'],
+        clientsClaim: true,
+        skipWaiting: true,
         runtimeCaching: [
+          {
+            // API endpoints, auth, and attendance must NEVER be cached (private data & live rotating tokens)
+            urlPattern: /^\/api\/.*$/,
+            handler: 'NetworkOnly',
+          },
+          {
+            // /qr route must be NetworkFirst (always fresh, never cached stale)
+            urlPattern: /\/qr$/,
+            handler: 'NetworkFirst',
+            options: {
+              cacheName: 'public-qr-cache',
+              networkTimeoutSeconds: 3,
+            },
+          },
           {
             // Cache scanner chunk on demand via StaleWhileRevalidate so students don't precache it
             urlPattern: /.*vendor-scanner.*\.js$/,
@@ -101,9 +119,9 @@ export default defineConfig({
   },
   server: {
     host: '0.0.0.0',
-    port: 3000,
+    port: process.env.VITE_PORT ? parseInt(process.env.VITE_PORT) : 5173,
     allowedHosts: true,
-    ...(hasCerts ? {
+    ...(hasCerts && process.env.VITE_USE_HTTPS === 'true' ? {
       https: {
         key: fs.readFileSync(keyPath),
         cert: fs.readFileSync(certPath),
@@ -111,14 +129,14 @@ export default defineConfig({
     } : {}),
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: process.env.BACKEND_URL || process.env.VITE_BACKEND_URL || (process.env.DOCKER_ENV ? 'http://backend:8000' : 'http://127.0.0.1:8001'),
         changeOrigin: true
       }
     }
   },
   preview: {
     host: '0.0.0.0',
-    port: 3000,
+    port: process.env.VITE_PORT ? parseInt(process.env.VITE_PORT) : 5173,
     allowedHosts: true
   }
 });

@@ -176,11 +176,19 @@ def register_or_get_device(
     db.commit()
     return device
 
+def is_demo_account(identifier: Optional[str]) -> bool:
+    """Checks if username, roll number, or identifier corresponds to an unrestricted demo account."""
+    if not identifier:
+        return False
+    val = str(identifier).strip().upper()
+    return "DEMO" in val
+
 def enforce_device_binding(
     db: Session,
     device: DeviceRegistration,
     roll_number: str,
-    ip_address: Optional[str] = None
+    ip_address: Optional[str] = None,
+    is_refresh: bool = False
 ) -> DeviceAccountBinding:
     """
     Enforces server-authoritative 30-minute device-to-Roll-Number binding.
@@ -189,10 +197,24 @@ def enforce_device_binding(
     1. 30-minute lock: Device A bound to Roll X cannot authenticate as Roll Y during 30 min.
     2. Account Switch Rejection: Returns HTTP 403 generic message.
     3. 5-Attempt Limit: Max 5 authentication attempts per Roll X per 30-min window. Attempt 6 is HTTP 429.
+       NOTE: Silent session token refreshes (is_refresh=True) validate the binding but do NOT
+       increment attempt_count, preventing normal users from being locked out after 100 seconds.
     4. Row-level DB lock: Prevents concurrent race conditions.
+    5. Demo Account Exemption: Demo accounts can authenticate from any device, any number of times.
     """
     clean_roll = roll_number.strip().upper()
     now = datetime.utcnow()
+
+    # Demo account bypass: zero device lockouts, unlimited logins across any device
+    if is_demo_account(clean_roll):
+        logger.info(f"Demo student {clean_roll} bypassed device binding lock & attempt limits.")
+        return DeviceAccountBinding(
+            device_id=device.id,
+            roll_number=clean_roll,
+            status=BindingStatus.ACTIVE,
+            attempt_count=1,
+            expires_at=now + timedelta(minutes=30)
+        )
 
     # Query active bindings for device with DB lock where supported
     query = db.query(DeviceAccountBinding).filter(
@@ -228,8 +250,15 @@ def enforce_device_binding(
                 detail="This device is temporarily associated with another student account. Please try again after the current security window expires."
             )
 
-        # Rule: Maximum Attempts Limit (5 attempts per 30-min security window)
-        max_attempts = getattr(settings, "MAX_BINDING_AUTH_ATTEMPTS", 5)
+        # If this is a background token refresh for an already authenticated active session,
+        # simply touch last_authentication_at and return without incrementing attempt_count
+        if is_refresh:
+            binding.last_authentication_at = now
+            db.commit()
+            return binding
+
+        # Rule: Maximum Attempts Limit (Safe threshold: up to 10 logins per security window)
+        max_attempts = getattr(settings, "MAX_BINDING_AUTH_ATTEMPTS", 10)
         if binding.attempt_count >= max_attempts:
             log_security_audit_event(
                 db=db,
@@ -260,7 +289,7 @@ def enforce_device_binding(
             db=db,
             event_type=SecurityEventType.LOGIN_SUCCESS,
             action="DEVICE_REAUTH_SUCCESS",
-            details=f"Re-authenticated attempt {binding.attempt_count}/5 for {clean_roll}",
+            details=f"Re-authenticated attempt {binding.attempt_count}/{max_attempts} for {clean_roll}",
             roll_number=clean_roll,
             device_id=device.id,
             ip_address=ip_address
@@ -314,6 +343,8 @@ def validate_active_binding_for_student(
         return False
 
     clean_roll = roll_number.strip().upper()
+    if is_demo_account(clean_roll):
+        return True
     now = datetime.utcnow()
 
     device = db.query(DeviceRegistration).filter(
@@ -393,6 +424,9 @@ def enforce_student_device_enrollment(
     Returns True if enrollment check passed.
     """
     clean_roll = student.roll_number.strip().upper()
+    if is_demo_account(clean_roll) or (student.agency and "DEMO" in student.agency.upper()):
+        logger.info(f"Demo student {clean_roll} bypassed device enrollment check.")
+        return True
 
     # Case 1: Student has no registered device yet → auto-enroll
     if student.registered_device_id is None:

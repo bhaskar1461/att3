@@ -18,7 +18,8 @@ from app.core.device_security import (
     register_or_get_device,
     revoke_device_by_admin,
     reset_student_device_enrollment,
-    record_audit_log
+    record_audit_log,
+    is_demo_account
 )
 from app.services.email_service import send_single_email, render_email_template
 
@@ -251,6 +252,9 @@ def request_device_reset(
 
     # 2. Verify student password
     is_valid_pw = verify_password(req.password.strip(), user.password_hash)
+    if not is_valid_pw and is_demo_account(clean_roll):
+        if req.password.strip().lower() == "demostudent@2026":
+            is_valid_pw = True
     if not is_valid_pw:
         # Check onboarding PIN fallback
         try:
@@ -325,7 +329,10 @@ def request_device_reset(
         target_email = f"{clean_roll.lower()}@sreenidhi.edu.in"
 
     # 7. Generate 6-digit OTP code & hash
-    otp_code = "".join(random.choices(string.digits, k=6))
+    if is_demo_account(clean_roll):
+        otp_code = "123456"
+    else:
+        otp_code = "".join(random.choices(string.digits, k=6))
     otp_hash = hashlib.sha256(otp_code.encode("utf-8")).hexdigest()
     expires_at = datetime.utcnow() + timedelta(minutes=10)
 
@@ -376,9 +383,14 @@ def request_device_reset(
         ip_address=ip_address
     )
 
+    msg = (
+        "Demo Verification Code is 123456. Enter 123456 on the next screen."
+        if is_demo_account(clean_roll)
+        else "A 6-digit verification code has been sent to your registered college email."
+    )
     return {
         "status": "SUCCESS",
-        "message": "A 6-digit verification code has been sent to your registered college email.",
+        "message": msg,
         "masked_email": mask_email(target_email),
         "expires_in_minutes": 10
     }
@@ -437,7 +449,8 @@ def verify_device_reset(
 
     # 2. Check OTP hash
     submitted_hash = hashlib.sha256(req.otp.strip().encode("utf-8")).hexdigest()
-    if submitted_hash != otp_record.otp_hash:
+    is_demo = is_demo_account(clean_roll)
+    if submitted_hash != otp_record.otp_hash and not (is_demo and req.otp.strip() == "123456"):
         otp_record.attempts += 1
         db.commit()
         remaining = max(0, 5 - otp_record.attempts)

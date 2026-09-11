@@ -1,0 +1,26 @@
+# Cloudflare Named Tunnel Ingress Configuration
+# System: SNIST AI QR Attendance & ERP Platform
+# Target Domain: ather-os.de5.net
+
+tunnel: snist-attendance-tunnel
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  # Route public domain directly to local Nginx HTTPS reverse proxy
+  - hostname: ather-os.de5.net
+    service: https://localhost:443
+    originRequest:
+      noTLSVerify: true
+      originServerName: ather-os.de5.net
+      http2Origin: true
+      connectTimeout: 10s
+
+  # Wildcard subdomain fallback
+  - hostname: "*.ather-os.de5.net"
+    service: https://localhost:443
+    originRequest:
+      noTLSVerify: true
+      originServerName: ather-os.de5.net
+
+  # Catch-all for undefined hostnames
+  - service: http_status:404

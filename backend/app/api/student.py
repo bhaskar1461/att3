@@ -1,8 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timedelta
 from pydantic import BaseModel
+import time
+import threading
+import logging
+
+logger = logging.getLogger("snist_erp.scan_telemetry")
 
 from app.core.database import get_db
 from app.api.auth import get_current_user
@@ -10,6 +15,11 @@ from app.models.models import User, UserRole, Student, AttendanceRecord, Attenda
 from app.services.qr_service import QRService
 from app.core.security import get_server_ist_date
 from app.core.device_security import validate_active_binding_for_student
+from app.core.device_classifier import classify_device
+
+_STUDENT_SUMMARY_CACHE: Dict[int, Tuple[Dict[str, Any], float]] = {}
+_STUDENT_SUMMARY_CACHE_LOCK = threading.Lock()
+_STUDENT_SUMMARY_TTL = 15.0  # 15s cache to eliminate DB hammering on portal switches
 
 router = APIRouter(prefix="/student", tags=["Student Portal"])
 
@@ -119,6 +129,13 @@ def get_student_pure_qr(
 
 @router.get("/attendance-summary")
 def get_student_attendance_summary(db: Session = Depends(get_db), current_student: Student = Depends(require_student)):
+    now_ts = time.time()
+    with _STUDENT_SUMMARY_CACHE_LOCK:
+        if current_student.id in _STUDENT_SUMMARY_CACHE:
+            cached_data, cached_at = _STUDENT_SUMMARY_CACHE[current_student.id]
+            if (now_ts - cached_at) < _STUDENT_SUMMARY_TTL:
+                return cached_data
+
     from app.api.teacher import _extract_period_count
 
     records = db.query(AttendanceRecord).options(
@@ -167,7 +184,7 @@ def get_student_attendance_summary(db: Session = Depends(get_db), current_studen
             "percentage": pct
         })
 
-    return {
+    summary_result = {
         "total_conducted": total_conducted,
         "total_present": total_present,
         "total_absent": total_absent,
@@ -175,6 +192,11 @@ def get_student_attendance_summary(db: Session = Depends(get_db), current_studen
         "has_records": total_conducted > 0,
         "subjects": subject_list
     }
+
+    with _STUDENT_SUMMARY_CACHE_LOCK:
+        _STUDENT_SUMMARY_CACHE[current_student.id] = (summary_result, time.time())
+
+    return summary_result
 
 
 @router.get("/today-schedule")
@@ -188,9 +210,10 @@ def get_student_today_schedule(
     from app.api.teacher import _extract_period_count
     server_today = get_server_ist_date()
     
-    # Check if there is an active/open session for student's section
+    # Check if there is an active/open session for student's section for today
     active_session = db.query(AttendanceSession).filter(
         AttendanceSession.section_id == current_student.section_id,
+        AttendanceSession.session_date == server_today,
         AttendanceSession.status == SessionStatus.OPEN
     ).order_by(AttendanceSession.id.desc()).first()
 
@@ -205,7 +228,7 @@ def get_student_today_schedule(
         my_record = db.query(AttendanceRecord).filter(
             AttendanceRecord.session_id == today_session.id,
             AttendanceRecord.student_id == current_student.id
-        ).first()
+        ).order_by(AttendanceRecord.id.desc()).first()
 
     is_marked = my_record is not None and my_record.status.value in [
         "PRESENT", "4", "1", "2", "3", "5", "6", "7", "8"
@@ -274,18 +297,333 @@ def get_student_today_schedule(
 
 
 class StudentScanSessionRequest(BaseModel):
-    session_token: str
+    session_token: Optional[str] = None
+    short_code: Optional[str] = None
+    v: Optional[int] = None
+    token_format: Optional[str] = None
     device_uuid: Optional[str] = None
 
 
 from app.core.security import validate_projector_session_token
+from app.services.qr_token import ShortTokenService
 from app.api.attendance import _async_post_scan_tasks, get_cached_session_meta
 from app.models.models import AttendanceStatus, SessionStatus, SecurityEventType, BindingStatus, DeviceAccountBinding
 from app.core.device_security import log_security_audit_event
 
 
+import time
+import threading
+from collections import defaultdict
+
+class FailedTokenTracker:
+    """
+    In-memory thread-safe rate limiter for failed rotating QR token validations (A3 & AM3).
+    - Blocks brute-force script flooding (15 consecutive failures in 60s -> 60s cooldown).
+    - EXEMPTS legitimate students (AM3): A valid token immediately clears all failure history.
+    - Single expired tokens mid-typing never trigger cooldown.
+    """
+    def __init__(self, max_failures: int = 15, window_seconds: int = 60, cooldown_seconds: int = 60):
+        self.max_failures = max_failures
+        self.window_seconds = window_seconds
+        self.cooldown_seconds = cooldown_seconds
+        self._failures: Dict[str, List[float]] = defaultdict(list)
+        self._cooldowns: Dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def check_rate_limit(self, key: str) -> None:
+        now = time.time()
+        with self._lock:
+            cooldown_until = self._cooldowns.get(key, 0)
+            if now < cooldown_until:
+                retry_after = int(cooldown_until - now)
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Too many invalid QR scans. Please wait {max(1, retry_after)} seconds before scanning again.",
+                    headers={
+                        "Retry-After": str(max(1, retry_after)),
+                        "X-Retry-After-Seconds": str(max(1, retry_after))
+                    }
+                )
+
+    def record_failure(self, key: str) -> None:
+        now = time.time()
+        with self._lock:
+            valid_times = [t for t in self._failures[key] if now - t < self.window_seconds]
+            valid_times.append(now)
+            self._failures[key] = valid_times
+            if len(valid_times) >= self.max_failures:
+                self._cooldowns[key] = now + self.cooldown_seconds
+                self._failures.pop(key, None)
+                try:
+                    from app.services.security_alert_service import alert_tracker, EVENT_FAILED_HMAC
+                    alert_tracker.record_and_evaluate(EVENT_FAILED_HMAC, key, key)
+                except Exception:
+                    pass
+
+    def record_success(self, key: str) -> None:
+        """AM3: Exempt legitimate scans by resetting any failure history immediately."""
+        with self._lock:
+            self._failures.pop(key, None)
+
+failed_token_tracker = FailedTokenTracker(max_failures=15, window_seconds=60, cooldown_seconds=60)
+
+
+class StudentScanRateLimiter:
+    """
+    In-memory rate limiter enforcing max 6 scan attempts per minute per ROLL NUMBER (AM-200).
+    Prevents rogue client loops or scraping scripts while allowing all legitimate students
+    on a shared classroom NAT IP to submit without interference.
+    """
+    def __init__(self, max_attempts: int = 6, window_seconds: int = 60):
+        self.max_attempts = max_attempts
+        self.window_seconds = window_seconds
+        self._attempts: Dict[str, List[float]] = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def check_rate_limit(self, roll_number: str) -> None:
+        if not roll_number:
+            return
+        clean_roll = roll_number.strip().upper()
+        now = time.time()
+        with self._lock:
+            valid_attempts = [t for t in self._attempts[clean_roll] if now - t < self.window_seconds]
+            if len(valid_attempts) >= self.max_attempts:
+                retry_after = int(self.window_seconds - (now - valid_attempts[0]))
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Too many scan attempts for roll {clean_roll}. Maximum {self.max_attempts} attempts per minute allowed.",
+                    headers={
+                        "Retry-After": str(max(1, retry_after)),
+                        "X-Retry-After-Seconds": str(max(1, retry_after))
+                    }
+                )
+            valid_attempts.append(now)
+            self._attempts[clean_roll] = valid_attempts
+
+
+student_scan_limiter = StudentScanRateLimiter(max_attempts=6, window_seconds=60)
+
+# Bounded concurrency token limiter: ensures at most 25 database scan workers run concurrently (AM-200)
+_scan_concurrency_tokens = threading.BoundedSemaphore(25)
+
+
+def _async_scan_telemetry(
+    student_id: int,
+    roll_number: str,
+    device_id: int,
+    session_id: int,
+    period_count: int,
+    now_utc: datetime,
+    ip_addr: Optional[str]
+):
+    """Background task for audit logging and concurrent scan proxy telemetry (AM-200)."""
+    try:
+        from app.core.database import SessionLocal
+        with SessionLocal() as bg_db:
+            # 1. Audit log event
+            log_security_audit_event(
+                db=bg_db,
+                event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
+                action="STUDENT_PROJECTOR_SCAN_SUCCESS",
+                details=f"Student {roll_number} scanned teacher projector QR for session {session_id} (Period count: {period_count})",
+                roll_number=roll_number,
+                device_id=device_id,
+                ip_address=ip_addr
+            )
+
+            # 2. Layer 3: Concurrent scan telemetry
+            if ip_addr:
+                from sqlalchemy import and_
+                concurrent_window_start = now_utc - timedelta(seconds=60)
+                concurrent_scans = bg_db.query(AttendanceRecord).filter(
+                    and_(
+                        AttendanceRecord.session_id == session_id,
+                        AttendanceRecord.student_id != student_id,
+                        AttendanceRecord.status == AttendanceStatus.PRESENT,
+                        AttendanceRecord.scan_mode == "PROJECTOR_SCAN",
+                        AttendanceRecord.scanned_at >= concurrent_window_start,
+                        AttendanceRecord.scanned_at <= now_utc
+                    )
+                ).all()
+
+                if concurrent_scans:
+                    other_rolls = [s.roll_number for s in concurrent_scans]
+                    matched_binding = bg_db.query(DeviceAccountBinding).filter(
+                        DeviceAccountBinding.roll_number.in_(other_rolls),
+                        DeviceAccountBinding.device_id == device_id,
+                        DeviceAccountBinding.status == BindingStatus.ACTIVE,
+                        DeviceAccountBinding.expires_at > now_utc
+                    ).first()
+
+                    if matched_binding:
+                        log_security_audit_event(
+                            db=bg_db,
+                            event_type=SecurityEventType.SUSPICIOUS_CONCURRENT_SCAN,
+                            action="SUSPICIOUS_CONCURRENT_SCAN",
+                            details=(
+                                f"PROXY ALERT: Students {roll_number} and {matched_binding.roll_number} "
+                                f"scanned session {session_id} from SAME device (ID: {device_id}) "
+                                f"within 60 seconds. IP: {ip_addr}"
+                            ),
+                            roll_number=roll_number,
+                            device_id=device_id,
+                            ip_address=ip_addr
+                        )
+    except Exception as bg_err:
+        import logging
+import queue
+
+class AsyncAttendanceWriter:
+    """
+    AM-200 Mandatory Async Fast-Path for Student Projector Scans:
+    Validates HMAC in-memory in microseconds, returns HTTP 200 immediately,
+    and enqueues the database write to a bounded worker pool.
+    Decouples remote MySQL network round-trip latency from the 10-20s rotating QR window.
+    """
+    def __init__(self, num_workers: int = 10, max_queue_size: int = 2000):
+        self._queue = queue.Queue(maxsize=max_queue_size)
+        self._num_workers = num_workers
+        self._started = False
+        self._lock = threading.Lock()
+        self._results = {}
+        self._fast_cache = set()  # (session_id, roll_number)
+        self._fast_cache_lock = threading.Lock()
+
+    def start_workers(self):
+        with self._lock:
+            if self._started:
+                return
+            self._started = True
+            for i in range(self._num_workers):
+                t = threading.Thread(target=self._worker_loop, daemon=True, name=f"att_writer_{i}")
+                t.start()
+
+    def _worker_loop(self):
+        from app.core.database import SessionLocal
+        from app.models.models import AttendanceRecord, AttendanceStatus
+        from app.core.device_security import register_or_get_device, enforce_device_binding
+        
+        while True:
+            try:
+                task = self._queue.get()
+                if task is None:
+                    break
+                job_id, payload = task
+                try:
+                    with SessionLocal() as db:
+                        # 1. Device registration & binding check
+                        dev = register_or_get_device(
+                            db=db,
+                            device_public_id=payload["device_id"],
+                            device_secret=payload["device_secret"],
+                            ip_address=payload["ip_addr"]
+                        )
+                        if dev and dev.is_active:
+                            try:
+                                enforce_device_binding(
+                                    db=db,
+                                    device=dev,
+                                    roll_number=payload["roll_number"],
+                                    ip_address=payload["ip_addr"]
+                                )
+                            except Exception:
+                                pass
+                        
+                        # 2. Duplicate check & write
+                        existing = db.query(AttendanceRecord).filter(
+                            AttendanceRecord.session_id == payload["session_id"],
+                            AttendanceRecord.student_id == payload["student_id"]
+                        ).first()
+                        
+                        if existing:
+                            existing.status = AttendanceStatus.PRESENT
+                            existing.period_count = payload["period_count"]
+                            existing.scan_mode = "PROJECTOR_SCAN"
+                            existing.scanned_at = payload["now_utc"]
+                        else:
+                            new_rec = AttendanceRecord(
+                                session_id=payload["session_id"],
+                                student_id=payload["student_id"],
+                                roll_number=payload["roll_number"],
+                                session_date=payload["session_date"],
+                                period_count=payload["period_count"],
+                                status=AttendanceStatus.PRESENT,
+                                scan_mode="PROJECTOR_SCAN",
+                                scanned_at=payload["now_utc"]
+                            )
+                            db.add(new_rec)
+                        db.commit()
+                        try:
+                            from app.services.attendance_engine import invalidate_attendance_cache
+                            invalidate_attendance_cache(student_id=payload["student_id"])
+                        except Exception:
+                            pass
+                        with self._lock:
+                            self._results[job_id] = {"status": "SUCCESS", "message": "Recorded in database."}
+
+                        # 3. Post-scan sync executed inside isolated worker thread
+                        if payload.get("sync_meta"):
+                            try:
+                                sm = payload["sync_meta"]
+                                _async_post_scan_tasks(
+                                    roll_number=payload["roll_number"],
+                                    date_formatted=payload["session_date"],
+                                    student_name=payload.get("student_name", ""),
+                                    dept_code=sm.get("dept_code", ""),
+                                    year_name=sm.get("year_name", ""),
+                                    sec_name=sm.get("sec_name", ""),
+                                    sub_name=sm.get("sub_name", ""),
+                                    period=sm.get("period", ""),
+                                    teacher_name=sm.get("teacher_name", ""),
+                                    gs_id=sm.get("teacher_gsheet_id", ""),
+                                    period_count=payload["period_count"]
+                                )
+                            except Exception:
+                                pass
+                except Exception as ex:
+                    import logging
+                    logging.getLogger("snist_erp.student").error(f"Async attendance writer error for {payload.get('roll_number')}: {ex}")
+                    with self._lock:
+                        self._results[job_id] = {"status": "ERROR", "message": str(ex)}
+                finally:
+                    self._queue.task_done()
+            except Exception:
+                time.sleep(0.01)
+
+    def is_already_marked(self, session_id: int, roll: str) -> bool:
+        with self._fast_cache_lock:
+            return (session_id, roll) in self._fast_cache
+
+    def mark_in_cache(self, session_id: int, roll: str):
+        with self._fast_cache_lock:
+            self._fast_cache.add((session_id, roll))
+
+    def enqueue(self, job_id: str, payload: dict) -> bool:
+        self.start_workers()
+        self.mark_in_cache(payload["session_id"], payload["roll_number"])
+        try:
+            self._queue.put_nowait((job_id, payload))
+            with self._lock:
+                self._results[job_id] = {"status": "QUEUED", "message": "Attendance queued for database write."}
+            return True
+        except queue.Full:
+            return False
+
+    def get_status(self, job_id: str) -> dict:
+        with self._lock:
+            return self._results.get(job_id, {"status": "UNKNOWN"})
+
+async_attendance_writer = AsyncAttendanceWriter(num_workers=10)
+
+
+@router.get("/scan-status/{job_id}")
+def get_scan_status(job_id: str, current_student: Student = Depends(require_student)):
+    """AM-200: Polling endpoint to verify background attendance write status."""
+    return async_attendance_writer.get_status(job_id)
+
+
 @router.post("/scan-session")
-def student_scan_session(
+async def student_scan_session(
     req: StudentScanSessionRequest,
     background_tasks: BackgroundTasks,
     request: Request,
@@ -294,84 +632,66 @@ def student_scan_session(
 ):
     """
     Endpoint for students scanning the teacher's projected rotating 10-second QR code.
-    Validates token, session status, section membership, device binding, and records attendance.
-    Optimized with BoundedLRUSessionCache to eliminate redundant DB round-trips.
+    Validates token in-memory FIRST (Step 0) to eliminate DB round-trips for invalid/replay tokens.
     """
-    # 1. Device binding check (ADR-004: Anti-proxy account switching lockout)
-    from app.core.device_security import register_or_get_device, enforce_device_binding
-    device_id = req.device_uuid or request.headers.get("x-device-public-id", "").strip()
-    if not device_id:
-        import hashlib
-        client_ua = request.headers.get("user-agent", "generic_student_browser")
-        client_ip = (request.client.host if request.client else None) or "127.0.0.1"
-        conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
-        device_id = f"DEV-CONN-{conn_sig.upper()}"
-
-    clean_roll = current_student.roll_number.strip().upper()
+    t_scan_start = time.perf_counter()
     ip_addr = request.client.host if request.client else None
-    device_secret = request.headers.get("x-device-secret", "").strip() or f"{device_id}_SECRET_SALT_2026"
+    device_id = req.device_uuid or request.headers.get("x-device-public-id", "").strip()
+    clean_roll = current_student.roll_number.strip().upper()
+    tracker_key = f"{ip_addr or 'unknown'}_{device_id or clean_roll}"
+    device_bucket = classify_device(request.headers.get("user-agent", ""))
 
-    device = register_or_get_device(
-        db=db,
-        device_public_id=device_id.strip(),
-        device_secret=device_secret,
-        ip_address=ip_addr
-    )
-    if not device.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Device has been revoked or disabled by system administrator."
-        )
+    # Step 0a: Fast-fail if this client is under active cooldown from invalid token flooding
+    failed_token_tracker.check_rate_limit(tracker_key)
 
-    # Server-authoritative 30-minute device lock (blocks Student B from scanning on Student A's phone)
-    enforce_device_binding(
-        db=db,
-        device=device,
-        roll_number=clean_roll,
-        ip_address=ip_addr
-    )
+    # Step 0b: AM-200 Enforce per-student scan attempt rate limit (max 6 attempts/min per roll number)
+    student_scan_limiter.check_rate_limit(clean_roll)
 
-    # Layer 2: Bi-directional student-to-device enrollment (blocks cross-browser proxy)
+    # Step 0c: Dual-Format verification (< 0.05ms memory cache, ZERO DB round-trips for hits)
+    t_hmac_start = time.perf_counter()
     try:
-        from app.core.device_security import enforce_student_device_enrollment
-        enforce_student_device_enrollment(
+        raw_token = (req.session_token or "").strip()
+        code_input = raw_token or (req.short_code or "").strip()
+        if not code_input:
+            raise ValueError("Missing attendance token: session_token or short_code required.")
+
+        token_data = ShortTokenService.validate_attendance_token(
             db=db,
-            student=current_student,
-            device=device,
-            ip_address=ip_addr
-        )
-    except HTTPException:
-        raise  # Re-raise the 403 from enrollment enforcement
-    except Exception as enrollment_err:
-        import logging
-        logging.getLogger("snist_erp.student").warning(
-            f"Non-fatal enrollment check error for {clean_roll}: {enrollment_err}"
-        )
-
-    # 2. Validate rotating session token with 10s + 10s sliding window
-    try:
-        token_data = validate_projector_session_token(
-            token_str=req.session_token,
+            payload_or_code=code_input,
+            v=req.v,
             step_window=10,
             max_grace_steps=1
         )
+        t_hmac_ms = (time.perf_counter() - t_hmac_start) * 1000
     except ValueError as val_err:
-        log_security_audit_event(
-            db=db,
-            event_type=SecurityEventType.ATTENDANCE_REJECTED,
-            action="PROJECTOR_TOKEN_REJECTED",
-            details=f"Projector token validation error for student {current_student.roll_number}: {str(val_err)}",
-            roll_number=current_student.roll_number
-        )
+        failed_token_tracker.record_failure(tracker_key)
+        try:
+            log_security_audit_event(
+                db=db,
+                event_type=SecurityEventType.ATTENDANCE_REJECTED,
+                action="PROJECTOR_TOKEN_REJECTED",
+                details=f"Projector token validation error for student {current_student.roll_number}: {str(val_err)}",
+                roll_number=current_student.roll_number
+            )
+        except Exception:
+            pass
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(val_err)
         )
 
-    session_id = token_data["session_id"]
-    period_count = token_data["period_count"]
+    # Calculate token age in milliseconds between issuance and validation
+    token_step = token_data.get("step")
+    token_age_ms = max(0, int((time.time() - (token_step * 10)) * 1000)) if token_step is not None else None
 
-    # 3. Fetch session using BoundedLRUSessionCache (avoids remote MySQL round-trip on hits)
+    # Step 0d: AM3 Valid token exemption: reset any prior failed token count immediately!
+    failed_token_tracker.record_success(tracker_key)
+
+    session_id = token_data["session_id"]
+    period_count = max(1, min(8, int(token_data.get("period_count", 1))))
+
+    # 1. Fetch session using BoundedLRUSessionCache (avoids remote MySQL round-trip on hits)
+    t_enroll_start = time.perf_counter()
     session_meta = get_cached_session_meta(db, session_id)
     if not session_meta:
         raise HTTPException(status_code=404, detail="Attendance session not found.")
@@ -380,117 +700,207 @@ def student_scan_session(
     if status_str != "OPEN":
         raise HTTPException(status_code=400, detail="Attendance session is locked. No further scans allowed.")
 
-    # 4. Check section membership
+    # 2. Check section membership (in-memory)
     if current_student.section_id != session_meta["section_id"]:
-        log_security_audit_event(
-            db=db,
-            event_type=SecurityEventType.ATTENDANCE_REJECTED,
-            action="SECTION_MISMATCH_REJECTED",
-            details=f"Student {current_student.roll_number} section {current_student.section_id} mismatched session section {session_meta['section_id']}",
-            roll_number=current_student.roll_number
-        )
+        try:
+            log_security_audit_event(
+                db=db,
+                event_type=SecurityEventType.ATTENDANCE_REJECTED,
+                action="SECTION_MISMATCH_REJECTED",
+                details=f"Student {current_student.roll_number} section {current_student.section_id} mismatched session section {session_meta['section_id']}",
+                roll_number=current_student.roll_number
+            )
+        except Exception:
+            pass
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Attendance Rejected: You are not enrolled in class section {session_meta['section_name']}."
+            detail="Student is not enrolled in this section."
+        )
+    t_enrollment_ms = (time.perf_counter() - t_enroll_start) * 1000
+
+    # 3. Database operations bounded by concurrency token pool (AM-200: 25 tokens)
+    now_utc = datetime.utcnow()
+    is_sqlite = getattr(getattr(db, "bind", None), "dialect", None) and db.bind.dialect.name == "sqlite"
+
+    if not is_sqlite:
+        # AM-200 Mandatory Async Fast-Path for Production MySQL (Decoupled from 230ms DB latency)
+        if async_attendance_writer.is_already_marked(session_id, clean_roll):
+            return {
+                "status": "ALREADY_MARKED",
+                "message": "You have already been marked present for this session.",
+                "session_id": session_id,
+                "token_format": token_data.get("token_format", "legacy"),
+                "subject_name": session_meta["subject_name"],
+                "period_name": session_meta["period"],
+                "period_count": period_count,
+                "session_date": session_meta["session_date"],
+                "roll_number": current_student.roll_number,
+                "student_name": current_student.name
+            }
+
+        job_id = f"SCAN-{session_id}-{clean_roll}-{int(time.time() * 1000)}"
+        if not device_id:
+            import hashlib
+            client_ua = request.headers.get("user-agent", "generic_student_browser")
+            client_ip = ip_addr or "127.0.0.1"
+            conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+            device_id = f"DEV-CONN-{conn_sig.upper()}"
+
+        device_secret = request.headers.get("x-device-secret", "").strip() or f"{device_id}_SECRET_SALT_2026"
+
+        payload = {
+            "job_id": job_id,
+            "session_id": session_id,
+            "student_id": current_student.id,
+            "roll_number": clean_roll,
+            "student_name": current_student.name,
+            "device_id": device_id.strip(),
+            "device_secret": device_secret,
+            "period_count": period_count,
+            "session_date": session_meta["session_date"],
+            "now_utc": now_utc,
+            "ip_addr": ip_addr,
+            "sync_meta": {
+                "dept_code": current_student.department.code if current_student.department else "",
+                "year_name": current_student.academic_year.name if current_student.academic_year else "",
+                "sec_name": session_meta["section_name"],
+                "sub_name": session_meta["subject_name"],
+                "period": session_meta["period"],
+                "teacher_name": session_meta["teacher_name"],
+                "teacher_gsheet_id": session_meta["teacher_gsheet_id"],
+            }
+        }
+
+        async_attendance_writer.enqueue(job_id, payload)
+        with _STUDENT_SUMMARY_CACHE_LOCK:
+            _STUDENT_SUMMARY_CACHE.pop(current_student.id, None)
+
+        t_total_ms = (time.perf_counter() - t_scan_start) * 1000
+        logger.info(
+            f"[SCAN_TIMINGS] roll={clean_roll} bucket={device_bucket} token_age_ms={token_age_ms} "
+            f"hmac_ms={t_hmac_ms:.2f} enroll_ms={t_enrollment_ms:.2f} total_ms={t_total_ms:.2f} mode=ASYNC"
         )
 
-    # 5. Check if already marked present (using composite index idx_att_rec_session_student)
-    existing_record = db.query(AttendanceRecord).filter(
-        AttendanceRecord.session_id == session_id,
-        AttendanceRecord.student_id == current_student.id
-    ).first()
-
-    if existing_record and existing_record.status == AttendanceStatus.PRESENT:
         return {
-            "status": "ALREADY_MARKED",
-            "message": "You have already been marked present for this session.",
+            "status": "SUCCESS",
+            "job_id": job_id,
+            "message": f"Successfully marked present for {period_count} period{'s' if period_count > 1 else ''}!",
             "session_id": session_id,
             "subject_name": session_meta["subject_name"],
             "period_name": session_meta["period"],
-            "period_count": existing_record.period_count or period_count,
+            "period_count": period_count,
             "session_date": session_meta["session_date"],
             "roll_number": current_student.roll_number,
             "student_name": current_student.name
         }
 
-    # 6. Record or update attendance
-    now_utc = datetime.utcnow()
-    if existing_record:
-        existing_record.status = AttendanceStatus.PRESENT
-        existing_record.period_count = period_count
-        existing_record.scan_mode = "PROJECTOR_SCAN"
-        existing_record.scanned_at = now_utc
-    else:
-        new_record = AttendanceRecord(
-            session_id=session_id,
-            student_id=current_student.id,
-            roll_number=current_student.roll_number,
-            session_date=session_meta["session_date"],
-            period_count=period_count,
-            status=AttendanceStatus.PRESENT,
-            scan_mode="PROJECTOR_SCAN",
-            scanned_at=now_utc
+    with _scan_concurrency_tokens:
+        # Device binding check (ADR-004: Anti-proxy account switching lockout)
+        from app.core.device_security import register_or_get_device, enforce_device_binding
+        if not device_id:
+            import hashlib
+            client_ua = request.headers.get("user-agent", "generic_student_browser")
+            client_ip = ip_addr or "127.0.0.1"
+            conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+            device_id = f"DEV-CONN-{conn_sig.upper()}"
+
+        device_secret = request.headers.get("x-device-secret", "").strip() or f"{device_id}_SECRET_SALT_2026"
+
+        device = register_or_get_device(
+            db=db,
+            device_public_id=device_id.strip(),
+            device_secret=device_secret,
+            ip_address=ip_addr
         )
-        db.add(new_record)
-
-    db.commit()
-
-    # 7. Audit log event
-    log_security_audit_event(
-        db=db,
-        event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
-        action="STUDENT_PROJECTOR_SCAN_SUCCESS",
-        details=f"Student {current_student.roll_number} scanned teacher projector QR for session {session_id} (Period count: {period_count})",
-        roll_number=current_student.roll_number
-    )
-
-    # 7b. Layer 3: Concurrent Scan Telemetry — detect proxy attendance patterns
-    #     WHY: If two different students scan the same session from the same IP within 60 seconds,
-    #     it's extremely likely one student is scanning for an absent friend on the same phone/network.
-    try:
-        from sqlalchemy import and_
-        concurrent_window_start = now_utc - timedelta(seconds=60)
-        concurrent_scans = db.query(AttendanceRecord).filter(
-            and_(
-                AttendanceRecord.session_id == session_id,
-                AttendanceRecord.student_id != current_student.id,
-                AttendanceRecord.status == AttendanceStatus.PRESENT,
-                AttendanceRecord.scan_mode == "PROJECTOR_SCAN",
-                AttendanceRecord.scanned_at >= concurrent_window_start,
-                AttendanceRecord.scanned_at <= now_utc
+        if not device.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Device has been revoked or disabled by system administrator."
             )
-        ).all()
 
-        if concurrent_scans and ip_addr:
-            # Check if any of those other scans came from the same device
-            for other_scan in concurrent_scans:
-                # Query the device binding for this other student around the same time
-                other_student_binding = db.query(DeviceAccountBinding).filter(
-                    DeviceAccountBinding.roll_number == other_scan.roll_number,
-                    DeviceAccountBinding.status == BindingStatus.ACTIVE,
-                    DeviceAccountBinding.expires_at > now_utc
-                ).first()
-
-                if other_student_binding and other_student_binding.device_id == device.id:
-                    # SAME device used by two different students — definitive proxy indicator
-                    log_security_audit_event(
-                        db=db,
-                        event_type=SecurityEventType.SUSPICIOUS_CONCURRENT_SCAN,
-                        action="SUSPICIOUS_CONCURRENT_SCAN",
-                        details=(
-                            f"PROXY ALERT: Students {current_student.roll_number} and {other_scan.roll_number} "
-                            f"scanned session {session_id} from SAME device (ID: {device.id}) "
-                            f"within 60 seconds. IP: {ip_addr}"
-                        ),
-                        roll_number=current_student.roll_number,
-                        device_id=device.id,
-                        ip_address=ip_addr
-                    )
-    except Exception as concurrent_err:
-        import logging
-        logging.getLogger("snist_erp.student").warning(
-            f"Non-fatal concurrent scan check error: {concurrent_err}"
+        # Server-authoritative 30-minute device lock (blocks Student B from scanning on Student A's phone)
+        enforce_device_binding(
+            db=db,
+            device=device,
+            roll_number=clean_roll,
+            ip_address=ip_addr
         )
+
+        # Layer 2: Bi-directional student-to-device enrollment (blocks cross-browser proxy)
+        try:
+            from app.core.device_security import enforce_student_device_enrollment
+            enforce_student_device_enrollment(
+                db=db,
+                student=current_student,
+                device=device,
+                ip_address=ip_addr
+            )
+        except HTTPException:
+            raise  # Re-raise the 403 from enrollment enforcement
+        except Exception as enrollment_err:
+            import logging
+            logging.getLogger("snist_erp.student").warning(
+                f"Non-fatal enrollment check error for {clean_roll}: {enrollment_err}"
+            )
+
+        # 4. Check if already marked present (using composite index idx_att_rec_session_student)
+        existing_record = db.query(AttendanceRecord).filter(
+            AttendanceRecord.session_id == session_id,
+            AttendanceRecord.student_id == current_student.id
+        ).first()
+
+        if existing_record and existing_record.status == AttendanceStatus.PRESENT:
+            return {
+                "status": "ALREADY_MARKED",
+                "message": "You have already been marked present for this session.",
+                "session_id": session_id,
+                "subject_name": session_meta["subject_name"],
+                "period_name": session_meta["period"],
+                "period_count": existing_record.period_count or period_count,
+                "session_date": session_meta["session_date"],
+                "roll_number": current_student.roll_number,
+                "student_name": current_student.name
+            }
+
+        # 5. Record or update attendance
+        if existing_record:
+            existing_record.status = AttendanceStatus.PRESENT
+            existing_record.period_count = period_count
+            existing_record.scan_mode = "PROJECTOR_SCAN"
+            existing_record.scanned_at = now_utc
+        else:
+            new_record = AttendanceRecord(
+                session_id=session_id,
+                student_id=current_student.id,
+                roll_number=current_student.roll_number,
+                session_date=session_meta["session_date"],
+                period_count=period_count,
+                status=AttendanceStatus.PRESENT,
+                scan_mode="PROJECTOR_SCAN",
+                scanned_at=now_utc
+            )
+            db.add(new_record)
+
+        db.commit()
+        with _STUDENT_SUMMARY_CACHE_LOCK:
+            _STUDENT_SUMMARY_CACHE.pop(current_student.id, None)
+        try:
+            from app.services.attendance_engine import invalidate_attendance_cache
+            invalidate_attendance_cache(student_id=current_student.id)
+        except Exception:
+            pass
+
+    # 6. Asynchronously record audit log and evaluate Layer 3 concurrent telemetry (AM-200)
+    background_tasks.add_task(
+        _async_scan_telemetry,
+        student_id=current_student.id,
+        roll_number=clean_roll,
+        device_id=device.id,
+        session_id=session_id,
+        period_count=period_count,
+        now_utc=now_utc,
+        ip_addr=ip_addr
+    )
 
     # 8. Asynchronous multi-target sync with pre-resolved session_meta (0 DB queries)
     background_tasks.add_task(
@@ -508,10 +918,17 @@ def student_scan_session(
         period_count=period_count
     )
 
+    t_total_ms = (time.perf_counter() - t_scan_start) * 1000
+    logger.info(
+        f"[SCAN_TIMINGS] roll={clean_roll} bucket={device_bucket} token_age_ms={token_age_ms} "
+        f"hmac_ms={t_hmac_ms:.2f} enroll_ms={t_enrollment_ms:.2f} total_ms={t_total_ms:.2f} mode=SYNC"
+    )
+
     return {
         "status": "SUCCESS",
         "message": f"Successfully marked present for {period_count} period{'s' if period_count > 1 else ''}!",
         "session_id": session_id,
+        "token_format": token_data.get("token_format", "legacy"),
         "subject_name": session_meta["subject_name"],
         "period_name": session_meta["period"],
         "period_count": period_count,

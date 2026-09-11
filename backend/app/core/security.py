@@ -52,15 +52,28 @@ try:
         if expires_delta:
             expire = datetime.utcnow() + expires_delta
         elif data.get("role") == "STUDENT":
-            expire = datetime.utcnow() + timedelta(seconds=getattr(settings, "STUDENT_TOKEN_EXPIRE_SECONDS", 30))
+            if "DEMO" in str(data.get("sub", "")).upper():
+                expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+            else:
+                expire = datetime.utcnow() + timedelta(seconds=getattr(settings, "STUDENT_TOKEN_EXPIRE_SECONDS", 900))
         else:
             expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        to_encode.update({"exp": expire})
+        to_encode.update({"exp": expire, "token_type": to_encode.get("token_type", "access")})
+        return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+    def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+        to_encode = data.copy()
+        if expires_delta:
+            expire = datetime.utcnow() + expires_delta
+        else:
+            expire = datetime.utcnow() + timedelta(hours=getattr(settings, "REFRESH_TOKEN_EXPIRE_HOURS", 12))
+        to_encode.update({"exp": expire, "token_type": "refresh"})
         return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
     def decode_access_token(token: str) -> Optional[dict]:
         try:
-            return jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            return payload
         except Exception:
             # Defensive fallback: support HMAC signature if token was generated in fallback environment
             try:
@@ -79,6 +92,32 @@ try:
                 return payload
             except Exception:
                 return None
+
+    def decode_refresh_token(token: str) -> Optional[dict]:
+        try:
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+            if payload.get("token_type") != "refresh":
+                return None
+            return payload
+        except Exception:
+            try:
+                parts = token.split(".")
+                if len(parts) != 3:
+                    return None
+                header_b64, payload_b64, signature = parts
+                signature_raw = f"{header_b64}.{payload_b64}"
+                expected_sig = hmac.new(settings.SECRET_KEY.encode(), signature_raw.encode(), hashlib.sha256).hexdigest()
+                if not hmac.compare_digest(signature, expected_sig):
+                    return None
+                padded_payload = payload_b64 + "=" * ((4 - len(payload_b64) % 4) % 4)
+                payload = json.loads(base64.b64decode(padded_payload.encode()).decode())
+                if payload.get("exp", 0) < time.time():
+                    return None
+                if payload.get("token_type") != "refresh":
+                    return None
+                return payload
+            except Exception:
+                return None
 except ImportError:
     # Simplified HMAC JWT token fallback
     def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -87,9 +126,23 @@ except ImportError:
         if expires_delta:
             payload["exp"] = int(time.time()) + int(expires_delta.total_seconds())
         elif data.get("role") == "STUDENT":
-            payload["exp"] = int(time.time()) + getattr(settings, "STUDENT_TOKEN_EXPIRE_SECONDS", 30)
+            payload["exp"] = int(time.time()) + getattr(settings, "STUDENT_TOKEN_EXPIRE_SECONDS", 900)
         else:
             payload["exp"] = int(time.time()) + (settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+        payload["token_type"] = payload.get("token_type", "access")
+        payload_b64 = base64.b64encode(json.dumps(payload).encode()).decode()
+        signature_raw = f"{header}.{payload_b64}"
+        signature = hmac.new(settings.SECRET_KEY.encode(), signature_raw.encode(), hashlib.sha256).hexdigest()
+        return f"{header}.{payload_b64}.{signature}"
+
+    def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+        header = base64.b64encode(json.dumps({"alg": "HS256", "typ": "JWT"}).encode()).decode()
+        payload = data.copy()
+        if expires_delta:
+            payload["exp"] = int(time.time()) + int(expires_delta.total_seconds())
+        else:
+            payload["exp"] = int(time.time()) + (getattr(settings, "REFRESH_TOKEN_EXPIRE_HOURS", 12) * 3600)
+        payload["token_type"] = "refresh"
         payload_b64 = base64.b64encode(json.dumps(payload).encode()).decode()
         signature_raw = f"{header}.{payload_b64}"
         signature = hmac.new(settings.SECRET_KEY.encode(), signature_raw.encode(), hashlib.sha256).hexdigest()
@@ -105,8 +158,29 @@ except ImportError:
             expected_sig = hmac.new(settings.SECRET_KEY.encode(), signature_raw.encode(), hashlib.sha256).hexdigest()
             if not hmac.compare_digest(signature, expected_sig):
                 return None
-            payload = json.loads(base64.b64decode(payload_b64.encode()).decode())
+            padded_payload = payload_b64 + "=" * ((4 - len(payload_b64) % 4) % 4)
+            payload = json.loads(base64.b64decode(padded_payload.encode()).decode())
             if payload.get("exp", 0) < time.time():
+                return None
+            return payload
+        except Exception:
+            return None
+
+    def decode_refresh_token(token: str) -> Optional[dict]:
+        try:
+            parts = token.split(".")
+            if len(parts) != 3:
+                return None
+            header_b64, payload_b64, signature = parts
+            signature_raw = f"{header_b64}.{payload_b64}"
+            expected_sig = hmac.new(settings.SECRET_KEY.encode(), signature_raw.encode(), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(signature, expected_sig):
+                return None
+            padded_payload = payload_b64 + "=" * ((4 - len(payload_b64) % 4) % 4)
+            payload = json.loads(base64.b64decode(padded_payload.encode()).decode())
+            if payload.get("exp", 0) < time.time():
+                return None
+            if payload.get("token_type") != "refresh":
                 return None
             return payload
         except Exception:
@@ -397,6 +471,7 @@ def generate_projector_session_token(
     Format: SNIST-SES|<session_id_b36>|<period_count>|<step_b36>|<mac_hex>
     Refreshes every step_window seconds (default 10s).
     """
+    period_count = max(1, min(8, int(period_count)))
     now_ts = time.time()
     step = int(now_ts // step_window)
     seconds_remaining = int(step_window - (now_ts % step_window))
@@ -422,12 +497,14 @@ def generate_projector_session_token(
 def validate_projector_session_token(
     token_str: str, 
     step_window: int = 10, 
-    max_grace_steps: int = 1
+    max_grace_steps: Optional[int] = None,
+    grace_seconds: Optional[float] = None,
+    now_ts: Optional[float] = None
 ) -> Dict[str, Any]:
     """
-    Validates rotating projector session token with sliding window tolerance.
-    Accepts current step N and previous step N-1 (up to max_grace_steps=1) to prevent
-    network race condition rejections on Wi-Fi / 4G.
+    Validates rotating projector session token with sub-second sliding grace window.
+    Accepts tokens up to TOKEN_GRACE_SECONDS past slot end (default 3s).
+    Preserves cryptographic HMAC signature verification and device-binding/single-use invariants.
     """
     raw = str(token_str).strip()
     if not raw.startswith("SNIST-SES|"):
@@ -445,17 +522,30 @@ def validate_projector_session_token(
         token_step = _base36_to_int(step_b36)
     except Exception as parse_err:
         raise ValueError(f"Malformed fields in projector token: {parse_err}")
+
+    if period_count < 1 or period_count > 8:
+        raise ValueError("Invalid period count in projector token (must be between 1 and 8)")
         
-    now_ts = time.time()
-    current_step = int(now_ts // step_window)
+    if now_ts is None:
+        now_ts = time.time()
+
+    # Determine effective grace in seconds
+    if grace_seconds is not None:
+        effective_grace = float(grace_seconds)
+    elif max_grace_steps is not None and max_grace_steps > 0:
+        effective_grace = float(max_grace_steps * step_window)
+    else:
+        effective_grace = float(getattr(settings, "TOKEN_GRACE_SECONDS", 3.0))
+
+    slot_start_ts = token_step * step_window
+    slot_end_ts = (token_step + 1) * step_window
+    max_valid_ts = slot_end_ts + effective_grace
+    # Allow 2 seconds of clock skew for client clocks ahead of server
+    min_valid_ts = slot_start_ts - 2.0
     
-    # Check sliding window: token_step must be in [current_step - max_grace_steps, current_step]
-    min_allowed_step = current_step - max_grace_steps
-    max_allowed_step = current_step + 1 # Allow 1 future step in case of slight clock skew
-    
-    if token_step < min_allowed_step:
+    if now_ts > max_valid_ts:
         raise ValueError("Projector QR token has expired. Please scan the newly refreshed QR on screen.")
-    if token_step > max_allowed_step:
+    if now_ts < min_valid_ts:
         raise ValueError("Projector QR token timestamp is in the future. Check clock synchronization.")
         
     # Verify HMAC for token_step
@@ -470,7 +560,7 @@ def validate_projector_session_token(
         "session_id": session_id,
         "period_count": period_count,
         "step": token_step,
-        "is_grace_window": (token_step < current_step)
+        "is_grace_window": (now_ts > slot_end_ts)
     }
 
 

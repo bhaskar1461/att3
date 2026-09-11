@@ -1,0 +1,20 @@
+[Unit]
+Description=Cloudflare Tunnel for SNIST AI QR Attendance ERP
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=root
+Group=root
+# When using a token provided by Cloudflare Zero Trust Dashboard:
+ExecStart=/usr/local/bin/cloudflared tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+Restart=always
+RestartSec=3s
+TimeoutStartSec=30s
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

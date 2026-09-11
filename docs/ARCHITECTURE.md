@@ -130,5 +130,68 @@ To support 1,000+ simultaneous students scanning during morning class transition
 | `attendance_records` | `idx_att_rec_student` | `(student_id, created_at)` | Fast aggregation for student monthly attendance percentages |
 | `students` | `idx_student_section` | `(section_id)` | Eliminates table scans during classroom roster resolution |
 | `students` | `idx_student_roll` | `(roll_number)` | $O(1)$ student lookup during HMAC and batch scanning |
-| `qr_audit_logs` | `idx_audit_created_at` | `(created_at)` | High-speed range queries for hourly security digest |
-| `qr_audit_logs` | `idx_audit_event_type` | `(event_type)` | Filtered audit analysis on specific security incidents |
+| `qr_audit_logs` | `idx_audit_created_at` | `created_at` | High-speed range queries for hourly security digest |
+| `qr_audit_logs` | `idx_audit_event_type` | `event_type` | Filtered audit analysis on specific security incidents |
+
+---
+
+## 7. Edge Layer & Cloudflare Ingress Architecture
+
+```mermaid
+flowchart TD
+    subgraph Public Internet
+        Client[Student & Faculty Mobile PWA]
+    end
+
+    subgraph Cloudflare Edge Network [Cloudflare Free Edge]
+        Anycast[Anycast BGP Edge: Global DDoS Scrubbing]
+        BFM[Free Bot Fight Mode: Challenge Automated Scrapers]
+        SSL[Universal SSL / TLS 1.3 Strict Termination]
+        WAF[WAF Rate Limiting: /api/v1/auth/login]
+    end
+
+    subgraph Azure Cloud [Azure Cloud East US: B1s Host]
+        TUN[cloudflared daemon: Outbound-Only QUIC Tunnel]
+        
+        subgraph Docker Bridge Network
+            NGINX[Docker Nginx Gateway: real_ip restoration]
+            NGINX_RL[Nginx Shared NAT Rate Limiters: 10r/s burst 220]
+        end
+        
+        subgraph FastAPI Application Layer
+            UVICORN[Uvicorn ASGI Server :8001]
+            SEM[Bounded Semaphore: 25 Tokens]
+            STUDENT_RL[StudentScanRateLimiter: 6 scans/min per Roll]
+            AUTH_RL[FailedLoginRateLimiter: 5 fails per Roll]
+            DEV_BIND[Device Binding Engine: 30-min Lockout]
+        end
+        
+        subgraph Remote Persistence [Campus Intranet]
+            DB[(Remote MySQL 8.0: seg-dev.sreenidhi.edu.in)]
+        end
+    end
+
+    Client --> Anycast
+    Anycast --> BFM --> SSL --> WAF
+    WAF --> TUN
+    TUN --> NGINX
+    NGINX --> NGINX_RL --> UVICORN
+    UVICORN --> SEM --> STUDENT_RL --> DEV_BIND
+    DEV_BIND --> DB
+```
+
+---
+
+## 8. Perimeter Protection vs. Application Device Binding Matrix
+
+A critical design principle of the SNIST platform is that **Cloudflare protects the perimeter infrastructure, while application code enforces zero-trust identity and device binding**:
+
+| Dimension | Perimeter Layer (Cloudflare Free Tier) | Application Layer (FastAPI + MySQL) |
+| :--- | :--- | :--- |
+| **DDoS & Volumetric Attacks** | Absorbs multi-gigabit L3/L4/L7 volumetric floods via global Anycast edge. Origin never sees traffic spikes. | Does not attempt packet scrubbing. Protects internal threadpool with `BoundedSemaphore(25)`. |
+| **Bot & Scraper Defense** | Free Bot Fight Mode challenges headless bots and automated scrapers at the DNS edge. | Endpoint-level signature verification; rejects requests missing cryptographic device headers. |
+| **IP Rate Limiting & NAT** | Buffers high-volume bursts from shared campus Wi-Fi (`rate=10r/s burst=220`). | Strictly relies on **Roll Number / SAP ID** for brute force locking; never locks out an entire classroom sharing an IP. |
+| **Hardware Device Binding** | Completely agnostic to device identity (cannot access browser hardware entropy or storage). | **Authoritative**: Enforces Rule 6 (30-minute device-to-student lock). Prevents proxy attendance and account switching. |
+| **Rotating QR Verification** | Passthrough proxy. | **Authoritative**: Validates server-generated HMAC-SHA256 tokens within a 10s sliding window without database reads. |
+| **Security Auditing** | Cloudflare Security Analytics & WAF activity log. | Comprehensive, append-only `qr_audit_logs` + real-time 2-layer email alert engine with IST operating windows. |
+

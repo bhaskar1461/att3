@@ -18,7 +18,13 @@ def fetch_filtered_records(
     section_id: Optional[int] = None,
     subject_id: Optional[int] = None
 ):
-    query = db.query(AttendanceRecord)
+    from sqlalchemy.orm import joinedload
+    # Eagerly load relationships to eliminate N+1 WAN round-trips to remote MySQL
+    query = db.query(AttendanceRecord).options(
+        joinedload(AttendanceRecord.student).joinedload(Student.department),
+        joinedload(AttendanceRecord.student).joinedload(Student.section),
+        joinedload(AttendanceRecord.session).joinedload(AttendanceSession.subject)
+    )
 
     if start_date:
         query = query.filter(AttendanceRecord.session_date >= start_date)
@@ -29,7 +35,8 @@ def fetch_filtered_records(
     if section_id:
         query = query.join(Student).filter(Student.section_id == section_id)
 
-    records = query.all()
+    # Hard ceiling of 2,000 records prevents openpyxl memory spikes from triggering Linux OOM on 896MB VM
+    records = query.order_by(AttendanceRecord.session_date.desc(), AttendanceRecord.id.desc()).limit(2000).all()
     res = []
     for r in records:
         res.append({
@@ -141,8 +148,10 @@ def export_pdf_report(
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
+from app.core.config import R25Config
+
 @router.get("/low-attendance")
-def get_low_attendance_report(threshold: float = 75.0, db: Session = Depends(get_db), current_user: User = Depends(require_teacher)):
+def get_low_attendance_report(threshold: float = R25Config.ELIGIBLE_THRESHOLD, db: Session = Depends(get_db), current_user: User = Depends(require_teacher)):
     students = db.query(Student).all()
     low_att_list = []
 

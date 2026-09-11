@@ -497,7 +497,7 @@ class QRService:
         qr = qrcode.QRCode(
             version=None,
             error_correction=qrcode.constants.ERROR_CORRECT_M,
-            box_size=16,
+            box_size=28,
             border=4
         )
         qr.add_data(payload)

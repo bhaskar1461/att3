@@ -1,19 +1,23 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
 import { DashboardStats } from '../types';
-import { Users, UserCheck, BarChart2, Shield, Settings, FileText, CheckCircle2, RefreshCw, Layers, FileSpreadsheet, ClipboardList, Mail, Smartphone } from 'lucide-react';
+import { Users, UserCheck, BarChart2, Shield, ShieldCheck, Settings, FileText, CheckCircle2, RefreshCw, Layers, FileSpreadsheet, ClipboardList, Mail, Smartphone, Activity } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { ClassExcelRegisterModal } from '../components/ClassExcelRegisterModal';
+import { DepartmentEnrollmentModal } from '../components/admin/DepartmentEnrollmentModal';
 import { OnboardingManager } from '../components/admin/OnboardingManager';
 import { CredentialDispatcher } from '../components/admin/CredentialDispatcher';
 import { DeviceManager } from '../components/admin/DeviceManager';
+import { ComplianceTab } from '../components/admin/ComplianceTab';
+import { ScannerHealthTab } from '../components/admin/ScannerHealthTab';
 
 export const AdminDashboard: React.FC = () => {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [auditLogs, setAuditLogs] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isExcelRegisterOpen, setIsExcelRegisterOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'onboarding' | 'credentials' | 'devices'>('dashboard');
+  const [isEnrollmentModalOpen, setIsEnrollmentModalOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'compliance' | 'onboarding' | 'credentials' | 'devices' | 'scanner_health'>('dashboard');
 
   // Keyset / Offset Pagination State for Audit Logs
   const [auditPage, setAuditPage] = useState<number>(1);
@@ -100,6 +104,8 @@ export const AdminDashboard: React.FC = () => {
       <div className="flex items-center gap-1 bg-white/60 p-1 rounded-2xl border border-slate-200 w-fit">
         {[
           { key: 'dashboard' as const, label: 'Dashboard', icon: BarChart2 },
+          { key: 'scanner_health' as const, label: 'Scanner Health', icon: Activity },
+          { key: 'compliance' as const, label: 'Compliance (JNTUH R25)', icon: ShieldCheck },
           { key: 'onboarding' as const, label: 'Onboarding', icon: ClipboardList },
           { key: 'credentials' as const, label: 'Credentials', icon: Mail },
           { key: 'devices' as const, label: 'Devices & Telemetry', icon: Smartphone },
@@ -120,6 +126,16 @@ export const AdminDashboard: React.FC = () => {
           );
         })}
       </div>
+
+      {/* Scanner Health & Forensics Tab */}
+      {activeTab === 'scanner_health' && (
+        <ScannerHealthTab />
+      )}
+
+      {/* JNTUH R25 Compliance Tab */}
+      {activeTab === 'compliance' && (
+        <ComplianceTab onOpenDepartmentDrilldown={() => setIsEnrollmentModalOpen(true)} />
+      )}
 
       {/* Devices & Telemetry Tab */}
       {activeTab === 'devices' && (
@@ -153,13 +169,27 @@ export const AdminDashboard: React.FC = () => {
       {stats && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
           
-          <div className="snist-card p-6 space-y-2">
+          <div 
+            onClick={() => setIsEnrollmentModalOpen(true)}
+            className="snist-card p-6 space-y-2 cursor-pointer group hover:border-[#2f53d7] hover:shadow-md transition-all relative overflow-hidden"
+            title="Click to view interactive department hierarchy & enrollment drill-down"
+          >
             <div className="flex items-center justify-between">
-              <span className="text-xs font-bold text-[#6a7894] uppercase tracking-wider">Total Enrolled Students</span>
-              <Users className="w-5 h-5 text-[#2f53d7]" />
+              <span className="text-xs font-bold text-[#6a7894] group-hover:text-[#2f53d7] uppercase tracking-wider transition-colors flex items-center gap-1.5">
+                Total Enrolled Students
+                <span className="text-[10px] lowercase font-semibold text-slate-400 group-hover:text-[#2f53d7]">(drill down &rarr;)</span>
+              </span>
+              <div className="w-8 h-8 rounded-lg bg-[#2f53d7]/10 group-hover:bg-[#2f53d7] flex items-center justify-center transition-colors">
+                <Users className="w-4 h-4 text-[#2f53d7] group-hover:text-white transition-colors" />
+              </div>
             </div>
-            <p className="font-heading text-3xl font-extrabold text-[#15347e]">{stats.total_students}</p>
-            <span className="text-xs font-medium text-slate-500">Across {stats.total_departments} Departments</span>
+            <p className="font-heading text-3xl font-extrabold text-[#15347e] group-hover:text-[#2f53d7] transition-colors">{stats.total_students}</p>
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-medium text-slate-500">Across {stats.total_departments} Departments</span>
+              <span className="text-[11px] font-bold text-[#2f53d7] opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-0.5">
+                View Diagram &rarr;
+              </span>
+            </div>
           </div>
 
           <div className="snist-card p-6 space-y-2 border-emerald-200 bg-emerald-50/40">
@@ -322,6 +352,11 @@ export const AdminDashboard: React.FC = () => {
       <ClassExcelRegisterModal
         isOpen={isExcelRegisterOpen}
         onClose={() => setIsExcelRegisterOpen(false)}
+      />
+
+      <DepartmentEnrollmentModal
+        isOpen={isEnrollmentModalOpen}
+        onClose={() => setIsEnrollmentModalOpen(false)}
       />
 
       </>)}{/* end dashboard tab */}

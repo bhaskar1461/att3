@@ -1,0 +1,27 @@
+# ==============================================================================
+# Cloudflare Named Tunnel Ingress Configuration for Local Dev Environment
+# System: SNIST AI QR Attendance & ERP Platform (Development Stack)
+# Target Hostname: dev-ather-os.de5.net -> Local Dev Stack Frontend (:5173)
+# ==============================================================================
+#
+# IMPORTANT SECURITY RULES:
+# 1. This tunnel points exclusively to local DEV stack (http://localhost:5173),
+#    which proxies /api calls to local dev FastAPI (http://localhost:8001).
+# 2. NEVER point this tunnel at production data or production databases.
+# 3. Always ensure dev-ather-os.de5.net is protected by Cloudflare Zero Trust
+#    Access (Email OTP / Google OAuth) or HTTP Basic Auth.
+# 4. Stop this tunnel when not actively conducting remote phone testing.
+
+tunnel: snist-dev-tunnel
+credentials-file: ~/.cloudflared/snist-dev-tunnel.json
+
+ingress:
+  # Route dev subdomain to Vite dev server (HMR enabled, proxies /api -> FastAPI :8001)
+  - hostname: dev-ather-os.de5.net
+    service: http://localhost:5173
+    originRequest:
+      connectTimeout: 10s
+      noTLSVerify: true
+
+  # Catch-all rule for unmatched hostnames
+  - service: http_status:404

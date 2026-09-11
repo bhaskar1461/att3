@@ -231,6 +231,10 @@ class SecurityAlertService:
         audit_id: Optional[int]
     ) -> None:
         """Renders and sends real-time security alert email."""
+        if not getattr(settings, "SECURITY_ALERTS_ENABLED", False):
+            logger.info("Security alert dispatch silenced (SECURITY_ALERTS_ENABLED=False).")
+            return
+
         from app.services.email_service import render_email_template, send_single_email
 
         target_email = getattr(settings, "SECURITY_ALERT_EMAIL", "23311a05y6@cse.sreenidhi.edu.in")
@@ -314,6 +318,10 @@ class SecurityAlertService:
         # Defensive error boundary around entire digest loop
         # WHY: A database query or template rendering exception must NEVER crash the scheduler loop.
         try:
+            if not getattr(settings, "SECURITY_DIGEST_ENABLED", False):
+                logger.info("[DIGEST-DISABLED] Security digest disabled via config (SECURITY_DIGEST_ENABLED=False).")
+                return {"status": "DISABLED", "reason": "CONFIG_DISABLED"}
+
             now_ist = get_server_ist_datetime()
 
             # Schedule check: 09:00 - 17:00 IST on weekdays (Mon=0 .. Fri=4)

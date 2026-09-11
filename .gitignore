@@ -58,3 +58,4 @@ Thumbs.db
 # Scratch & Temporary Scripts
 scratch/
 *.bak
+scratch_prompt.txt

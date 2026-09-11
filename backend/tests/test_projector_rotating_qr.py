@@ -215,7 +215,7 @@ class TestProjectorRotatingQR(unittest.TestCase):
         self.assertEqual(res.status_code, 200)
         data = res.json()
         self.assertEqual(data["session_id"], session.id)
-        self.assertIn("SNIST-SES|", data["qr_payload"])
+        self.assertTrue("SNIST-SES|" in data.get("legacy_payload", "") or "SNIST-SES|" in data.get("qr_payload", ""))
         self.assertTrue(data["qr_base64"].startswith("data:image/png;base64,"))
         self.assertEqual(data["total_enrolled"], 1)
         self.assertEqual(data["total_marked"], 0)
@@ -338,5 +338,33 @@ class TestProjectorRotatingQR(unittest.TestCase):
         self.assertEqual(scan_res.status_code, 400)
         self.assertIn("locked", scan_res.json()["detail"].lower())
 
+    def test_period_count_clamping_and_bounds_validation(self):
+        """Verify that period_count=144 (or any out-of-bounds count) is strictly clamped to 1-8."""
+        # 1. Direct generator clamping
+        token_info = generate_projector_session_token(session_id=10, period_count=144)
+        self.assertEqual(token_info["period_count"], 8)
+        self.assertIn("|8|", token_info["payload"])
+
+        # 2. Token validator bounds enforcement
+        tampered_payload = token_info["payload"].replace("|8|", "|144|")
+        with self.assertRaises(ValueError) as ctx:
+            validate_projector_session_token(tampered_payload)
+        self.assertIn("Invalid period count", str(ctx.exception))
+
+        # 3. Teacher broadcast-token API clamping
+        session = self.db.query(AttendanceSession).filter(
+            AttendanceSession.status == SessionStatus.OPEN,
+            AttendanceSession.teacher_id == self.teacher.id
+        ).first()
+        if session:
+            res = self.client.get(
+                f"/api/v1/teacher/sessions/{session.id}/broadcast-token?period_count=144",
+                headers=self.teacher_headers
+            )
+            self.assertEqual(res.status_code, 200)
+            data = res.json()
+            self.assertEqual(data["period_count"], 8)
+
 if __name__ == "__main__":
     unittest.main()
+

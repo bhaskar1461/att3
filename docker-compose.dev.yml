@@ -1,0 +1,94 @@
+# ==============================================================================
+# SNIST ERP AI QR Attendance & Academic System — Docker Dev Stack
+# Matches Production Architecture: FastAPI + Local MariaDB + Vite Dev Server (HMR)
+# ==============================================================================
+version: '3.8'
+
+services:
+  # ----------------------------------------------------------------------------
+  # 1. DATABASE: MariaDB 10.6 (Mirrors Remote Production MySQL Schema & Dialects)
+  # ----------------------------------------------------------------------------
+  db:
+    image: mariadb:10.6
+    container_name: snist_dev_mariadb
+    restart: unless-stopped
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: dev_root_secret
+      MYSQL_DATABASE: snist_dev
+      MYSQL_USER: dev
+      MYSQL_PASSWORD: dev_pass
+    volumes:
+      - dev_mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "dev", "-pdev_pass"]
+      interval: 4s
+      timeout: 5s
+      retries: 15
+      start_period: 10s
+    networks:
+      - snist_dev_net
+
+  # ----------------------------------------------------------------------------
+  # 2. BACKEND: FastAPI with Hot Reload on Port 8001
+  # ----------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: snist_dev_backend
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    environment:
+      DATABASE_URL: mysql+pymysql://dev:dev_pass@db:3306/snist_dev
+      SECRET_KEY: dev_secret_key_8f3b2a19e5d4c7b6a5f4e3d2c1b0a9f8
+      QR_SECRET_KEY: dev_qr_secret_key_a1b2c3d4e5f6789012345678
+      ENVIRONMENT: development
+      FRONTEND_URL: http://localhost:5173
+      JNTUH_ELIGIBLE_THRESHOLD: "75.0"
+      JNTUH_CONDONABLE_THRESHOLD: "65.0"
+      JNTUH_INCLUDE_APPROVED_ABSENCES: "True"
+    volumes:
+      - ./backend:/app
+      - ./backend/data:/app/data
+      - ./seed_dev.py:/app/seed_dev.py
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - snist_dev_net
+
+  # ----------------------------------------------------------------------------
+  # 3. FRONTEND: Vite Dev Server with HMR on Port 5173 (Proxies /api -> backend)
+  # ----------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: snist_dev_frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_PORT: "5173"
+      BACKEND_URL: http://backend:8000
+      DOCKER_ENV: "true"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+    depends_on:
+      - backend
+    networks:
+      - snist_dev_net
+
+networks:
+  snist_dev_net:
+    driver: bridge
+
+volumes:
+  dev_mariadb_data:
+    driver: local

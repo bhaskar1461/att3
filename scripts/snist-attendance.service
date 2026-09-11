@@ -1,0 +1,19 @@
+[Unit]
+Description=SNIST AI QR Attendance & ERP Service
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=forking
+User=azureuser
+Group=azureuser
+WorkingDirectory=/home/azureuser/snist_attendance
+ExecStart=/home/azureuser/snist_attendance/scripts/start_production.sh
+ExecStop=/usr/bin/tmux kill-session -t snist_app
+Restart=on-failure
+RestartSec=5s
+RemainAfterExit=yes
+TimeoutStartSec=60s
+
+[Install]
+WantedBy=multi-user.target

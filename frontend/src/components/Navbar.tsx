@@ -46,6 +46,11 @@ export const Navbar: React.FC = () => {
     return 'Student';
   };
 
+  // Standalone public routes (e.g. /qr projector display) must not show the Navbar
+  if (location.pathname === '/qr') {
+    return null;
+  }
+
   return (
     <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200/80 shadow-sm">
       <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8 h-16 sm:h-20 flex items-center justify-between gap-2">

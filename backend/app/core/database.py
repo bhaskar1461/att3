@@ -17,16 +17,17 @@ if is_sqlite:
 else:
     logger.info("[DATABASE INTEGRITY GUARD] Connecting to authoritative remote MySQL server (%s)", settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "configured")
     connect_args = {
-        "connect_timeout": 10,
-        "read_timeout": 30,
-        "write_timeout": 30
+        "connect_timeout": 5,
+        "read_timeout": 8,
+        "write_timeout": 8
     }
     # Tuned connection pool for remote MySQL (seg-dev.sreenidhi.edu.in)
     # Server max_connections is 151; setting max 45 connections per worker prevents exhaustion across multiple uvicorn workers
+    # Fast-fail pool_timeout (5s) prevents prolonged request queue hangs when remote DB is slow
     pool_kwargs = {
         "pool_size": 30,        # Sized for 50-60 concurrent student scans per worker
         "max_overflow": 15,     # Peak burst allowance (max 45 total per worker)
-        "pool_timeout": 20,     # Fast-fail timeout to prevent prolonged HTTP request hangs
+        "pool_timeout": 5,      # Fast-fail timeout to prevent worker starvation and cascade failure
         "pool_recycle": 300     # 5-minute recycle to safely handle remote TCP keepalives
     }
 

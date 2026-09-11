@@ -79,6 +79,13 @@ class TestE2ESystemIntegration(unittest.TestCase):
         token_stu1 = res_login1.json()["access_token"]
 
         # Step 2: Faculty Opens Attendance Session
+        res_fac_login = self.client.post("/api/v1/auth/login", json={
+            "username": "FAC101",
+            "password": "pass123"
+        })
+        self.assertEqual(res_fac_login.status_code, 200)
+        token_fac = res_fac_login.json()["access_token"]
+
         session = AttendanceSession(
             teacher_id=self.teacher.id,
             subject_id=self.subj.id,
@@ -90,11 +97,11 @@ class TestE2ESystemIntegration(unittest.TestCase):
         self.db.add(session)
         self.db.commit()
 
-        # Step 3: Student 1 scans encrypted QR payload for session
+        # Step 3: Faculty scans student 1 encrypted QR payload for session
         qr_payload = generate_encrypted_qr_payload_v2(student_id=self.stu1.id, roll_number="21CS001")
         res_scan = self.client.post(
             "/api/v1/attendance/scan",
-            headers={"Authorization": f"Bearer {token_stu1}"},
+            headers={"Authorization": f"Bearer {token_fac}"},
             json={
                 "session_id": session.id,
                 "qr_payload": qr_payload,

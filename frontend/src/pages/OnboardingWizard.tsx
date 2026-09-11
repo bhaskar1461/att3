@@ -42,7 +42,7 @@ export const OnboardingWizard: React.FC = () => {
     const params = new URLSearchParams(window.location.search);
     const token = params.get('token');
     if (!token) {
-      setError('No onboarding token found in URL. Please use the link sent to your email.');
+      setError('Student onboarding now uses direct permanent login. Please sign in directly with your SAP ID / Roll Number and PIN.');
       setStep('error');
       return;
     }
@@ -248,11 +248,23 @@ export const OnboardingWizard: React.FC = () => {
 
           {/* STEP: Error */}
           {step === 'error' && (
-            <div className="text-center py-8">
-              <AlertCircle className="w-14 h-14 text-red-400 mx-auto mb-4" />
-              <h2 className="font-heading text-lg font-bold text-[#15347e] mb-2">Link Invalid or Expired</h2>
-              <p className="text-sm text-[#6a7894] mb-6">{error}</p>
-              <p className="text-xs text-slate-500">Contact your class in-charge for a new onboarding link.</p>
+            <div className="text-center py-8 space-y-4">
+              <div className="w-14 h-14 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-2">
+                <Shield className="w-8 h-8 text-amber-600" />
+              </div>
+              <h2 className="font-heading text-lg font-bold text-[#15347e]">Student Direct Login Portal</h2>
+              <p className="text-sm text-[#6a7894] max-w-sm mx-auto">
+                {error || 'Student onboarding now uses direct permanent login. Please sign in with your SAP ID / Roll Number and PIN.'}
+              </p>
+              <div className="pt-2">
+                <a
+                  href="/login"
+                  className="inline-flex items-center gap-2 px-6 py-2.5 snist-btn-primary text-sm font-bold shadow-md hover:shadow-lg transition active:scale-95"
+                >
+                  Go to Login Portal →
+                </a>
+              </div>
+              <p className="text-xs text-slate-400">If you need your initial PIN, your teacher or administrator can reset it instantly from the Onboarding Manager.</p>
             </div>
           )}
 

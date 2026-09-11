@@ -14,6 +14,12 @@ from app.core.security import get_password_hash, create_access_token
 
 client = TestClient(app)
 
+@pytest.fixture(autouse=True)
+def clean_dependency_overrides():
+    app.dependency_overrides.clear()
+    yield
+    app.dependency_overrides.clear()
+
 @pytest.fixture
 def admin_token():
     db = SessionLocal()
@@ -72,3 +78,42 @@ def test_admin_quick_reset_fallback(admin_token):
     login_data = login_res.json()
     assert "access_token" in login_data
     assert login_data["role"] == "STUDENT"
+
+def test_admin_lookup_and_edit_email(admin_token):
+    """Verify admin can look up student details and edit student email via quick-reset."""
+    # 1. Lookup student
+    lookup_res = client.get(
+        "/api/v1/admin/credentials/student-lookup/24311A6201",
+        headers={"Authorization": f"Bearer {admin_token}"}
+    )
+    assert lookup_res.status_code == 200
+    lookup_data = lookup_res.json()
+    assert lookup_data["status"] == "SUCCESS"
+    assert lookup_data["roll_number"] == "24311A6201"
+    assert "email" in lookup_data
+
+    # 2. Reset with updated email and custom PIN
+    new_test_email = "updated_test_student@sreenidhi.edu.in"
+    custom_pin = "889900"
+    reset_res = client.post(
+        "/api/v1/admin/credentials/quick-reset",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={
+            "roll_number": "24311A6201",
+            "email": new_test_email,
+            "custom_password": custom_pin
+        }
+    )
+    assert reset_res.status_code == 200
+    reset_data = reset_res.json()
+    assert reset_data["status"] == "SUCCESS"
+    assert reset_data["email"] == new_test_email
+    assert reset_data["temp_pin"] == custom_pin
+    assert reset_data["temporary_password"] == custom_pin
+
+    # 3. Verify student can login with the custom PIN
+    login_res = client.post(
+        "/api/v1/auth/login",
+        data={"username": "24311A6201", "password": custom_pin}
+    )
+    assert login_res.status_code == 200

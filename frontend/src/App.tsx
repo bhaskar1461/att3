@@ -12,6 +12,7 @@ const StudentPortal = React.lazy(() => import('./pages/StudentPortal').then(m =>
 const Management = React.lazy(() => import('./pages/Management').then(m => ({ default: m.Management })));
 const Reports = React.lazy(() => import('./pages/Reports').then(m => ({ default: m.Reports })));
 const OnboardingWizard = React.lazy(() => import('./pages/OnboardingWizard').then(m => ({ default: m.OnboardingWizard })));
+const PublicQrDisplay = React.lazy(() => import('./pages/PublicQrDisplay').then(m => ({ default: m.PublicQrDisplay })));
 
 const RouteLoader: React.FC = () => (
   <div className="flex items-center justify-center min-h-[60vh]">
@@ -88,6 +89,9 @@ export const App: React.FC = () => {
 
                 {/* Public Onboarding Route (magic link — no auth required) */}
                 <Route path="/onboard" element={<OnboardingWizard />} />
+
+                {/* Public Static Login QR Display (no auth required, projector-first view) */}
+                <Route path="/qr" element={<PublicQrDisplay />} />
 
                 <Route path="*" element={<RoleBasedRedirect />} />
               </Routes>

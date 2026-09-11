@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SNIST ERP — Faculty Class Assignment & Schedule</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f0f4f8;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 620px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.08); margin-top: 24px; margin-bottom: 24px;">
+        <!-- Institutional Emerald Header -->
+        <tr>
+            <td style="background: linear-gradient(135deg, #064e3b 0%, #065f46 50%, #059669 100%); padding: 32px 24px; text-align: center;">
+                <h1 style="color: #ffffff; font-size: 20px; margin: 0; font-weight: 800; letter-spacing: 1px;">SREENIDHI INSTITUTE OF SCIENCE &amp; TECHNOLOGY</h1>
+                <p style="color: #a7f3d0; font-size: 12px; margin: 8px 0 0; text-transform: uppercase; font-weight: 600; letter-spacing: 2px;">
+                    FACULTY PORTAL — CLASS ALLOTMENT &amp; TIMETABLE NOTIFICATION
+                </p>
+            </td>
+        </tr>
+
+        <!-- Main Body -->
+        <tr>
+            <td style="padding: 32px 24px;">
+                <p style="color: #064e3b; font-size: 18px; font-weight: 700; margin: 0 0 12px;">Dear {{ teacher_name }},</p>
+
+                <p style="color: #334155; font-size: 14px; line-height: 1.6; margin: 0 0 20px;">
+                    This is an official notification from the Academic Administration. You have been assigned as the in-charge faculty for the following class and weekly academic schedule:
+                </p>
+
+                <!-- Class Allotment Hero Card -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="background: #f8fafc; border: 2px solid #e2e8f0; border-left: 6px solid #059669; border-radius: 8px; margin: 0 0 24px;">
+                    <tr>
+                        <td style="padding: 20px;">
+                            <span style="background: #d1fae5; color: #065f46; font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 9999px; text-transform: uppercase; letter-spacing: 0.5px;">
+                                ASSIGNED CLASS &amp; SUBJECT
+                            </span>
+                            <h2 style="color: #0f172a; font-size: 18px; margin: 10px 0 4px; font-weight: 800;">
+                                {{ class_name }} {% if class_code %}<span style="color: #64748b; font-size: 14px; font-weight: 600;">({{ class_code }})</span>{% endif %}
+                            </h2>
+                            <p style="color: #475569; font-size: 13px; margin: 0 0 16px; font-weight: 500;">
+                                Department: <strong>{{ department }}</strong> &bull; Section: <strong>{{ section }}</strong>
+                            </p>
+
+                            <table width="100%" cellpadding="0" cellspacing="0" style="border-top: 1px solid #e2e8f0; padding-top: 14px;">
+                                <tr>
+                                    <td width="50%" style="vertical-align: top; padding-bottom: 12px;">
+                                        <p style="margin: 0; color: #64748b; font-size: 11px; text-transform: uppercase; font-weight: 700;">Weekly Schedule</p>
+                                        <p style="margin: 4px 0 0; color: #0f172a; font-size: 14px; font-weight: 700;">{{ weekly_schedule }}</p>
+                                    </td>
+                                    <td width="50%" style="vertical-align: top; padding-bottom: 12px;">
+                                        <p style="margin: 0; color: #64748b; font-size: 11px; text-transform: uppercase; font-weight: 700;">Class Timing &amp; Credit</p>
+                                        <p style="margin: 4px 0 0; color: #0f172a; font-size: 14px; font-weight: 700;">{{ timings }}</p>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td width="50%" style="vertical-align: top;">
+                                        <p style="margin: 0; color: #64748b; font-size: 11px; text-transform: uppercase; font-weight: 700;">First Upcoming Session</p>
+                                        <p style="margin: 4px 0 0; color: #059669; font-size: 14px; font-weight: 800;">{{ next_class_date }}</p>
+                                    </td>
+                                    <td width="50%" style="vertical-align: top;">
+                                        <p style="margin: 0; color: #64748b; font-size: 11px; text-transform: uppercase; font-weight: 700;">Classroom &amp; Venue</p>
+                                        <p style="margin: 4px 0 0; color: #0f172a; font-size: 14px; font-weight: 700;">{{ venue }}</p>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- Student Onboarding Dispatch Status Banner -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; margin: 0 0 24px;">
+                    <tr>
+                        <td style="padding: 16px 20px;">
+                            <p style="margin: 0 0 6px; color: #1e40af; font-size: 13px; font-weight: 700;">
+                                📬 Student Login Credentials Dispatched
+                            </p>
+                            <p style="margin: 0; color: #3b82f6; font-size: 13px; line-height: 1.5;">
+                                Account onboarding magic links have been dispatched to all <strong>{{ student_count }} enrolled students</strong> in this section. Students will log in and have their device bound prior to class.
+                            </p>
+                            <p style="margin: 8px 0 0; color: #64748b; font-size: 11px; font-style: italic;">
+                                🛡️ <strong>Inbox Protection:</strong> Individual student emails are <strong>not</strong> CC'd to you to keep your inbox clean. Live student counts and roster progress are visible in your Faculty Dashboard.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- One-Click Magic Link & Credentials Card -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="background: #ecfdf5; border: 2px solid #a7f3d0; border-radius: 8px; margin: 0 0 24px;">
+                    <tr>
+                        <td style="padding: 20px;">
+                            <span style="background: #059669; color: #ffffff; font-size: 11px; font-weight: 800; padding: 4px 10px; border-radius: 9999px; text-transform: uppercase; letter-spacing: 0.5px;">
+                                ✨ 1-CLICK INSTANT LOGIN &amp; PASSWORD SETUP
+                            </span>
+                            <p style="color: #064e3b; font-size: 14px; font-weight: 700; margin: 12px 0 6px;">
+                                Access Your Teacher Dashboard in One Click
+                            </p>
+                            <p style="color: #047857; font-size: 13px; line-height: 1.5; margin: 0 0 16px;">
+                                Click the secure button below to be automatically signed in to the projector portal. You can choose your own custom password upon signing in, or continue with your default credentials.
+                            </p>
+
+                            <!-- Credentials Box -->
+                            <table width="100%" cellpadding="0" cellspacing="0" style="background: #ffffff; border: 1px solid #d1fae5; border-radius: 6px; margin-bottom: 18px;">
+                                <tr>
+                                    <td style="padding: 12px 16px;">
+                                        <table width="100%" cellpadding="0" cellspacing="0">
+                                            <tr>
+                                                <td width="50%">
+                                                    <span style="color: #64748b; font-size: 11px; text-transform: uppercase; font-weight: 700;">Username:</span>
+                                                    <div style="color: #0f172a; font-size: 14px; font-weight: 800; font-family: monospace; margin-top: 2px;">{{ teacher_username }}</div>
+                                                </td>
+                                                <td width="50%">
+                                                    <span style="color: #64748b; font-size: 11px; text-transform: uppercase; font-weight: 700;">Default Password:</span>
+                                                    <div style="color: #0f172a; font-size: 14px; font-weight: 800; font-family: monospace; margin-top: 2px;">{{ default_password }}</div>
+                                                </td>
+                                            </tr>
+                                        </table>
+                                    </td>
+                                </tr>
+                            </table>
+
+                            <!-- Magic Login Button -->
+                            <div style="text-align: center;">
+                                <a href="{{ magic_login_url }}" 
+                                   style="display: inline-block; background: linear-gradient(135deg, #059669 0%, #065f46 100%); color: #ffffff; text-decoration: none; padding: 14px 36px; font-size: 14px; font-weight: 800; border-radius: 8px; letter-spacing: 0.5px; box-shadow: 0 4px 12px rgba(5, 150, 105, 0.3);">
+                                    Sign In via Magic Link &amp; Choose Password &rarr;
+                                </a>
+                            </div>
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- Classroom Operating Instructions -->
+                <h3 style="color: #0f172a; font-size: 14px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; margin: 0 0 12px;">
+                    Classroom Projector Attendance Workflow
+                </h3>
+                <ol style="margin: 0 0 24px; padding-left: 20px; color: #334155; font-size: 13px; line-height: 1.7;">
+                    <li><strong>Sign In</strong>: On the classroom computer connected to the projector, click the magic link above, or open <a href="{{ portal_url }}" style="color: #059669; font-weight: 700;">{{ portal_url }}</a> and log in with your credentials (Username: <code>{{ teacher_username }}</code>).</li>
+                    <li><strong>Start Class Session</strong>: Select <strong>{{ class_name }}</strong> and click <strong>Start Session</strong>.</li>
+                    <li><strong>Broadcast QR</strong>: Click <strong>Projector Broadcast</strong> and press <strong>F11</strong> for fullscreen. The high-speed 10-second rotating anti-proxy QR code will display on screen.</li>
+                    <li><strong>Student Scanning</strong>: Students will scan the rotating QR code on screen from their seats using their smartphone camera.</li>
+                    <li><strong>Lock Session</strong>: Once attendance is complete, click <strong>Lock Session</strong>. Attendance is committed to the institutional database (and Google Sheet / Frappe ERP when linked).</li>
+                </ol>
+
+                <p style="color: #94a3b8; font-size: 11px; line-height: 1.5; margin: 0;">
+                    If you have any questions regarding your timetable allotment or classroom projector setup, please contact the Academic Coordination Office or IT Helpdesk at <a href="mailto:{{ support_email }}" style="color: #64748b;">{{ support_email }}</a>.
+                </p>
+            </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+            <td style="background: #f8fafc; padding: 18px 24px; text-align: center; border-top: 1px solid #e2e8f0;">
+                <p style="color: #64748b; font-size: 11px; margin: 0; font-weight: 500;">
+                    Sreenidhi Institute of Science &amp; Technology &bull; Yamnampet, Ghatkesar, Hyderabad &bull; 501301
+                </p>
+                <p style="color: #94a3b8; font-size: 10px; margin: 4px 0 0;">
+                    Automated Timetable &amp; Attendance Governance Notification &bull; Do not reply to this email
+                </p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

@@ -1,23 +1,36 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
-import { Calendar, Clock, MapPin, User, PieChart, Home, ChevronRight, X, BookOpen, Camera, CheckCircle, ShieldCheck } from 'lucide-react';
+import { 
+  Calendar, Clock, MapPin, User, PieChart, Home, ChevronRight, X, 
+  BookOpen, Camera, CheckCircle, ShieldCheck, AlertTriangle, Sparkles, AlertOctagon, Info 
+} from 'lucide-react';
 // Lazy-load heavy html5-qrcode scanner modal so students do not download it on initial portal load
 const StudentClassScannerModal = React.lazy(() => 
   import('../components/StudentClassScannerModal').then(m => ({ default: m.StudentClassScannerModal }))
 );
+import { RawSessionAuditModal } from '../components/RawSessionAuditModal';
 import { Toast } from '../components/Toast';
+import { SmartInstallCard } from '../components/SmartInstallCard';
 
 export const StudentPortal: React.FC = () => {
   const [profile, setProfile] = useState<any>(null);
   const [summary, setSummary] = useState<any>(null);
+  const [compliance, setCompliance] = useState<any>(null);
+  const [warnings, setWarnings] = useState<any[]>([]);
   const [schedule, setSchedule] = useState<any>(null);
   const [showSubjectModal, setShowSubjectModal] = useState<boolean>(false);
   const [showClassScannerModal, setShowClassScannerModal] = useState<boolean>(false);
+  const [isRawAuditOpen, setIsRawAuditOpen] = useState<boolean>(false);
+  const [auditCourseId, setAuditCourseId] = useState<number | null>(null);
   const [activeNavTab, setActiveNavTab] = useState<'home' | 'attendance' | 'timetable'>('home');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   useEffect(() => {
     fetchStudentData();
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('scan') === 'true') {
+      setShowClassScannerModal(true);
+    }
   }, []);
 
   const fetchStudentData = async () => {
@@ -29,7 +42,25 @@ export const StudentPortal: React.FC = () => {
       ]);
 
       if (profileRes.status === 'fulfilled') {
-        setProfile(profileRes.value);
+        const prof = profileRes.value;
+        setProfile(prof);
+        if (prof?.roll_number) {
+          try {
+            const comp = await apiRequest<any>(`/compliance/student/${prof.roll_number}`);
+            setCompliance(comp);
+          } catch (cErr) {
+            console.warn('Compliance analytics fetch skipped:', cErr);
+          }
+
+          try {
+            const warnData = await apiRequest<any>('/student/warnings');
+            if (warnData?.warnings) {
+              setWarnings(warnData.warnings);
+            }
+          } catch (wErr) {
+            console.warn('Student warnings fetch skipped:', wErr);
+          }
+        }
       }
       if (summaryRes.status === 'fulfilled') {
         setSummary(summaryRes.value);
@@ -47,15 +78,30 @@ export const StudentPortal: React.FC = () => {
     }
   };
 
-  const hasConducted = (summary?.total_conducted ?? 0) > 0;
-  const overallPercent = hasConducted ? (summary?.overall_percentage ?? 0) : 0;
-  const presentCount = summary?.total_present ?? 0;
-  const absentCount = summary?.total_absent ?? 0;
+  const compAgg = compliance?.aggregate;
+  const isInsufficientData = compAgg?.band === 'INSUFFICIENT_DATA' || (compAgg && compAgg.total_effective_sessions < 3);
+  const hasConducted = compAgg ? (compAgg.total_effective_sessions > 0) : ((summary?.total_conducted ?? 0) > 0);
+  const overallPercent = compAgg?.aggregate_percentage ?? (hasConducted ? (summary?.overall_percentage ?? 0) : 0);
+  const displayOverall = isInsufficientData ? '—' : (compAgg?.aggregate_display ?? `${overallPercent}%`);
+  const currentBand = isInsufficientData 
+    ? 'INSUFFICIENT_DATA' 
+    : (compAgg?.band || (overallPercent >= 75 ? 'ELIGIBLE' : (overallPercent >= 65 ? 'CONDONABLE' : 'DETAINED')));
+  const presentCount = compAgg?.total_present_sessions ?? (summary?.total_present ?? 0);
+  const absentCount = compAgg 
+    ? Math.max(0, compAgg.total_effective_sessions - compAgg.total_present_sessions) 
+    : (summary?.total_absent ?? 0);
   const myAttendance = schedule?.my_attendance;
   const isMarkedToday = Boolean(myAttendance?.is_marked);
 
+  // Recovery Trajectory computations
+  const coursesBelow75 = compliance?.courses?.filter((c: any) => c.band !== 'INSUFFICIENT_DATA' && (c.attendance_percentage ?? 0) < 75) || [];
+  const unrecoverableCourse = !isInsufficientData ? compliance?.courses?.find((c: any) => c.band !== 'INSUFFICIENT_DATA' && c.is_recoverable === false) : null;
+  const primaryRecoveryCourse = !isInsufficientData ? coursesBelow75.find((c: any) => c.is_recoverable !== false && ((c.classes_needed || 0) > 0 || (c.projected_classes_needed || 0) > 0)) : null;
+  const aggClassesNeeded = !isInsufficientData ? (compliance?.aggregate_classes_needed || 0) : 0;
+  const isAggRecoverable = compliance?.aggregate_is_recoverable ?? true;
+
   // Circle SVG calculations (radius = 45, circumference = 2 * pi * 45 = 282.7)
-  const strokeDashoffset = 282.7 - (282.7 * overallPercent) / 100;
+  const strokeDashoffset = isInsufficientData ? 0 : 282.7 - (282.7 * (overallPercent || 0)) / 100;
 
   return (
     <div className="bg-[#FBFBFD] text-[#1b1b1d] min-h-screen flex flex-col font-sans">
@@ -95,6 +141,76 @@ export const StudentPortal: React.FC = () => {
             {profile ? `${profile.department} • ${profile.section} (${profile.year})` : 'Sreenidhi Institute of Science & Technology'}
           </p>
         </section>
+ 
+        {/* Contextual PWA Install Promotion */}
+        <SmartInstallCard />
+
+        {/* Early-Warning & Attendance Recovery Banner (Empathetic & Action-Oriented) */}
+        {isInsufficientData ? (
+          <div className="rounded-2xl p-4 bg-gradient-to-r from-[#001e40] via-[#093268] to-[#15347e] text-white border border-blue-400/30 shadow-md flex items-start gap-3.5">
+            <Info className="w-6 h-6 text-blue-300 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <h4 className="font-black text-sm text-white">Semester Underway: Classes in Progress</h4>
+                <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-200 font-mono text-[10px] font-bold border border-blue-400/30">
+                  Orientation Phase
+                </span>
+              </div>
+              <p className="text-xs text-blue-100 mt-1 leading-relaxed">
+                Only {compAgg?.total_effective_sessions ?? 0} session(s) conducted so far. JNTUH compliance bands and defaulter evaluation activate after 3 sessions to prevent premature detention flags.
+              </p>
+            </div>
+          </div>
+        ) : hasConducted && unrecoverableCourse ? (
+          <div className="rounded-2xl p-4 bg-gradient-to-r from-rose-950 via-rose-900 to-[#1b1b1d] text-white border border-rose-500/40 shadow-md flex items-start gap-3.5">
+            <AlertOctagon className="w-6 h-6 text-rose-400 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <h4 className="font-black text-sm text-white">Detention Risk Alert: {unrecoverableCourse.course_name} ({unrecoverableCourse.course_code})</h4>
+                <span className="px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 font-mono text-[10px] font-bold border border-rose-500/40">
+                  Not Recoverable
+                </span>
+              </div>
+              <p className="text-xs text-rose-100/90 mt-1 leading-relaxed">
+                With {unrecoverableCourse.sessions_remaining} classes remaining, your attendance can reach at most {unrecoverableCourse.max_possible_percentage?.toFixed(1) || unrecoverableCourse.projected_percentage?.toFixed(1)}% (below the 75% requirement). Please consult your academic counselor or HOD immediately to initiate the condonation review process.
+              </p>
+            </div>
+          </div>
+        ) : hasConducted && primaryRecoveryCourse ? (
+          <div className="rounded-2xl p-4 bg-gradient-to-r from-[#001e40] via-[#093268] to-[#15347e] text-white border border-blue-400/30 shadow-md flex items-start gap-3.5">
+            <Sparkles className="w-6 h-6 text-amber-300 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <h4 className="font-black text-sm text-white">
+                  Attendance Recovery Path: Attend {primaryRecoveryCourse.classes_needed || primaryRecoveryCourse.projected_classes_needed} more consecutive classes in {primaryRecoveryCourse.course_code}
+                </h4>
+                <span className="px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 font-mono text-[10px] font-bold border border-amber-400/30">
+                  Target: 75%
+                </span>
+              </div>
+              <p className="text-xs text-blue-100 mt-1 leading-relaxed">
+                You are currently at {primaryRecoveryCourse.display_percentage || `${primaryRecoveryCourse.attendance_percentage}%`}. Attending {primaryRecoveryCourse.classes_needed || primaryRecoveryCourse.projected_classes_needed} consecutive upcoming classes will bring you back into the compliant ELIGIBLE band.
+              </p>
+            </div>
+          </div>
+        ) : hasConducted && overallPercent < 75 && aggClassesNeeded > 0 && isAggRecoverable ? (
+          <div className="rounded-2xl p-4 bg-gradient-to-r from-[#001e40] via-[#093268] to-[#15347e] text-white border border-blue-400/30 shadow-md flex items-start gap-3.5">
+            <Sparkles className="w-6 h-6 text-amber-300 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <h4 className="font-black text-sm text-white">
+                  Attendance Recovery Path: Attend {aggClassesNeeded} more classes overall
+                </h4>
+                <span className="px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 font-mono text-[10px] font-bold border border-amber-400/30">
+                  Target: 75%
+                </span>
+              </div>
+              <p className="text-xs text-blue-100 mt-1 leading-relaxed">
+                Your overall semester attendance is currently {displayOverall}. Attending {aggClassesNeeded} more consecutive sessions will restore compliance.
+              </p>
+            </div>
+          </div>
+        ) : null}
 
         {/* Bento Grid Layout */}
         <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
@@ -221,14 +337,23 @@ export const StudentPortal: React.FC = () => {
           {/* Attendance Overview Card */}
           <div className="col-span-1 md:col-span-5 bg-white rounded-2xl p-6 border border-[#D2D2D7] shadow-sm flex flex-col justify-between">
             <div className="flex justify-between items-center mb-4">
-              <h3 className="font-bold text-lg text-[#001e40] font-geist">Attendance Metrics</h3>
-              {hasConducted ? (
-                <span className={`px-2.5 py-1 text-xs font-bold rounded-full border ${
-                  overallPercent >= 75 
-                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
-                    : 'bg-amber-50 text-amber-700 border-amber-200'
+              <div>
+                <h3 className="font-bold text-lg text-[#001e40] font-geist leading-tight">JNTUH R25 Attendance</h3>
+                <p className="text-[11px] text-[#5e5e63]">Server-Authoritative Status</p>
+              </div>
+              {isInsufficientData ? (
+                <span className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-black rounded-full border border-blue-200 flex items-center gap-1">
+                  ℹ️ INITIAL PHASE
+                </span>
+              ) : hasConducted ? (
+                <span className={`px-2.5 py-1 text-xs font-black rounded-full border flex items-center gap-1 ${
+                  currentBand === 'ELIGIBLE'
+                    ? 'bg-emerald-50 text-emerald-700 border-emerald-300' 
+                    : currentBand === 'CONDONABLE'
+                    ? 'bg-amber-50 text-amber-700 border-amber-300'
+                    : 'bg-rose-50 text-rose-700 border-rose-300'
                 }`}>
-                  {overallPercent >= 75 ? 'On Track' : 'Needs Attention'}
+                  {currentBand === 'ELIGIBLE' ? '✅ ELIGIBLE' : currentBand === 'CONDONABLE' ? '⚠️ CONDONABLE' : '⛔ DETAINED'}
                 </span>
               ) : (
                 <span className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-bold rounded-full border border-blue-200">
@@ -246,7 +371,7 @@ export const StudentPortal: React.FC = () => {
                     cy="50" 
                     r="45" 
                     fill="none" 
-                    stroke="#001e40" 
+                    stroke={isInsufficientData ? '#2f53d7' : (currentBand === 'ELIGIBLE' ? '#24A249' : currentBand === 'CONDONABLE' ? '#FF9F0A' : '#E22126')} 
                     strokeWidth="8" 
                     strokeDasharray="282.7" 
                     strokeDashoffset={strokeDashoffset} 
@@ -254,9 +379,11 @@ export const StudentPortal: React.FC = () => {
                   />
                 </svg>
                 <div className="absolute inset-0 flex flex-col items-center justify-center">
-                  <span className="text-2xl font-extrabold text-[#001e40] font-geist">{overallPercent}%</span>
-                  <span className="text-[10px] font-bold text-[#5e5e63] uppercase">
-                    {hasConducted ? 'Overall' : 'New Session'}
+                  <span className="text-2xl font-extrabold text-[#001e40] font-geist">{displayOverall}</span>
+                  <span className={`text-[10px] font-black uppercase tracking-wider ${
+                    isInsufficientData ? 'text-blue-700' : (currentBand === 'ELIGIBLE' ? 'text-emerald-700' : currentBand === 'CONDONABLE' ? 'text-amber-700' : 'text-rose-700')
+                  }`}>
+                    {isInsufficientData ? 'Initial Phase' : (hasConducted ? currentBand : 'New Session')}
                   </span>
                 </div>
               </div>
@@ -271,6 +398,14 @@ export const StudentPortal: React.FC = () => {
                   <span className="block text-lg font-bold text-[#E22126]">{absentCount}</span>
                 </div>
               </div>
+
+              {currentBand === 'CONDONABLE' && (
+                <div className="w-full mt-2 p-2 rounded-xl bg-amber-50 border border-amber-200 text-center text-xs text-amber-900 font-semibold flex items-center justify-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                  <span>Condonation Fine Status: <b className="uppercase">{compAgg?.condonation_status || 'Pending'}</b></span>
+                </div>
+              )}
+
               {!hasConducted && (
                 <p className="text-[10px] text-center text-[#5e5e63] mt-2 font-medium">
                   Tracking begins with today's live session
@@ -278,13 +413,25 @@ export const StudentPortal: React.FC = () => {
               )}
             </div>
 
-            <button 
-              onClick={() => setShowSubjectModal(true)}
-              className="w-full mt-4 py-2.5 bg-[#F5F5F7] hover:bg-[#e0dfe4] text-[#001e40] font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-2"
-            >
-              <BookOpen className="w-4 h-4 text-[#3a5f94]" />
-              Detailed Subject Breakdown
-            </button>
+            <div className="grid grid-cols-2 gap-2 mt-4">
+              <button 
+                onClick={() => setShowSubjectModal(true)}
+                className="py-2.5 bg-[#F5F5F7] hover:bg-[#e0dfe4] text-[#001e40] font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5"
+              >
+                <BookOpen className="w-3.5 h-3.5 text-[#3a5f94]" />
+                Subject Breakdown
+              </button>
+              <button 
+                onClick={() => {
+                  setAuditCourseId(null);
+                  setIsRawAuditOpen(true);
+                }}
+                className="py-2.5 bg-[#001e40] hover:bg-[#003366] text-white font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 shadow-sm"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
+                Raw Audit Logs
+              </button>
+            </div>
           </div>
 
           {/* Today's Schedule List */}
@@ -371,6 +518,53 @@ export const StudentPortal: React.FC = () => {
             </div>
           </div>
 
+          {/* Official Attendance Warnings & Notices (Evidence Trail) */}
+          {warnings && warnings.length > 0 && (
+            <div className="col-span-1 md:col-span-12 bg-white rounded-2xl p-6 border border-[#D2D2D7] shadow-sm space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1">
+                <h3 className="font-bold text-base text-[#001e40] flex items-center gap-2">
+                  <AlertTriangle className="w-5 h-5 text-amber-600" />
+                  Official Attendance Notices & Recovery Guidance ({warnings.length})
+                </h3>
+                <span className="text-[11px] font-medium text-slate-500">
+                  Institutional record preserved at time of notice
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {warnings.map((w: any, wIdx: number) => (
+                  <div key={w.id || wIdx} className="p-4 rounded-xl bg-[#F5F5F7] border border-[#D2D2D7] space-y-2.5">
+                    <div className="flex justify-between items-start gap-2">
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-mono font-bold bg-[#001e40] text-white uppercase">
+                        {(w.warning_type || 'WARNING').replace(/_/g, ' ')}
+                      </span>
+                      <span className="text-[11px] font-mono text-slate-500 font-semibold">
+                        📅 {w.issued_at ? new Date(w.issued_at).toLocaleDateString('en-IN') : 'Recent'}
+                      </span>
+                    </div>
+                    <div className="text-xs font-bold text-slate-900">
+                      Course: {w.course_name || w.course_code || 'Semester Overall'}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs">
+                      <span className="px-2 py-0.5 rounded bg-rose-50 text-rose-800 font-bold border border-rose-200 text-[11px]">
+                        Snapshot: {w.percentage_at_issue}% ({w.band_at_issue})
+                      </span>
+                      <span className="text-slate-700 text-[11px] font-bold">
+                        {w.classes_needed_at_issue > 0 
+                          ? `Action: Needed ${w.classes_needed_at_issue} consecutive classes`
+                          : 'Action: Contact Counselor'}
+                      </span>
+                    </div>
+                    {w.message && (
+                      <p className="text-xs text-slate-700 italic bg-white p-2.5 rounded-lg border border-[#D2D2D7] mt-1">
+                        "{w.message}"
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
         </div>
 
       </main>
@@ -394,8 +588,75 @@ export const StudentPortal: React.FC = () => {
               </button>
             </div>
 
-            <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
-              {summary?.subjects && summary.subjects.length > 0 ? (
+            <div className="space-y-3 max-h-96 overflow-y-auto pr-1">
+              {compliance?.courses && compliance.courses.length > 0 ? (
+                compliance.courses.map((course: any, idx: number) => {
+                  const pct = course.attendance_percentage;
+                  const isInsufficient = course.band === 'INSUFFICIENT_DATA';
+                  const isEligible = course.band === 'ELIGIBLE';
+                  const isCondonable = course.band === 'CONDONABLE';
+                  const barColor = isEligible ? 'bg-[#34C759]' : isCondonable ? 'bg-[#FF9F0A]' : isInsufficient ? 'bg-[#2f53d7]' : 'bg-[#E22126]';
+                  return (
+                    <div 
+                      key={idx} 
+                      onClick={() => {
+                        setAuditCourseId(course.course_id);
+                        setIsRawAuditOpen(true);
+                      }}
+                      className="p-3.5 bg-[#F5F5F7] hover:bg-blue-50/70 transition cursor-pointer rounded-2xl border border-[#D2D2D7] space-y-2 shadow-xs"
+                      title="Click to view full session-by-session audit trail"
+                    >
+                      <div className="flex justify-between items-start gap-2">
+                        <div>
+                          <div className="flex items-center gap-1.5 mb-0.5">
+                            <span className="px-2 py-0.5 rounded bg-[#001e40] text-white font-mono text-[10px] font-bold">
+                              {course.course_code}
+                            </span>
+                            <span className="text-[10px] font-bold text-slate-500 uppercase">
+                              {course.course_type}
+                            </span>
+                          </div>
+                          <h4 className="font-bold text-sm text-[#001e40]">{course.course_name}</h4>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <span className={`font-mono font-black text-xs px-2 py-0.5 rounded block ${
+                            isEligible ? 'bg-[#34C759]/10 text-[#34C759]' : isCondonable ? 'bg-[#FF9F0A]/10 text-[#FF9F0A]' : isInsufficient ? 'bg-blue-50 text-blue-700' : 'bg-[#E22126]/10 text-[#E22126]'
+                          }`}>
+                            {course.display_percentage}
+                          </span>
+                          <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">
+                            {isInsufficient ? 'Initial Data' : course.band}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="w-full bg-[#E5E5EA] h-2 rounded-full overflow-hidden">
+                        <div 
+                          className={`h-full ${barColor} rounded-full transition-all duration-500`}
+                          style={{ width: `${Math.min(pct ?? 0, 100)}%` }}
+                        />
+                      </div>
+
+                      <div className="flex justify-between items-center text-[11px] text-[#5e5e63]">
+                        <span>
+                          Attended: <strong>{course.present_sessions}</strong> / {course.effective_sessions} classes
+                          {course.approved_absences_count > 0 && ` (${course.approved_absences_count} excused)`}
+                        </span>
+                        <span className="font-bold text-[#001e40] hover:underline flex items-center gap-1">
+                          Audit Sessions &rarr;
+                        </span>
+                      </div>
+
+                      {!isEligible && !isInsufficient && course.projected_classes_needed > 0 && (
+                        <div className="p-2 bg-amber-50 border border-amber-200 rounded-xl text-[11px] font-bold text-amber-900 flex items-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                          <span>Attend {course.projected_classes_needed} more consecutive classes to reach the 75% ELIGIBLE band.</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              ) : summary?.subjects && summary.subjects.length > 0 ? (
                 summary.subjects.map((subj: any, idx: number) => {
                   const pct = subj.percentage ?? 0;
                   const isGood = pct >= 75;
@@ -431,12 +692,23 @@ export const StudentPortal: React.FC = () => {
               )}
             </div>
 
-            <button 
-              onClick={() => setShowSubjectModal(false)}
-              className="w-full py-3 bg-[#001e40] text-white font-bold text-xs rounded-xl hover:bg-[#003366] transition-colors"
-            >
-              Close Breakdown
-            </button>
+            <div className="pt-2 flex gap-2">
+              <button 
+                onClick={() => {
+                  setShowSubjectModal(false);
+                  setIsRawAuditOpen(true);
+                }}
+                className="flex-1 py-2.5 bg-[#001e40] text-white font-bold text-xs rounded-xl hover:bg-[#003366] transition-colors flex items-center justify-center gap-1.5"
+              >
+                <ShieldCheck className="w-4 h-4 text-emerald-300" /> Full Audit Register
+              </button>
+              <button 
+                onClick={() => setShowSubjectModal(false)}
+                className="px-4 py-2.5 bg-[#F5F5F7] text-slate-700 font-bold text-xs rounded-xl hover:bg-slate-200 transition-colors"
+              >
+                Close
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -494,6 +766,16 @@ export const StudentPortal: React.FC = () => {
             }}
           />
         </React.Suspense>
+      )}
+
+      {/* Raw Session Audit Trail Modal */}
+      {profile?.roll_number && (
+        <RawSessionAuditModal
+          isOpen={isRawAuditOpen}
+          onClose={() => setIsRawAuditOpen(false)}
+          rollNumber={profile.roll_number}
+          initialCourseId={auditCourseId}
+        />
       )}
 
     </div>

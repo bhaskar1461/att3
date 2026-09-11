@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { X, Search, CheckCircle, UserCheck } from 'lucide-react';
 import { apiRequest } from '../services/api';
 import { StudentAttendanceStatus } from '../types';
+import { scannerTelemetry } from '../services/scannerTelemetry';
 
 interface ManualSearchModalProps {
   sessionId: number;
@@ -22,11 +23,24 @@ export const ManualSearchModal: React.FC<ManualSearchModalProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [periodCount, setPeriodCount] = useState<number>(initialPeriodCount || 4);
+  const hasSearchedRef = useRef(false);
 
   const filteredStudents = students.filter(s => 
     s.roll_number.toLowerCase().includes(searchTerm.toLowerCase()) ||
     s.name.toLowerCase().includes(searchTerm.toLowerCase())
   );
+
+  const handleSearchChange = (val: string) => {
+    setSearchTerm(val);
+    const trimmed = val.trim();
+    if (trimmed.length >= 2 && !hasSearchedRef.current) {
+      hasSearchedRef.current = true;
+      const qType: 'roll' | 'name' = /^[0-9A-Za-z]{2,10}$/.test(trimmed) && /\d/.test(trimmed) ? 'roll' : 'name';
+      scannerTelemetry.recordManualSearch(qType, String(sessionId));
+    } else if (trimmed.length === 0) {
+      hasSearchedRef.current = false;
+    }
+  };
 
   const handleMark = async (rollNumber: string, targetStatus: 'PRESENT' | 'ABSENT') => {
     setIsSubmitting(true);
@@ -41,6 +55,7 @@ export const ManualSearchModal: React.FC<ManualSearchModalProps> = ({
           period_count: periodCount
         })
       });
+      scannerTelemetry.recordManualMark('faculty_manual_override', String(sessionId));
       setMsg(`Updated ${rollNumber} (${targetStatus === 'PRESENT' ? periodCount + ' periods' : 'Absent'})`);
       onMarkSuccess();
     } catch (err: any) {
@@ -54,21 +69,18 @@ export const ManualSearchModal: React.FC<ManualSearchModalProps> = ({
     if (!filteredStudents.length) return;
     setIsSubmitting(true);
     setMsg(null);
-    let count = 0;
     try {
-      for (const s of filteredStudents) {
-        await apiRequest('/attendance/manual-mark', {
-          method: 'POST',
-          body: JSON.stringify({
-            session_id: sessionId,
-            roll_number: s.roll_number,
-            status: targetStatus,
-            period_count: periodCount
-          })
-        });
-        count++;
-      }
-      setMsg(`Marked ${count} students as ${targetStatus}`);
+      const rolls = filteredStudents.map(s => s.roll_number);
+      const res = await apiRequest(`/attendance/session/${sessionId}/batch-mark`, {
+        method: 'POST',
+        body: JSON.stringify({
+          status: targetStatus,
+          period_count: periodCount,
+          roll_numbers: rolls
+        })
+      });
+      scannerTelemetry.recordManualMark('faculty_batch_mark', String(sessionId));
+      setMsg((res as any)?.message || `Marked ${rolls.length} students as ${targetStatus}`);
       onMarkSuccess();
     } catch (err: any) {
       setMsg(err.message || 'Failed to update attendance');
@@ -118,7 +130,7 @@ export const ManualSearchModal: React.FC<ManualSearchModalProps> = ({
               type="text"
               placeholder="Search by Roll Number or Name..."
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => handleSearchChange(e.target.value)}
               className="w-full bg-slate-800/80 border border-slate-700 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-100 placeholder-slate-400 focus:outline-none focus:border-cyan-500"
             />
           </div>

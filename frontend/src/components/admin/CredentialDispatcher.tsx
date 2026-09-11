@@ -42,10 +42,44 @@ export const CredentialDispatcher: React.FC = () => {
 
   // Instant Login Recovery State (By Roll Number)
   const [recoveryRollNumber, setRecoveryRollNumber] = useState('');
+  const [recoveryEmail, setRecoveryEmail] = useState('');
   const [recoveryCustomPassword, setRecoveryCustomPassword] = useState('');
   const [recoveryLoading, setRecoveryLoading] = useState(false);
+  const [lookupLoading, setLookupLoading] = useState(false);
+  const [lookedUpStudent, setLookedUpStudent] = useState<{ name: string; dept: string } | null>(null);
   const [recoveryResult, setRecoveryResult] = useState<any>(null);
   const [copied, setCopied] = useState(false);
+  const [sendingEmail, setSendingEmail] = useState(false);
+  const [emailSentStatus, setEmailSentStatus] = useState<string | null>(null);
+
+  // Auto-fetch student details & current email when Roll Number is entered
+  useEffect(() => {
+    const roll = recoveryRollNumber.trim().toUpperCase();
+    if (roll.length < 5) {
+      setLookedUpStudent(null);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      setLookupLoading(true);
+      try {
+        const res: any = await apiRequest(`/admin/credentials/student-lookup/${encodeURIComponent(roll)}`);
+        if (res && res.status === 'SUCCESS') {
+          setLookedUpStudent({
+            name: res.name,
+            dept: `${res.department} (Sec ${res.section})`
+          });
+          if (res.email) {
+            setRecoveryEmail(res.email);
+          }
+        }
+      } catch {
+        setLookedUpStudent(null);
+      } finally {
+        setLookupLoading(false);
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [recoveryRollNumber]);
 
   const handleQuickReset = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -53,12 +87,14 @@ export const CredentialDispatcher: React.FC = () => {
     setRecoveryLoading(true);
     setRecoveryResult(null);
     setCopied(false);
+    setEmailSentStatus(null);
     try {
       const res: any = await apiRequest('/admin/credentials/quick-reset', {
         method: 'POST',
         body: JSON.stringify({
           roll_number: recoveryRollNumber.trim().toUpperCase(),
-          custom_password: recoveryCustomPassword.trim() || undefined
+          custom_password: recoveryCustomPassword.trim() || undefined,
+          email: recoveryEmail.trim() || undefined
         })
       });
       setRecoveryResult(res);
@@ -69,9 +105,31 @@ export const CredentialDispatcher: React.FC = () => {
     }
   };
 
+  const handleSendCredentialsEmail = async (roll: string) => {
+    setSendingEmail(true);
+    setEmailSentStatus(null);
+    try {
+      await apiRequest('/admin/credentials/dispatch', {
+        method: 'POST',
+        body: JSON.stringify({
+          sap_ids: [roll],
+          target_role: 'student',
+          dry_run: false
+        })
+      });
+      setEmailSentStatus('✓ Credentials email sent successfully!');
+    } catch (err: any) {
+      setEmailSentStatus(`Failed to send: ${err.message}`);
+    } finally {
+      setSendingEmail(false);
+    }
+  };
+
   const copyCredentials = () => {
     if (!recoveryResult) return;
-    const text = `SNIST Student Login Credentials:\nRoll Number: ${recoveryResult.roll_number}\nUsername: ${recoveryResult.username}\nPIN / Password: ${recoveryResult.temporary_password}\nPortal Link: ${window.location.origin}/login`;
+    const pin = recoveryResult.temporary_password || recoveryResult.temp_pin;
+    const emailStr = recoveryResult.email ? `\nRegistered Email: ${recoveryResult.email}` : '';
+    const text = `SNIST Student Login Credentials:\nRoll Number: ${recoveryResult.roll_number}\nUsername: ${recoveryResult.username || recoveryResult.roll_number}${emailStr}\nPIN / Password: ${pin}\nPortal Link: ${window.location.origin}/login`;
     navigator.clipboard.writeText(text);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
@@ -198,48 +256,79 @@ export const CredentialDispatcher: React.FC = () => {
         </div>
 
         <form onSubmit={handleQuickReset} className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
-          <div className="sm:col-span-5 space-y-1">
-            <label className="text-[10px] font-bold text-[#6a7894] uppercase tracking-wider">
-              Student Roll Number <span className="text-rose-500">*</span>
-            </label>
+          {/* Roll Number Input with Auto-Lookup Badge */}
+          <div className="sm:col-span-4 space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] font-bold text-[#6a7894] uppercase tracking-wider">
+                Student Roll Number <span className="text-rose-500">*</span>
+              </label>
+              {lookupLoading && <Loader2 className="w-3 h-3 text-indigo-600 animate-spin" />}
+              {!lookupLoading && lookedUpStudent && (
+                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200 truncate max-w-[140px]" title={lookedUpStudent.name}>
+                  {lookedUpStudent.name}
+                </span>
+              )}
+            </div>
             <input
               type="text"
               required
               value={recoveryRollNumber}
               onChange={e => setRecoveryRollNumber(e.target.value)}
               placeholder="e.g. 24311A6204"
-              className="w-full px-3.5 py-2.5 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold uppercase focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20 outline-none transition shadow-sm"
+              className="w-full px-3.5 py-2.5 bg-white border border-slate-300 rounded-xl text-xs font-mono font-bold uppercase focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20 outline-none transition shadow-sm h-11"
             />
           </div>
 
+          {/* Student Email: Displayed & Fully Editable */}
           <div className="sm:col-span-4 space-y-1">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] font-bold text-[#6a7894] uppercase tracking-wider">
+                Student Email (Editable)
+              </label>
+              <span className="text-[9px] text-slate-400 font-medium">Updates record</span>
+            </div>
+            <div className="relative rounded-xl bg-white border border-slate-300 focus-within:border-indigo-600 focus-within:ring-2 focus-within:ring-indigo-600/20 transition overflow-hidden flex items-center px-3 h-11 shadow-sm">
+              <Mail className="w-3.5 h-3.5 text-slate-400 mr-2 shrink-0" />
+              <input
+                type="email"
+                value={recoveryEmail}
+                onChange={e => setRecoveryEmail(e.target.value)}
+                placeholder="student@sreenidhi.edu.in"
+                className="w-full bg-transparent border-0 p-0 text-xs font-mono focus:ring-0 focus:outline-none text-slate-800"
+              />
+            </div>
+          </div>
+
+          {/* Custom PIN (Optional) */}
+          <div className="sm:col-span-2 space-y-1">
             <label className="text-[10px] font-bold text-[#6a7894] uppercase tracking-wider">
-              Custom PIN (Optional)
+              Custom PIN (Opt)
             </label>
             <input
               type="text"
               value={recoveryCustomPassword}
               onChange={e => setRecoveryCustomPassword(e.target.value)}
-              placeholder="Auto-generates 6-digit PIN"
-              className="w-full px-3.5 py-2.5 bg-white border border-slate-300 rounded-xl text-xs font-mono focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20 outline-none transition shadow-sm"
+              placeholder="Auto 6-digit"
+              className="w-full px-3 py-2.5 bg-white border border-slate-300 rounded-xl text-xs font-mono focus:border-indigo-600 focus:ring-2 focus:ring-indigo-600/20 outline-none transition shadow-sm h-11"
             />
           </div>
 
-          <div className="sm:col-span-3">
+          {/* Submit Button */}
+          <div className="sm:col-span-2">
             <button
               type="submit"
               disabled={recoveryLoading || !recoveryRollNumber.trim()}
-              className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 disabled:opacity-50 transition shadow-md"
+              className="w-full h-11 px-3 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold rounded-xl text-xs flex items-center justify-center gap-1.5 disabled:opacity-50 transition shadow-md"
             >
               {recoveryLoading ? (
                 <>
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  <span>Generating...</span>
+                  <span>Saving...</span>
                 </>
               ) : (
                 <>
                   <KeyRound className="w-3.5 h-3.5" />
-                  <span>Generate &amp; Unlock</span>
+                  <span>Unlock</span>
                 </>
               )}
             </button>
@@ -258,12 +347,14 @@ export const CredentialDispatcher: React.FC = () => {
               <div className="p-4 rounded-2xl bg-white border-2 border-emerald-300 shadow-sm space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-2.5">
                   <div className="flex items-center gap-2">
-                    <CheckCircle2 className="w-5 h-5 text-emerald-600" />
+                    <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
                     <div>
                       <h4 className="text-xs font-bold text-slate-900">
-                        {recoveryResult.student_name} ({recoveryResult.roll_number})
+                        {recoveryResult.student_name || recoveryResult.name} ({recoveryResult.roll_number})
                       </h4>
-                      <p className="text-[11px] text-slate-500 font-mono">{recoveryResult.email}</p>
+                      <p className="text-[11px] text-slate-500 font-mono">
+                        Registered Email: <span className="font-bold text-indigo-700">{recoveryResult.email || '(None)'}</span>
+                      </p>
                     </div>
                   </div>
                   <div className="flex items-center gap-1.5">
@@ -279,34 +370,52 @@ export const CredentialDispatcher: React.FC = () => {
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200/80">
                   <div>
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">
-                      Generated Student Password / PIN:
+                      Student Password / PIN:
                     </span>
                     <div className="flex items-center gap-2 mt-0.5">
                       <span className="text-lg font-mono font-extrabold text-indigo-700 tracking-wider bg-white px-3 py-1 rounded-lg border border-slate-200 shadow-inner">
-                        {recoveryResult.temporary_password}
+                        {recoveryResult.temporary_password || recoveryResult.temp_pin}
                       </span>
                       <span className="text-xs text-slate-500 font-mono">
-                        (Username: {recoveryResult.username})
+                        (Username: {recoveryResult.username || recoveryResult.roll_number})
                       </span>
                     </div>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={copyCredentials}
-                    className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm active:scale-95 ${
-                      copied
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200'
-                    }`}
-                  >
-                    {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copied ? 'Copied to Clipboard!' : 'Copy Credentials'}</span>
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={copyCredentials}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm active:scale-95 ${
+                        copied
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200'
+                      }`}
+                    >
+                      {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                      <span>{copied ? 'Copied!' : 'Copy'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleSendCredentialsEmail(recoveryResult.roll_number)}
+                      disabled={sendingEmail || !recoveryResult.email}
+                      className="px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm active:scale-95 bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50"
+                    >
+                      {sendingEmail ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+                      <span>Send Email</span>
+                    </button>
+                  </div>
                 </div>
 
+                {emailSentStatus && (
+                  <p className={`text-[11px] font-bold ${emailSentStatus.startsWith('✓') ? 'text-emerald-700' : 'text-rose-600'}`}>
+                    {emailSentStatus}
+                  </p>
+                )}
+
                 <p className="text-[11px] text-slate-600 leading-snug">
-                  Provide these credentials to the student. They can now immediately log in at <code className="bg-slate-100 px-1 py-0.5 rounded text-indigo-800 font-mono font-bold">/login</code> without any lockout.
+                  Provide these credentials to the student or click <strong>Send Email</strong>. The student can immediately log in at <code className="bg-slate-100 px-1 py-0.5 rounded text-indigo-800 font-mono font-bold">/login</code> without any lockout.
                 </p>
               </div>
             )}

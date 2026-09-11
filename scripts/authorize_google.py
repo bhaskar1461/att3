@@ -37,7 +37,7 @@ def main():
     with open(token_path2, 'wb') as f:
         pickle.dump(creds, f)
 
-    print("\n[✓] GOOGLE SIGN-IN SUCCESSFUL!")
+    print("\n[OK] GOOGLE SIGN-IN SUCCESSFUL!")
     print("[*] Creating Google Sheet and populating 10 students...")
 
     from scripts.export_students_to_gsheet import main as export_main

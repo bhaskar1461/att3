@@ -149,6 +149,25 @@ class ManualMarkRequest(BaseModel):
     status: str # PRESENT or ABSENT
     period_count: Optional[int] = None
 
+class SessionBatchMarkRequest(BaseModel):
+    status: str # PRESENT or ABSENT
+    period_count: Optional[int] = 4
+    roll_numbers: Optional[List[str]] = None
+
+class AdminDailyMarkRequest(BaseModel):
+    date: str  # YYYY-MM-DD
+    section_id: int
+    roll_number: str
+    status: str  # PRESENT, ABSENT, UNMARKED
+    period_count: Optional[int] = 4
+
+class AdminBatchDailyMarkRequest(BaseModel):
+    date: str  # YYYY-MM-DD
+    section_id: int
+    status: str  # PRESENT, ABSENT
+    period_count: Optional[int] = 4
+    roll_numbers: Optional[List[str]] = None
+
 def _async_post_scan_tasks(
     roll_number: str,
     date_formatted: str,
@@ -162,8 +181,20 @@ def _async_post_scan_tasks(
     gs_id: str,
     period_count: Any = 4
 ):
+    clean_p = str(period_count).strip().upper()
+    if clean_p in ["A", "ABSENT"]:
+        status_str = "A"
+        p_total_str = "4"
+    else:
+        try:
+            val = max(1, min(8, int(clean_p)))
+            status_str = str(val)
+            p_total_str = str(val)
+        except Exception:
+            status_str = "4"
+            p_total_str = "4"
+
     master_excel_path = os.path.join(settings.MASTER_TEMPLATE_DIR, "Official_Attendance_Register.xlsx")
-    status_str = str(period_count)
     if os.path.exists(master_excel_path):
         try:
             ExcelAttendanceService.record_attendance_in_excel(
@@ -185,10 +216,17 @@ def _async_post_scan_tasks(
                 roll_number=roll_number,
                 date_str=date_formatted,
                 status_code=status_str,
-                period_total="4"
+                period_total=p_total_str
             )
         except Exception as ex:
             print(f"GSheets Sync Warning: {str(ex)}")
+
+    # Invalidate JNTUH R25 percentage engine cache off the critical scan path
+    try:
+        from app.services.attendance_engine import invalidate_attendance_cache
+        invalidate_attendance_cache()
+    except Exception as inv_err:
+        pass
 
 def _get_effective_gsheet_id(db: Session, session: Optional[AttendanceSession]) -> str:
     try:
@@ -409,6 +447,11 @@ def process_qr_scan(
         )
         db.add(new_record)
     db.commit()
+    try:
+        from app.services.attendance_engine import invalidate_attendance_cache
+        invalidate_attendance_cache(student_id=student.id, course_id=session_meta.get("subject_id"))
+    except Exception:
+        pass
 
     # 9. Queue Excel & GSheets async background updates
     gs_id = session_meta["teacher_gsheet_id"]
@@ -653,6 +696,11 @@ def process_batch_qr_scan(
 
     # Step 6: Atomic commit for the entire batch
     db.commit()
+    try:
+        from app.services.attendance_engine import invalidate_attendance_cache
+        invalidate_attendance_cache(course_id=session_meta.get("subject_id"))
+    except Exception:
+        pass
 
     return {
         "status": "SUCCESS",
@@ -688,10 +736,12 @@ def manual_mark_attendance(
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
 
-    existing = db.query(AttendanceRecord).filter(
+    existing_recs = db.query(AttendanceRecord).filter(
         AttendanceRecord.session_id == req.session_id,
-        AttendanceRecord.student_id == student.id
-    ).first()
+        (AttendanceRecord.student_id == student.id) | (AttendanceRecord.roll_number == student.roll_number)
+    ).order_by(AttendanceRecord.id.desc()).all()
+
+    existing = existing_recs[0] if existing_recs else None
 
     status_enum = AttendanceStatus.PRESENT if req.status.upper() in ["PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"] else AttendanceStatus.ABSENT
 
@@ -711,6 +761,8 @@ def manual_mark_attendance(
     if existing:
         existing.status = status_enum
         existing.period_count = record_period_count
+        for dup in existing_recs[1:]:
+            db.delete(dup)
     else:
         new_record = AttendanceRecord(
             session_id=req.session_id,
@@ -736,7 +788,12 @@ def manual_mark_attendance(
     db.commit()
 
     # Queue Google Sheets & Master Excel background updates
-    date_formatted = datetime.now().strftime("%d/%m/%Y")
+    try:
+        from datetime import datetime as dt
+        d_obj = dt.strptime(str(session.session_date).strip(), "%Y-%m-%d")
+        date_formatted = d_obj.strftime("%d/%m/%Y")
+    except Exception:
+        date_formatted = str(session.session_date).strip() or datetime.now().strftime("%d/%m/%Y")
 
     gs_id = _get_effective_gsheet_id(db, session)
 
@@ -756,6 +813,166 @@ def manual_mark_attendance(
     )
 
     return {"status": "SUCCESS", "message": f"Updated {student.name} ({student.roll_number}) to {status_code}"}
+
+@router.post("/session/{session_id}/batch-mark")
+def batch_mark_session_attendance(
+    session_id: int,
+    req: SessionBatchMarkRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Atomically updates attendance for all students (or specified roll numbers) in a session.
+    Executes in a single DB transaction and queues a single atomic Google Sheet session sync,
+    preventing HTTP 429 quota exhaustion and N+1 round trips.
+    """
+    session = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.status == SessionStatus.LOCKED:
+        raise HTTPException(status_code=400, detail="Session is locked")
+
+    if current_user.role not in [UserRole.TEACHER, UserRole.SUPER_ADMIN]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only faculty members or administrators are authorized to mark attendance."
+        )
+
+    if current_user.role == UserRole.TEACHER:
+        if not current_user.teacher_profile or session.teacher_id != current_user.teacher_profile.id:
+            raise HTTPException(status_code=403, detail="Not authorized to edit attendance for this session")
+
+    # Fetch all students belonging to the session's section
+    all_students = db.query(Student).filter(Student.section_id == session.section_id).all()
+    all_rolls = [s.roll_number for s in all_students]
+    student_map = {s.roll_number.upper(): s for s in all_students}
+
+    target_rolls = [r.strip().upper() for r in req.roll_numbers] if req.roll_numbers else list(student_map.keys())
+
+    is_present = req.status.strip().upper() in ["PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"]
+    from app.api.teacher import _extract_period_count
+    session_periods = _extract_period_count(session.period)
+    effective_periods = req.period_count if req.period_count is not None else session_periods
+    p_count = max(1, min(8, effective_periods)) if is_present else 0
+    status_enum = AttendanceStatus.PRESENT if is_present else AttendanceStatus.ABSENT
+
+    # Fetch existing records for this session and group by roll number
+    existing_records = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == session_id
+    ).all()
+    from collections import defaultdict
+    records_by_roll = defaultdict(list)
+    for r in existing_records:
+        records_by_roll[r.roll_number.strip().upper()].append(r)
+
+    now = datetime.utcnow()
+    for roll in target_rolls:
+        st = student_map.get(roll)
+        if not st:
+            continue
+        recs = records_by_roll.get(roll, [])
+        if recs:
+            primary = recs[0]
+            primary.status = status_enum
+            primary.period_count = p_count
+            primary.scanned_at = now
+            for dup in recs[1:]:
+                db.delete(dup)
+        else:
+            new_rec = AttendanceRecord(
+                session_id=session_id,
+                student_id=st.id,
+                roll_number=st.roll_number,
+                session_date=session.session_date,
+                status=status_enum,
+                period_count=p_count,
+                scan_mode="MANUAL",
+                scanned_at=now
+            )
+            db.add(new_rec)
+            records_by_roll[roll] = [new_rec]
+
+    from app.core.device_security import log_security_audit_event, SecurityEventType
+    log_security_audit_event(
+        db=db,
+        event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
+        action="BATCH_SESSION_MARK",
+        details=f"User {current_user.username} batch marked {len(target_rolls)} students as {req.status.upper()} ({p_count} periods) for session {session.id} ({session.session_date})",
+        user_id=current_user.id
+    )
+    db.commit()
+    try:
+        from app.services.attendance_engine import invalidate_attendance_cache
+        invalidate_attendance_cache(course_id=session.subject_id)
+    except Exception:
+        pass
+
+    # Determine present rolls across the section for this session
+    all_current_records = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == session_id
+    ).all()
+    present_rolls = [
+        r.roll_number for r in all_current_records
+        if getattr(r.status, "value", str(r.status)).upper() in ["PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"]
+    ]
+
+    # Trigger single atomic batch sync to Google Sheets and Excel in background
+    gs_id = _get_effective_gsheet_id(db, session)
+    if gs_id:
+        def _bg_sync(gs_spreadsheet_id, s_date, p_rolls, a_rolls, p_total):
+            try:
+                creds_file = settings.GOOGLE_CREDENTIALS_FILE or os.path.join(settings.BACKEND_DIR, "credentials.json")
+                GoogleSheetsService.sync_session_to_gsheet(
+                    credentials_json=creds_file,
+                    spreadsheet_id=gs_spreadsheet_id,
+                    date_str=s_date,
+                    present_rolls=p_rolls,
+                    all_section_rolls=a_rolls,
+                    period_total=str(p_total)
+                )
+            except Exception as gs_err:
+                print(f"Batch mark Google Sheets sync error: {gs_err}")
+
+            try:
+                master_excel = os.path.join(settings.MASTER_TEMPLATE_DIR, "Official_Attendance_Register.xlsx")
+                if os.path.exists(master_excel):
+                    from datetime import datetime as dt
+                    try:
+                        d_obj = dt.strptime(s_date, "%Y-%m-%d")
+                        d_formatted = d_obj.strftime("%d/%m/%Y")
+                    except Exception:
+                        d_formatted = s_date
+                    for r_num in a_rolls:
+                        status_val = str(p_total) if r_num in p_rolls else "A"
+                        ExcelAttendanceService.record_attendance_in_excel(
+                            file_path=master_excel,
+                            roll_number=r_num,
+                            date_str=d_formatted,
+                            status_code=status_val,
+                            overwrite=True
+                        )
+            except Exception as ex_err:
+                print(f"Batch mark Excel sync error: {ex_err}")
+
+        p_total_sync = max(1, min(8, effective_periods))
+        background_tasks.add_task(
+            _bg_sync,
+            gs_id,
+            session.session_date,
+            present_rolls,
+            all_rolls,
+            p_total_sync
+        )
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Successfully marked {len(target_rolls)} students as {req.status.upper()}",
+        "session_id": session_id,
+        "marked_count": len(target_rolls),
+        "present_count": len(present_rolls),
+        "absent_count": len(all_rolls) - len(present_rolls)
+    }
 
 @router.post("/manual", include_in_schema=False)
 def manual_mark_attendance_alias(
@@ -778,6 +995,11 @@ def mark_all_students_absent(db: Session = Depends(get_db), current_user: User =
     )
     db.query(AttendanceRecord).update({AttendanceRecord.status: AttendanceStatus.ABSENT})
     db.commit()
+    try:
+        from app.services.attendance_engine import invalidate_attendance_cache
+        invalidate_attendance_cache()
+    except Exception:
+        pass
 
     gs_id_setting = db.query(SystemSettings).filter(SystemSettings.key == "GOOGLE_SPREADSHEET_ID").first()
     gs_id = gs_id_setting.value if gs_id_setting else settings.GOOGLE_SPREADSHEET_ID
@@ -793,3 +1015,369 @@ def mark_all_students_absent(db: Session = Depends(get_db), current_user: User =
             print(f"GSheets Mark All Absent Error: {str(ex)}")
 
     return {"status": "SUCCESS", "message": "All students marked as ABSENT across system and Google Sheets"}
+
+
+# =========================================================================
+# WEEKLY CALENDAR & ADMIN DAILY ATTENDANCE REGISTER
+# =========================================================================
+
+def _get_or_create_admin_session(
+    db: Session,
+    section_id: int,
+    session_date: str,
+    period_count: int = 4,
+    admin_user: Optional[User] = None
+) -> AttendanceSession:
+    """Finds or auto-provisions an AttendanceSession for (section_id, session_date)."""
+    session = db.query(AttendanceSession).filter(
+        AttendanceSession.section_id == section_id,
+        AttendanceSession.session_date == session_date
+    ).order_by(AttendanceSession.id.desc()).first()
+    if session:
+        return session
+
+    from app.models.models import TeacherAssignment, Subject
+    assignment = db.query(TeacherAssignment).filter(
+        TeacherAssignment.section_id == section_id
+    ).first()
+
+    teacher_id = assignment.teacher_id if assignment else None
+    subject_id = assignment.subject_id if assignment else None
+
+    if not teacher_id:
+        teacher = db.query(Teacher).first()
+        teacher_id = teacher.id if teacher else 1
+    if not subject_id:
+        subject = db.query(Subject).first()
+        subject_id = subject.id if subject else 1
+
+    p_count = max(1, min(8, period_count))
+    period_label = f"Period 1-{p_count} ({p_count} Periods)" if p_count > 1 else "Period 1 (1 Period)"
+
+    new_session = AttendanceSession(
+        teacher_id=teacher_id,
+        subject_id=subject_id,
+        section_id=section_id,
+        period=period_label,
+        session_date=session_date,
+        status=SessionStatus.OPEN
+    )
+    db.add(new_session)
+    db.commit()
+    db.refresh(new_session)
+    return new_session
+
+
+@router.get("/admin/daily-sheet")
+def get_admin_daily_sheet(
+    date: Optional[str] = None,
+    section_id: Optional[int] = 1,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """
+    Fetches the full student attendance sheet for a given section on a specific date (YYYY-MM-DD),
+    plus a 6-day (Monday to Saturday) overview of the academic week for the calendar bar.
+    """
+    from app.core.security import get_server_ist_date
+    from datetime import datetime as dt, timedelta
+
+    target_date = (date or "").strip() or get_server_ist_date()
+
+    section = db.query(Section).filter(Section.id == section_id).first()
+    if not section:
+        section = db.query(Section).first()
+        if not section:
+            raise HTTPException(status_code=404, detail="No sections found in system")
+        section_id = section.id
+
+    students = db.query(Student).filter(
+        Student.section_id == section_id
+    ).order_by(Student.roll_number).all()
+
+    session = db.query(AttendanceSession).filter(
+        AttendanceSession.section_id == section_id,
+        AttendanceSession.session_date == target_date
+    ).order_by(AttendanceSession.id.desc()).first()
+
+    records_by_student_id = {}
+    records_by_roll = {}
+    if session:
+        records = db.query(AttendanceRecord).filter(
+            AttendanceRecord.session_id == session.id
+        ).all()
+        for r in records:
+            records_by_student_id[r.student_id] = r
+            records_by_roll[r.roll_number.upper()] = r
+
+    student_list = []
+    present_cnt = 0
+    absent_cnt = 0
+    unmarked_cnt = 0
+
+    for s in students:
+        rec = records_by_student_id.get(s.id) or records_by_roll.get(s.roll_number.upper())
+        if rec:
+            st_val = rec.status.value if hasattr(rec.status, "value") else str(rec.status)
+            if st_val in ["PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"]:
+                status_str = "PRESENT"
+                p_count = rec.period_count or 4
+                present_cnt += 1
+            else:
+                status_str = "ABSENT"
+                p_count = 0
+                absent_cnt += 1
+            scan_mode = rec.scan_mode
+            scanned_at = rec.scanned_at.strftime("%H:%M:%S") if rec.scanned_at else None
+        else:
+            status_str = "UNMARKED"
+            p_count = 0
+            unmarked_cnt += 1
+            scan_mode = None
+            scanned_at = None
+
+        student_list.append({
+            "student_id": s.id,
+            "roll_number": s.roll_number,
+            "name": s.name,
+            "email": s.email,
+            "status": status_str,
+            "period_count": p_count,
+            "scan_mode": scan_mode,
+            "scanned_at": scanned_at
+        })
+
+    # Compute academic week (Monday through Saturday) for the week containing target_date
+    try:
+        curr_d = dt.strptime(target_date, "%Y-%m-%d").date()
+    except Exception:
+        curr_d = dt.strptime(get_server_ist_date(), "%Y-%m-%d").date()
+
+    # Monday is weekday 0, Saturday is weekday 5
+    monday_d = curr_d - timedelta(days=curr_d.weekday())
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    week_days = []
+
+    for i in range(6):
+        d_i = monday_d + timedelta(days=i)
+        d_str = d_i.strftime("%Y-%m-%d")
+        s_i = db.query(AttendanceSession).filter(
+            AttendanceSession.section_id == section_id,
+            AttendanceSession.session_date == d_str
+        ).first()
+        p_c = 0
+        a_c = 0
+        if s_i:
+            recs_i = db.query(AttendanceRecord).filter(AttendanceRecord.session_id == s_i.id).all()
+            for r in recs_i:
+                st = r.status.value if hasattr(r.status, "value") else str(r.status)
+                if st in ["PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"]:
+                    p_c += 1
+                else:
+                    a_c += 1
+        week_days.append({
+            "date": d_str,
+            "day_name": day_names[i],
+            "day_num": d_i.strftime("%d %b"),
+            "is_selected": (d_str == target_date),
+            "present_count": p_c,
+            "absent_count": a_c,
+            "total_students": len(students),
+            "has_session": s_i is not None
+        })
+
+    return {
+        "date": target_date,
+        "section_id": section.id,
+        "section_name": section.name,
+        "department_name": section.department.name if section.department else "",
+        "session_id": session.id if session else None,
+        "total_students": len(students),
+        "present_count": present_cnt,
+        "absent_count": absent_cnt,
+        "unmarked_count": unmarked_cnt,
+        "students": student_list,
+        "week_days": week_days
+    }
+
+
+@router.post("/admin/mark-daily")
+def mark_admin_daily_attendance(
+    req: AdminDailyMarkRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Marks a single student's attendance on a specific day (Monday to Saturday)."""
+    student = db.query(Student).filter(
+        (Student.roll_number == req.roll_number.strip().upper()) &
+        (Student.section_id == req.section_id)
+    ).first()
+    if not student:
+        student = db.query(Student).filter(
+            Student.roll_number == req.roll_number.strip().upper()
+        ).first()
+    if not student:
+        raise HTTPException(status_code=404, detail=f"Student {req.roll_number} not found")
+
+    status_req = req.status.strip().upper()
+    session = _get_or_create_admin_session(db, req.section_id, req.date, req.period_count or 4, current_user)
+
+    existing_recs = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == session.id,
+        (AttendanceRecord.student_id == student.id) | (AttendanceRecord.roll_number == student.roll_number)
+    ).order_by(AttendanceRecord.id.desc()).all()
+
+    existing = existing_recs[0] if existing_recs else None
+
+    if status_req == "UNMARKED":
+        for r in existing_recs:
+            db.delete(r)
+        db.commit()
+        try:
+            from app.services.attendance_engine import invalidate_attendance_cache
+            invalidate_attendance_cache(student_id=student.id, course_id=session.subject_id if session else None)
+        except Exception:
+            pass
+        return {
+            "status": "SUCCESS",
+            "message": f"Cleared attendance for {student.name} ({student.roll_number}) on {req.date}",
+            "student_status": "UNMARKED",
+            "period_count": 0
+        }
+
+    is_present = status_req in ["PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"]
+    p_count = max(1, min(8, req.period_count or 4)) if is_present else 0
+    status_enum = AttendanceStatus.PRESENT if is_present else AttendanceStatus.ABSENT
+
+    now = datetime.utcnow()
+    if existing:
+        existing.status = status_enum
+        existing.period_count = p_count
+        existing.scan_mode = "ADMIN_CALENDAR"
+        existing.scanned_at = now
+        for dup in existing_recs[1:]:
+            db.delete(dup)
+    else:
+        new_rec = AttendanceRecord(
+            session_id=session.id,
+            student_id=student.id,
+            roll_number=student.roll_number,
+            session_date=session.session_date,
+            status=status_enum,
+            period_count=p_count,
+            scan_mode="ADMIN_CALENDAR",
+            scanned_at=now
+        )
+        db.add(new_rec)
+
+    from app.core.device_security import log_security_audit_event, SecurityEventType
+    log_security_audit_event(
+        db=db,
+        event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
+        action="ADMIN_CALENDAR_MARK",
+        details=f"Admin {current_user.username} marked {student.roll_number} as {status_enum.value} ({p_count} periods) on {req.date}",
+        user_id=current_user.id,
+        roll_number=student.roll_number
+    )
+    db.commit()
+    try:
+        from app.services.attendance_engine import invalidate_attendance_cache
+        invalidate_attendance_cache(student_id=student.id, course_id=session.subject_id if session else None)
+    except Exception:
+        pass
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Marked {student.name} ({student.roll_number}) as {status_enum.value} ({p_count} periods)",
+        "student_status": "PRESENT" if is_present else "ABSENT",
+        "period_count": p_count
+    }
+
+
+@router.post("/admin/batch-mark-daily")
+def batch_mark_admin_daily_attendance(
+    req: AdminBatchDailyMarkRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """Batch marks all or specified students as Present/Absent for a specific day."""
+    session = _get_or_create_admin_session(db, req.section_id, req.date, req.period_count or 4, current_user)
+
+    all_students = db.query(Student).filter(
+        Student.section_id == req.section_id
+    ).all()
+    student_map = {s.roll_number.upper(): s for s in all_students}
+
+    target_rolls = [r.strip().upper() for r in req.roll_numbers] if req.roll_numbers else list(student_map.keys())
+
+    is_present = req.status.strip().upper() in ["PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"]
+    p_count = max(1, min(8, req.period_count or 4)) if is_present else 0
+    status_enum = AttendanceStatus.PRESENT if is_present else AttendanceStatus.ABSENT
+
+    existing_records = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == session.id
+    ).all()
+    from collections import defaultdict
+    records_by_roll = defaultdict(list)
+    for r in existing_records:
+        records_by_roll[r.roll_number.strip().upper()].append(r)
+
+    now = datetime.utcnow()
+    for roll in target_rolls:
+        st = student_map.get(roll)
+        if not st:
+            continue
+        recs = records_by_roll.get(roll, [])
+        if recs:
+            primary = recs[0]
+            primary.status = status_enum
+            primary.period_count = p_count
+            primary.scan_mode = "ADMIN_CALENDAR"
+            primary.scanned_at = now
+            for dup in recs[1:]:
+                db.delete(dup)
+        else:
+            new_rec = AttendanceRecord(
+                session_id=session.id,
+                student_id=st.id,
+                roll_number=st.roll_number,
+                session_date=session.session_date,
+                status=status_enum,
+                period_count=p_count,
+                scan_mode="ADMIN_CALENDAR",
+                scanned_at=now
+            )
+            db.add(new_rec)
+            records_by_roll[roll] = [new_rec]
+
+    from app.core.device_security import log_security_audit_event, SecurityEventType
+    log_security_audit_event(
+        db=db,
+        event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
+        action="ADMIN_BATCH_CALENDAR_MARK",
+        details=f"Admin {current_user.username} batch marked {len(target_rolls)} students as {req.status.upper()} ({p_count} periods) on {req.date}",
+        user_id=current_user.id
+    )
+    db.commit()
+    try:
+        from app.services.attendance_engine import invalidate_attendance_cache
+        invalidate_attendance_cache(course_id=session.subject_id if session else None)
+    except Exception:
+        pass
+
+    present_count = len(target_rolls) if is_present else 0
+    absent_count = 0 if is_present else len(target_rolls)
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Successfully marked {len(target_rolls)} students as {req.status.upper()}",
+        "date": req.date,
+        "section_id": req.section_id,
+        "total_students": len(all_students),
+        "marked_count": len(target_rolls),
+        "present_count": present_count,
+        "absent_count": absent_count
+    }
+

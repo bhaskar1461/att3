@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SNIST ERP — Operational Security Alert</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Helvetica, Arial, sans-serif; background-color: #0f172a; color: #f8fafc;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="max-width: 640px; margin: 24px auto; background-color: #1e293b; border-radius: 12px; overflow: hidden; border: 1px solid #334155; box-shadow: 0 10px 25px rgba(0,0,0,0.5);">
+        <!-- Severity Header -->
+        <tr>
+            <td style="background: {% if severity == 'CRITICAL' %}linear-gradient(135deg, #7f1d1d 0%, #dc2626 100%){% elif severity == 'HIGH' %}linear-gradient(135deg, #7c2d12 0%, #ea580c 100%){% else %}linear-gradient(135deg, #713f12 0%, #d97706 100%){% endif %}; padding: 24px 28px;">
+                <table width="100%" cellpadding="0" cellspacing="0">
+                    <tr>
+                        <td>
+                            <span style="display: inline-block; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,255,255,0.4); padding: 4px 12px; border-radius: 16px; font-size: 11px; font-weight: 800; letter-spacing: 1.5px; color: #ffffff;">
+                                {{ severity }} ALERT
+                            </span>
+                            <h1 style="margin: 10px 0 0; color: #ffffff; font-size: 20px; font-weight: 800; letter-spacing: 0.5px;">
+                                {{ event_title }}
+                            </h1>
+                        </td>
+                        <td align="right" valign="top" style="color: rgba(255,255,255,0.8); font-size: 12px; font-family: monospace;">
+                            {{ timestamp_ist }} IST
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+
+        <!-- Alert Core Details -->
+        <tr>
+            <td style="padding: 28px;">
+                <!-- Telemetry Key Metrics Box -->
+                <table width="100%" cellpadding="0" cellspacing="0" style="background: #0f172a; border-radius: 8px; border: 1px solid #334155; margin-bottom: 24px;">
+                    <tr>
+                        <td style="padding: 16px 20px;">
+                            <table width="100%" cellpadding="6" cellspacing="0" style="font-size: 13px;">
+                                <tr>
+                                    <td width="32%" style="color: #94a3b8; font-weight: 600;">Event Type:</td>
+                                    <td style="color: #f8fafc; font-family: monospace; font-weight: 700;">{{ event_type }}</td>
+                                </tr>
+                                <tr>
+                                    <td style="color: #94a3b8; font-weight: 600;">Target Subject:</td>
+                                    <td style="color: #38bdf8; font-family: monospace; font-weight: 700;">{{ subject_id or "N/A" }}</td>
+                                </tr>
+                                <tr>
+                                    <td style="color: #94a3b8; font-weight: 600;">Source / Device:</td>
+                                    <td style="color: #f8fafc; font-family: monospace;">{{ source_id or "N/A" }}</td>
+                                </tr>
+                                <tr>
+                                    <td style="color: #94a3b8; font-weight: 600;">Threshold Trigger:</td>
+                                    <td style="color: #fbbf24; font-weight: 700;">{{ trigger_reason }}</td>
+                                </tr>
+                                {% if client_ip %}
+                                <tr>
+                                    <td style="color: #94a3b8; font-weight: 600;">Client IP:</td>
+                                    <td style="color: #cbd5e1; font-family: monospace;">{{ client_ip }}</td>
+                                </tr>
+                                {% endif %}
+                                {% if audit_id %}
+                                <tr>
+                                    <td style="color: #94a3b8; font-weight: 600;">Audit Log ID:</td>
+                                    <td style="color: #cbd5e1; font-family: monospace;">#{{ audit_id }}</td>
+                                </tr>
+                                {% endif %}
+                            </table>
+                        </td>
+                    </tr>
+                </table>
+
+                <!-- Incident Details Narrative -->
+                <div style="margin-bottom: 24px;">
+                    <p style="margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #94a3b8; font-weight: 700;">
+                        Incident Diagnostic Summary
+                    </p>
+                    <div style="background: #1e293b; border-left: 3px solid #38bdf8; padding: 12px 16px; border-radius: 0 6px 6px 0; font-size: 13px; line-height: 1.6; color: #e2e8f0; font-family: monospace; word-break: break-all;">
+                        {{ details }}
+                    </div>
+                </div>
+
+                <!-- Recommended Operator Action -->
+                <div style="background: rgba(30, 41, 59, 0.7); border: 1px solid #475569; border-radius: 8px; padding: 16px 18px; margin-bottom: 28px;">
+                    <p style="margin: 0 0 6px; font-size: 12px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">
+                        🎯 Recommended Operator Action
+                    </p>
+                    <p style="margin: 0; font-size: 13px; line-height: 1.5; color: #cbd5e1;">
+                        {{ recommended_action }}
+                    </p>
+                </div>
+
+                <!-- Action Button -->
+                <div style="text-align: center; margin-bottom: 8px;">
+                    <a href="{{ admin_url or 'https://ather-os.de5.net/admin' }}" style="display: inline-block; background: #3b82f6; color: #ffffff; text-decoration: none; padding: 12px 28px; border-radius: 6px; font-size: 13px; font-weight: 700; letter-spacing: 0.5px;">
+                        OPEN ADMIN AUDIT DASHBOARD &rarr;
+                    </a>
+                </div>
+            </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+            <td style="background: #0f172a; padding: 16px 28px; border-top: 1px solid #334155; text-align: center;">
+                <p style="margin: 0; color: #64748b; font-size: 11px;">
+                    SNIST ERP Real-Time Automated Security Alerting System &bull; Cooldown: 10m per subject
+                </p>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>

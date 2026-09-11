@@ -141,14 +141,48 @@ def dispatch_credentials(
                 errors.append({"sap_id": sap_id, "error": "No email address found"})
                 continue
 
-            # Generate temp password
+            # Generate temp password and 1-click magic link
             temp_password = _generate_temp_password()
             temp_hash = get_password_hash(temp_password)
 
-            # Update User record if exists
+            from app.core.security import create_magic_login_token
+            frontend_url = settings.FRONTEND_URL or "https://ather-os.de5.net"
+            magic_token = create_magic_login_token(username=sap_id, role=req.target_role.upper(), expires_days=7)
+            magic_link = f"{frontend_url}/login?magic_token={magic_token}"
+
+            # Update User record if exists, or auto-provision if missing
             if user:
                 user.password_hash = temp_hash
-                user.must_change_password = True
+                user.must_change_password = False
+                user.is_active = True
+            elif req.target_role == "student":
+                user = User(
+                    username=sap_id,
+                    email=email,
+                    password_hash=temp_hash,
+                    role=UserRole.STUDENT,
+                    is_active=True,
+                    must_change_password=False
+                )
+                db.add(user)
+                db.flush()
+            elif req.target_role == "teacher":
+                user = User(
+                    username=sap_id.lower(),
+                    email=email,
+                    password_hash=temp_hash,
+                    role=UserRole.TEACHER,
+                    is_active=True,
+                    must_change_password=False
+                )
+                db.add(user)
+                db.flush()
+
+            # Always sync StudentOnboarding pin_hash and mark activated
+            if onboarding:
+                onboarding.pin_hash = temp_hash
+                onboarding.state = OnboardingState.ACTIVATED
+                onboarding.activated_at = now
 
             # Create credential item record
             item = CredentialItem(
@@ -167,6 +201,9 @@ def dispatch_credentials(
                 "name": name,
                 "email": email,
                 "temp_password": temp_password,
+                "password": temp_password,
+                "magic_link": magic_link,
+                "portal_url": f"{frontend_url}/login",
                 "role": req.target_role,
                 "cc_email": None,
             })
@@ -424,6 +461,44 @@ def preview_credential_template(
 
 class QuickResetCredentialsRequest(BaseModel):
     roll_number: str = Field(..., min_length=2, description="Student roll number or SAP ID")
+    custom_password: Optional[str] = Field(None, description="Optional custom PIN or password")
+    email: Optional[str] = Field(None, description="Optional updated student email address")
+
+
+@router.get("/student-lookup/{roll_number}")
+def lookup_student_for_recovery(
+    roll_number: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """
+    Look up student name, department, section, and current registered email by roll number.
+    Used by admin credential recovery UI to display and allow editing student email.
+    """
+    clean_roll = roll_number.strip().upper()
+    from sqlalchemy import func
+
+    student = db.query(Student).filter(
+        func.upper(Student.roll_number) == clean_roll
+    ).first()
+
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with roll number '{clean_roll}' not found in college database."
+        )
+
+    dept_name = student.department.name if (student.department and hasattr(student.department, 'name')) else "CSE-CS"
+    sec_name = student.section.name if (student.section and hasattr(student.section, 'name')) else "A"
+
+    return {
+        "status": "SUCCESS",
+        "roll_number": student.roll_number,
+        "name": student.name,
+        "email": student.email or "",
+        "department": dept_name,
+        "section": sec_name,
+    }
 
 
 @router.post("/quick-reset")
@@ -435,8 +510,9 @@ def quick_reset_student_credentials(
     """
     Admin Fallback: Quick Reset / Create Credentials for Student by Roll Number.
     - Resolves Student record
+    - Updates student email across tables if edited by admin
     - Provisions or updates User record
-    - Generates fresh 6-digit numeric PIN / password
+    - Generates fresh 6-digit numeric PIN / password (or applies custom password)
     - Clears active device binding attempt locks
     - Synchronizes StudentOnboarding pin_hash and activation state
     - Logs audit event
@@ -458,12 +534,20 @@ def quick_reset_student_credentials(
             detail=f"Student with roll number '{clean_roll}' not found in college database."
         )
 
+    # 0. Update Student Email if provided and valid
+    if req.email and req.email.strip():
+        new_email = req.email.strip().lower()
+        student.email = new_email
+
     # 1. Resolve or provision User record
     user = db.query(User).filter(func.upper(User.username) == clean_roll).first()
 
-    # Generate 6-digit numeric PIN
-    import secrets
-    temp_pin = f"{secrets.randbelow(900000) + 100000}"
+    # Generate or apply custom PIN
+    if req.custom_password and req.custom_password.strip():
+        temp_pin = req.custom_password.strip()
+    else:
+        import secrets
+        temp_pin = f"{secrets.randbelow(900000) + 100000}"
     pin_hash = get_password_hash(temp_pin)
 
     if not user:
@@ -481,6 +565,8 @@ def quick_reset_student_credentials(
         user.password_hash = pin_hash
         user.is_active = True
         user.must_change_password = False
+        if req.email and req.email.strip():
+            user.email = req.email.strip().lower()
 
     student.user_id = user.id
 
@@ -492,15 +578,20 @@ def quick_reset_student_credentials(
         onboarding_rec.pin_hash = pin_hash
         onboarding_rec.state = OnboardingState.ACTIVATED
         onboarding_rec.activated_at = get_server_ist_datetime().replace(tzinfo=None)
+        if req.email and req.email.strip():
+            onboarding_rec.email = req.email.strip().lower()
 
-    # 3. Clear/Reset active device lockouts for this roll number
+    # 3. Clear/Reset active device lockouts and reset registered device for this roll number
+    student.registered_device_id = None
     active_bindings = db.query(DeviceAccountBinding).filter(
         DeviceAccountBinding.roll_number == clean_roll,
         DeviceAccountBinding.status == BindingStatus.ACTIVE
     ).all()
     for b in active_bindings:
-        b.attempt_count = 0  # Reset counter
-        b.expires_at = datetime.utcnow() + timedelta(minutes=30)
+        b.status = BindingStatus.EXPIRED
+
+    from app.api.auth import failed_login_limiter
+    failed_login_limiter.record_success(None, clean_roll)
 
     db.commit()
 
@@ -511,7 +602,7 @@ def quick_reset_student_credentials(
             db=db,
             event_type=SecurityEventType.DEVICE_REVOKED,
             action="ADMIN_QUICK_RESET_CREDENTIALS",
-            details=f"Admin {admin.username} generated fresh PIN and cleared device locks for {clean_roll}",
+            details=f"Admin {admin.username} generated fresh PIN and cleared device locks for {clean_roll} (email: {student.email})",
             user_id=admin.id,
             roll_number=clean_roll
         )
@@ -524,10 +615,13 @@ def quick_reset_student_credentials(
     return {
         "status": "SUCCESS",
         "roll_number": student.roll_number,
+        "username": student.roll_number,
         "name": student.name,
+        "student_name": student.name,
         "email": student.email,
         "department": dept_name,
         "section": sec_name,
         "temp_pin": temp_pin,
+        "temporary_password": temp_pin,
         "message": f"Fresh credentials generated for {student.name}. Any active device lockout has been reset."
     }

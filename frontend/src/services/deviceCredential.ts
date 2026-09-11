@@ -51,10 +51,12 @@ export function getHardwareFingerprint(): string {
 
   const entropyComponents: string[] = [];
 
-  // 1. Physical Display Metrics (Identical in Incognito)
+  // 1. Physical Display Metrics (Orientation-independent min/max dimensions)
   try {
     const s = window.screen;
-    entropyComponents.push(`SCR:${s.width}x${s.height}x${s.colorDepth}x${s.pixelDepth || 24}x${window.devicePixelRatio || 1}`);
+    const minDim = Math.min(s.width || 0, s.height || 0);
+    const maxDim = Math.max(s.width || 0, s.height || 0);
+    entropyComponents.push(`SCR:${minDim}x${maxDim}x${s.colorDepth}x${s.pixelDepth || 24}x${window.devicePixelRatio || 1}`);
   } catch {}
 
   // 2. Hardware Architecture & System Properties
@@ -113,12 +115,44 @@ export function getHardwareFingerprint(): string {
 }
 
 /**
- * Retrieves existing device credentials or generates a hardware-locked pair
- * that survives incognito window switches.
+ * Retrieves existing device credentials or generates a hardware-locked pair.
+ * First checks persistent storage (localStorage & cookie) so that device identity
+ * is 100% stable across restarts, PWA standalone launches, and orientation changes.
  */
 export function getOrCreateDeviceCredentials(): DeviceCredentials {
-  // Always derive the deterministic hardware fingerprint so that Normal, Incognito,
-  // and private browsing windows on the same physical hardware produce the exact same ID!
+  // 1. Check persistent localStorage first for absolute stability across browser sessions
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const storedId = localStorage.getItem(DEVICE_ID_KEY);
+      const storedSecret = localStorage.getItem(DEVICE_SECRET_KEY);
+      if (storedId && storedSecret) {
+        setCookie(DEVICE_ID_KEY, storedId, 365);
+        setCookie(DEVICE_SECRET_KEY, storedSecret, 365);
+        return {
+          device_public_id: storedId,
+          device_secret: storedSecret
+        };
+      }
+    }
+  } catch {}
+
+  // 2. Check cookie backup
+  const cookieId = getCookie(DEVICE_ID_KEY);
+  const cookieSecret = getCookie(DEVICE_SECRET_KEY);
+  if (cookieId && cookieSecret) {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(DEVICE_ID_KEY, cookieId);
+        localStorage.setItem(DEVICE_SECRET_KEY, cookieSecret);
+      }
+    } catch {}
+    return {
+      device_public_id: cookieId,
+      device_secret: cookieSecret
+    };
+  }
+
+  // 3. Fallback to hardware derivation if no persistent ID exists yet
   const hwHash = getHardwareFingerprint();
   const canonicalHwId = 'DEV-' + hwHash;
   const canonicalHwSecret = fnv1aHash(hwHash + '::SNIST_INSTITUTIONAL_SALT_2026') + fnv1aHash(hwHash + '::DEVICE_KEY_SIG');

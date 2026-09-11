@@ -2,36 +2,116 @@ import { getDeviceHeaders } from './deviceCredential';
 
 const API_BASE = '/api/v1';
 let refreshTimer: any = null;
+let lastRefreshTime = Date.now();
+let activeRefreshPromise: Promise<string | null> | null = null;
 
+/**
+ * Performs a silent token refresh using httpOnly cookie or fallback refresh_token.
+ * Deduplicates concurrent refresh requests using a singleton Promise.
+ */
+export async function performTokenRefresh(): Promise<string | null> {
+  if (activeRefreshPromise) {
+    return activeRefreshPromise;
+  }
+
+  activeRefreshPromise = (async () => {
+    try {
+      const storedRefreshToken = typeof localStorage !== 'undefined' ? localStorage.getItem('refresh_token') : null;
+      const currentToken = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+      const deviceHeaders = getDeviceHeaders();
+
+      const refreshResponse = await fetch(`${API_BASE}/auth/refresh`, {
+        method: 'POST',
+        credentials: 'include', // Sends snist_refresh_token httpOnly cookie
+        headers: {
+          'Content-Type': 'application/json',
+          ...deviceHeaders,
+          ...(currentToken ? { 'Authorization': `Bearer ${currentToken}` } : {})
+        },
+        body: JSON.stringify({
+          refresh_token: storedRefreshToken || undefined,
+          ...deviceHeaders
+        })
+      });
+
+      if (refreshResponse.ok) {
+        const data = await refreshResponse.json();
+        if (data && data.access_token) {
+          localStorage.setItem('token', data.access_token);
+          if (data.refresh_token) {
+            localStorage.setItem('refresh_token', data.refresh_token);
+          }
+          lastRefreshTime = Date.now();
+          scheduleTokenAutoRefresh();
+          return data.access_token;
+        }
+      }
+
+      // If refresh failed with 401 or 403, the session is definitively terminated
+      if (refreshResponse.status === 401 || refreshResponse.status === 403) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('refresh_token');
+        localStorage.removeItem('user');
+        if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+          window.location.href = '/login?reason=session_expired';
+        }
+        return null;
+      }
+
+      // Other HTTP statuses (e.g. 500, 502) should not immediately wipe the session
+      return null;
+    } catch (err) {
+      // Network error or offline — do NOT wipe session on transient connection glitches!
+      console.warn('Silent token refresh network warning:', err);
+      return null;
+    } finally {
+      activeRefreshPromise = null;
+    }
+  })();
+
+  return activeRefreshPromise;
+}
+
+/**
+ * Schedules a sliding-window token auto-renewal (10 minutes for a 15-minute access token).
+ */
 export function scheduleTokenAutoRefresh() {
   if (refreshTimer) {
     clearTimeout(refreshTimer);
     refreshTimer = null;
   }
 
-  const token = localStorage.getItem('token');
-  const userStr = localStorage.getItem('user');
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+  const userStr = typeof localStorage !== 'undefined' ? localStorage.getItem('user') : null;
   if (!token || !userStr) return;
 
   try {
     const user = JSON.parse(userStr);
-    if (user.role === 'STUDENT') {
-      // Schedule silent background token refresh every 20 seconds (before 30-sec expiry)
+    if (user.role === 'STUDENT' || user.role === 'TEACHER' || user.role === 'SUPER_ADMIN') {
+      // Renew every 10 minutes (600,000 ms) while active, well before 15-minute expiry
       refreshTimer = setTimeout(async () => {
-        try {
-          const res = await apiRequest<{ access_token: string }>('/auth/refresh', { method: 'POST' });
-          if (res && res.access_token) {
-            localStorage.setItem('token', res.access_token);
-            scheduleTokenAutoRefresh();
-          }
-        } catch (err) {
-          console.warn('Silent token refresh warning:', err);
-        }
-      }, 20000);
+        await performTokenRefresh();
+      }, 600000);
     }
   } catch (err) {
     console.warn('Error scheduling token refresh:', err);
   }
+}
+
+// Setup visibility listener to renew token when device wakes up or returns to tab
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      const elapsedMs = Date.now() - lastRefreshTime;
+      // If student wakes device after 8+ minutes idle, silently refresh right away
+      if (elapsedMs > 480000) {
+        const token = localStorage.getItem('token');
+        if (token) {
+          performTokenRefresh().catch(() => {});
+        }
+      }
+    }
+  });
 }
 
 export async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
@@ -52,35 +132,18 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
     const url = endpoint.startsWith('/') ? `${API_BASE}${endpoint}` : `${API_BASE}/${endpoint}`;
     const response = await fetch(url, {
       ...options,
+      credentials: 'include',
       headers,
     });
 
     if (response.status === 401 && endpoint !== '/auth/refresh' && !(options as any)._isRetry) {
       // Attempt seamless token renewal before kicking out to login
-      try {
-        const refreshResponse = await fetch(`${API_BASE}/auth/refresh`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...deviceHeaders,
-            ...(token ? { 'Authorization': `Bearer ${token}` } : {})
-          }
-        });
-        if (refreshResponse.ok) {
-          const refreshData = await refreshResponse.json();
-          if (refreshData && refreshData.access_token) {
-            localStorage.setItem('token', refreshData.access_token);
-            scheduleTokenAutoRefresh();
-            return apiRequest<T>(endpoint, { ...(options as any), _isRetry: true });
-          }
-        }
-      } catch {}
-
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      if (window.location.pathname !== '/login') {
-        window.location.href = '/login';
+      const newToken = await performTokenRefresh();
+      if (newToken) {
+        return apiRequest<T>(endpoint, { ...(options as any), _isRetry: true });
       }
+
+      // If token refresh definitively failed, performTokenRefresh already handled redirect if 401/403
       throw new Error('Session expired. Please log in again.');
     }
 

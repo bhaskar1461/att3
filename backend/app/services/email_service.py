@@ -53,6 +53,35 @@ def render_email_template(template_name: str, context: Dict[str, Any]) -> str:
         return f"<html><body><p>Template rendering error: {tmpl_err}</p></body></html>"
 
 
+class GlobalEmailQuotaLimiter:
+    """
+    Thread-safe sliding window rate limiter protecting SMTP provider quotas (A4).
+    Hard cap of max 150 emails dispatched per rolling 3600-second window across all channels.
+    Prevents provider account suspension (e.g. Gmail 500/day, Zoho 200/day).
+    """
+    def __init__(self, max_per_hour: int = 150):
+        self.max_per_hour = max_per_hour
+        self._history: List[float] = []
+        self._lock = threading.Lock()
+
+    def allow_dispatch(self) -> bool:
+        now = time.time()
+        with self._lock:
+            self._history = [t for t in self._history if now - t < 3600]
+            if len(self._history) >= self.max_per_hour:
+                return False
+            self._history.append(now)
+            return True
+
+    def get_remaining_quota(self) -> int:
+        now = time.time()
+        with self._lock:
+            self._history = [t for t in self._history if now - t < 3600]
+            return max(0, self.max_per_hour - len(self._history))
+
+global_email_limiter = GlobalEmailQuotaLimiter(max_per_hour=150)
+
+
 # --- Single Email Send (Synchronous with Dual-Channel Routing & Failover) ---
 
 def send_single_email(
@@ -74,80 +103,86 @@ def send_single_email(
     NEVER raises — all errors caught and returned in the dict (defensive boundary).
     """
     try:
+        # Enforce server-wide hourly SMTP dispatch cap (A4)
+        if not global_email_limiter.allow_dispatch():
+            logger.warning(f"Email dispatch to {to_email} BLOCKED: Hourly SMTP quota of 150 emails/hr reached.")
+            return {
+                "status": "RATE_LIMITED",
+                "to": to_email,
+                "error": "Hourly email dispatch limit reached. Please try again later."
+            }
+
         is_otp_channel = (channel or "").upper() in ("OTP", "AUTH", "LOGIN", "PROOFSY")
 
-        # 1. Select Primary Target Channel Config & Secondary Failover Config
+        # 1. Candidate Channel Configurations
+        brevo_1_cfg = {
+            "name": "Brevo Relay 1 (certificates@proofsy.tech)",
+            "host": settings.SMTP_HOST,
+            "port": settings.SMTP_PORT,
+            "user": settings.SMTP_USER,
+            "password": settings.SMTP_PASSWORD,
+            "use_ssl": not settings.SMTP_USE_TLS and settings.SMTP_PORT == 465,
+            "use_tls": settings.SMTP_USE_TLS,
+            "sender": settings.SMTP_SENDER,
+            "sender_name": settings.SMTP_SENDER_NAME,
+            "reply_to": reply_to or settings.SMTP_SENDER,
+        }
+
+        brevo_2_cfg = {
+            "name": "Brevo Relay 2 (Secondary)",
+            "host": settings.SMTP_OTP_HOST,
+            "port": settings.SMTP_OTP_PORT,
+            "user": settings.SMTP_OTP_USER,
+            "password": settings.SMTP_OTP_PASSWORD,
+            "use_ssl": settings.SMTP_OTP_USE_SSL,
+            "use_tls": not settings.SMTP_OTP_USE_SSL,
+            "sender": settings.SMTP_OTP_SENDER,
+            "sender_name": settings.SMTP_OTP_SENDER_NAME,
+            "reply_to": reply_to or settings.SMTP_OTP_REPLY_TO,
+        }
+
+        fallback_host = os.getenv("FALLBACK_SMTP_HOST", "smtp.gmail.com")
+        fallback_user = os.getenv("FALLBACK_SMTP_USER", "helpdesk@sreenidhi.edu.in")
+        fallback_pass = os.getenv("FALLBACK_SMTP_PASSWORD", "qgmlvipcesyqlqlw")
+        fallback_cfg = {
+            "name": "Gmail Fallback",
+            "host": fallback_host,
+            "port": int(os.getenv("FALLBACK_SMTP_PORT", "587")),
+            "user": fallback_user,
+            "password": fallback_pass,
+            "use_ssl": False,
+            "use_tls": True,
+            "sender": os.getenv("FALLBACK_SMTP_SENDER", fallback_user),
+            "sender_name": "SNIST ERP System",
+            "reply_to": reply_to or fallback_user,
+        }
+
+        # Sequence channels based on dispatch intent
         if is_otp_channel:
-            primary_cfg = {
-                "name": "OTP/Proofsy",
-                "host": settings.SMTP_OTP_HOST,
-                "port": settings.SMTP_OTP_PORT,
-                "user": settings.SMTP_OTP_USER,
-                "password": settings.SMTP_OTP_PASSWORD,
-                "use_ssl": settings.SMTP_OTP_USE_SSL or settings.SMTP_OTP_PORT == 465,
-                "use_tls": not settings.SMTP_OTP_USE_SSL and settings.SMTP_OTP_PORT != 465,
-                "sender": settings.SMTP_OTP_SENDER,
-                "sender_name": settings.SMTP_OTP_SENDER_NAME,
-                "reply_to": reply_to or settings.SMTP_OTP_REPLY_TO,
-            }
-            fallback_cfg = {
-                "name": "Default/Helpdesk",
-                "host": settings.SMTP_HOST,
-                "port": settings.SMTP_PORT,
-                "user": settings.SMTP_USER,
-                "password": settings.SMTP_PASSWORD,
-                "use_ssl": not settings.SMTP_USE_TLS and settings.SMTP_PORT == 465,
-                "use_tls": settings.SMTP_USE_TLS,
-                "sender": settings.SMTP_SENDER,
-                "sender_name": settings.SMTP_SENDER_NAME,
-                "reply_to": reply_to or settings.SMTP_SENDER,
-            }
+            channels_to_try = [brevo_2_cfg, brevo_1_cfg, fallback_cfg]
         else:
-            primary_cfg = {
-                "name": "Default/Helpdesk",
-                "host": settings.SMTP_HOST,
-                "port": settings.SMTP_PORT,
-                "user": settings.SMTP_USER,
-                "password": settings.SMTP_PASSWORD,
-                "use_ssl": not settings.SMTP_USE_TLS and settings.SMTP_PORT == 465,
-                "use_tls": settings.SMTP_USE_TLS,
-                "sender": settings.SMTP_SENDER,
-                "sender_name": settings.SMTP_SENDER_NAME,
-                "reply_to": reply_to or settings.SMTP_SENDER,
-            }
-            fallback_cfg = {
-                "name": "OTP/Proofsy",
-                "host": settings.SMTP_OTP_HOST,
-                "port": settings.SMTP_OTP_PORT,
-                "user": settings.SMTP_OTP_USER,
-                "password": settings.SMTP_OTP_PASSWORD,
-                "use_ssl": settings.SMTP_OTP_USE_SSL or settings.SMTP_OTP_PORT == 465,
-                "use_tls": not settings.SMTP_OTP_USE_SSL and settings.SMTP_OTP_PORT != 465,
-                "sender": settings.SMTP_OTP_SENDER,
-                "sender_name": settings.SMTP_OTP_SENDER_NAME,
-                "reply_to": reply_to or settings.SMTP_OTP_REPLY_TO,
-            }
+            channels_to_try = [brevo_1_cfg, brevo_2_cfg, fallback_cfg]
 
         def _attempt_send(cfg: dict) -> Dict[str, Any]:
-            if not cfg["password"]:
+            if not cfg.get("password"):
                 return {"status": "NO_PASSWORD", "error": f"{cfg['name']} password not configured"}
 
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
             msg["From"] = f"{cfg['sender_name']} <{cfg['sender']}>"
             msg["To"] = to_email
-            if cfg["reply_to"]:
+            if cfg.get("reply_to"):
                 msg["Reply-To"] = cfg["reply_to"]
             if cc:
                 msg["Cc"] = cc
 
             msg.attach(MIMEText(html_body, "html", "utf-8"))
 
-            if cfg["use_ssl"]:
+            if cfg.get("use_ssl"):
                 server = smtplib.SMTP_SSL(cfg["host"], cfg["port"], timeout=15)
             else:
                 server = smtplib.SMTP(cfg["host"], cfg["port"], timeout=15)
-                if cfg["use_tls"]:
+                if cfg.get("use_tls"):
                     server.ehlo()
                     server.starttls()
 
@@ -162,39 +197,38 @@ def send_single_email(
             server.quit()
             return {"status": "SENT", "channel": cfg["name"]}
 
-        # Attempt primary channel
-        primary_err = None
-        if primary_cfg["password"]:
+        # Attempt channels in priority order
+        last_error = None
+        has_any_configured_channel = False
+
+        for idx, cfg in enumerate(channels_to_try):
+            if not cfg.get("password") or not cfg.get("host"):
+                continue
+            has_any_configured_channel = True
             try:
-                res = _attempt_send(primary_cfg)
+                res = _attempt_send(cfg)
                 if res.get("status") == "SENT":
-                    logger.info(f"Email sent successfully to {to_email} via [{primary_cfg['name']}]: {subject}")
-                    return {"status": "SENT", "to": to_email, "channel": primary_cfg["name"]}
+                    is_failover = (idx > 0)
+                    log_msg = f"Email sent to {to_email} via [{cfg['name']}] (failover={is_failover}): {subject}"
+                    logger.info(log_msg)
+                    return {
+                        "status": "SENT",
+                        "to": to_email,
+                        "channel": cfg["name"],
+                        "failover": is_failover
+                    }
                 else:
-                    primary_err = res.get("error")
-            except Exception as p_err:
-                primary_err = str(p_err)
-                logger.warning(f"Failed to send email via primary [{primary_cfg['name']}] to {to_email}: {p_err}. Attempting failover...")
-        else:
-            primary_err = f"{primary_cfg['name']} password not set"
+                    last_error = res.get("error")
+            except Exception as send_err:
+                last_error = str(send_err)
+                logger.warning(f"Channel [{cfg['name']}] failed for {to_email}: {send_err}. Trying next channel...")
 
-        # Failover to alternate channel if primary failed or was unconfigured
-        if fallback_cfg["password"]:
-            try:
-                res = _attempt_send(fallback_cfg)
-                if res.get("status") == "SENT":
-                    logger.info(f"Email sent successfully to {to_email} via FAILOVER [{fallback_cfg['name']}]: {subject}")
-                    return {"status": "SENT", "to": to_email, "channel": fallback_cfg["name"], "failover": True}
-            except Exception as f_err:
-                logger.error(f"Failover to [{fallback_cfg['name']}] also failed for {to_email}: {f_err}")
+        if not has_any_configured_channel:
+            logger.warning(f"[EMAIL-DEV-MODE] No SMTP channels configured. Would send to: {to_email}, Subject: {subject}")
+            logger.info(f"[EMAIL-DEV-MODE] Body preview: {html_body[:200]}")
+            return {"status": "DEV_MODE", "to": to_email, "detail": "No SMTP channels configured — logged to console"}
 
-        # If neither could send, check if both lack passwords (dev mode)
-        if not primary_cfg["password"] and not fallback_cfg["password"]:
-            logger.warning(f"[EMAIL-DEV-MODE] No SMTP passwords set. Would send to: {to_email}, Subject: {subject}")
-            logger.info(f"[EMAIL-DEV-MODE] Body preview (first 200 chars): {html_body[:200]}")
-            return {"status": "DEV_MODE", "to": to_email, "detail": "SMTP passwords not configured — logged to console"}
-
-        return {"status": "FAILED", "to": to_email, "error": f"Primary ({primary_cfg['name']}): {primary_err}"}
+        return {"status": "FAILED", "to": to_email, "error": f"All channels exhausted. Last error: {last_error}"}
 
     except Exception as err:
         logger.error(f"Unexpected email send failure to {to_email}: {err}", exc_info=True)
@@ -352,12 +386,16 @@ def send_teacher_class_allotment_notification(
     student_count: Optional[int] = None,
     frontend_url: Optional[str] = None,
     trigger_context: str = "DISPATCH",
+    timings: Optional[str] = None,
+    next_class_date: Optional[str] = None,
+    weekly_schedule: Optional[str] = None,
+    venue: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Sends a dedicated class allotment and timetable schedule notification email to the class in-charge faculty.
     Strictly NEVER CC's the teacher on individual student emails to prevent inbox flooding.
     Informs faculty of their assigned class, weekly schedule (e.g. Mon, Tue, Wed for CET),
-    and upcoming start date (e.g. coming Monday).
+    and upcoming start date (e.g. coming Monday or today).
     """
     try:
         from datetime import timedelta
@@ -409,28 +447,38 @@ def send_teacher_class_allotment_notification(
 
         # 3. Weekly schedule & periods definition
         is_cet = "CET" in class_name.upper() or "CAREER ENHANCEMENT" in class_name.upper()
-        if is_cet:
-            weekly_schedule = "Every Monday, Tuesday, and Wednesday"
-            timings = "09:30 AM – 01:00 PM (4-Period Block)"
-            venue = "CSE-CS Projector Lab"
-        else:
-            weekly_schedule = "Weekly (As per Department Timetable)"
-            timings = "Regular Periods"
-            venue = "Designated Classroom Projector"
+        if not weekly_schedule:
+            if is_cet:
+                weekly_schedule = "Every Monday, Tuesday, and Wednesday"
+            else:
+                weekly_schedule = "Weekly (As per Department Timetable)"
+
+        if not timings:
+            if is_cet:
+                timings = "09:30 AM – 01:00 PM (4-Period Block)"
+            else:
+                timings = "Regular Periods"
+
+        if not venue:
+            if is_cet:
+                venue = "CSE-CS Projector Lab"
+            else:
+                venue = "Designated Classroom Projector"
 
         # 4. Next class date calculation (Server-authoritative IST)
         now_ist = get_server_ist_datetime()
         today_date = now_ist.date()
         weekday = today_date.weekday()  # 0 = Monday, 5 = Saturday, 6 = Sunday
 
-        if weekday == 0:
-            next_class_date = f"Today, {today_date.strftime('%B %d, %Y')}"
-        else:
-            days_ahead = (0 - weekday) % 7
-            if days_ahead <= 0:
-                days_ahead += 7
-            next_monday = today_date + timedelta(days=days_ahead)
-            next_class_date = f"Coming Monday, {next_monday.strftime('%B %d, %Y')}"
+        if not next_class_date:
+            if weekday == 0:
+                next_class_date = f"Today, {today_date.strftime('%B %d, %Y')}"
+            else:
+                days_ahead = (0 - weekday) % 7
+                if days_ahead <= 0:
+                    days_ahead += 7
+                next_monday = today_date + timedelta(days=days_ahead)
+                next_class_date = f"Coming Monday, {next_monday.strftime('%B %d, %Y')}"
 
         # 5. Student count calculation
         if student_count is None:

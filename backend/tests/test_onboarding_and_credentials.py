@@ -420,6 +420,128 @@ class TestOnboardingAndCredentials(unittest.TestCase):
         self.assertEqual(resp_std.status_code, 200)
         self.assertIn("access_token", resp_std.json())
 
+    def test_resend_welcome_email_on_activated_student(self):
+        """Verify that activated students can have their welcome email resent with audit log."""
+        from app.core.security import create_access_token
+        from app.models.models import User, UserRole, AuditLog
+
+        # Create admin user
+        admin = User(
+            username="admin_resend_test",
+            email="admin_resend@snist.edu.in",
+            password_hash=get_password_hash("AdminPass123"),
+            role=UserRole.SUPER_ADMIN,
+            is_active=True
+        )
+        self.db.add(admin)
+        self.onboarding.state = OnboardingState.ACTIVATED
+        self.db.commit()
+
+        token = create_access_token({"sub": admin.username, "role": admin.role.value, "user_id": admin.id})
+        headers = {"Authorization": f"Bearer {token}"}
+
+        resp = self.client.post(f"/api/v1/admin/onboard/resend/{self.onboarding.roll_number}", headers=headers)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertTrue(data["is_activated"])
+
+        # Check qr_audit_logs
+        log = self.db.query(AuditLog).filter(
+            AuditLog.roll_number == self.onboarding.roll_number,
+            AuditLog.action == "RESEND_WELCOME_EMAIL"
+        ).first()
+        self.assertIsNotNone(log)
+
+    def test_admin_reset_pin_and_immediate_login(self):
+        """Verify admin PIN reset updates hash, dispatches email, and enables immediate login."""
+        from app.core.security import create_access_token
+        from app.models.models import User, UserRole, AuditLog
+
+        admin = User(
+            username="admin_reset_pin_test",
+            email="admin_pin@snist.edu.in",
+            password_hash=get_password_hash("AdminPass123"),
+            role=UserRole.SUPER_ADMIN,
+            is_active=True
+        )
+        self.db.add(admin)
+        self.db.commit()
+
+        token = create_access_token({"sub": admin.username, "role": admin.role.value, "user_id": admin.id})
+        headers = {"Authorization": f"Bearer {token}"}
+
+        resp = self.client.post(f"/api/v1/admin/onboard/reset-pin/{self.onboarding.roll_number}", headers=headers)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["status"], "success")
+        self.assertIn("temp_pin", data)
+        self.assertEqual(len(data["temp_pin"]), 6)
+
+        # Immediate login with the reset PIN
+        login_resp = self.client.post("/api/v1/auth/login", data={
+            "username": self.onboarding.roll_number,
+            "password": data["temp_pin"]
+        })
+        self.assertEqual(login_resp.status_code, 200)
+        self.assertIn("access_token", login_resp.json())
+
+        # Check qr_audit_logs
+        log = self.db.query(AuditLog).filter(
+            AuditLog.roll_number == self.onboarding.roll_number,
+            AuditLog.action == "ADMIN_PIN_RESET"
+        ).first()
+        self.assertIsNotNone(log)
+
+    def test_get_student_login_link(self):
+        """Verify copy login link endpoint returns permanent link with zero tokens."""
+        from app.core.security import create_access_token
+        from app.models.models import User, UserRole
+
+        admin = User(
+            username="admin_link_test",
+            email="admin_link@snist.edu.in",
+            password_hash=get_password_hash("AdminPass123"),
+            role=UserRole.SUPER_ADMIN,
+            is_active=True
+        )
+        self.db.add(admin)
+        self.db.commit()
+
+        token = create_access_token({"sub": admin.username, "role": admin.role.value, "user_id": admin.id})
+        headers = {"Authorization": f"Bearer {token}"}
+
+        resp = self.client.get(f"/api/v1/admin/onboard/login-link/{self.onboarding.roll_number}", headers=headers)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("login_url", data)
+        self.assertIn("/login?roll=", data["login_url"])
+        self.assertNotIn("token=", data["login_url"])
+
+    def test_role_guard_blocks_students_from_admin_actions(self):
+        """Students must be rejected with 403 Forbidden on admin onboarding routes."""
+        from app.core.security import create_access_token
+        from app.models.models import User, UserRole
+
+        student_user = User(
+            username="student_attacker",
+            email="student_attacker@snist.edu.in",
+            password_hash=get_password_hash("StudentPass123"),
+            role=UserRole.STUDENT,
+            is_active=True
+        )
+        self.db.add(student_user)
+        self.db.commit()
+
+        token = create_access_token({"sub": student_user.username, "role": student_user.role.value, "user_id": student_user.id})
+        headers = {"Authorization": f"Bearer {token}"}
+
+        resp_resend = self.client.post(f"/api/v1/admin/onboard/resend/{self.onboarding.roll_number}", headers=headers)
+        self.assertEqual(resp_resend.status_code, 403)
+
+        resp_reset = self.client.post(f"/api/v1/admin/onboard/reset-pin/{self.onboarding.roll_number}", headers=headers)
+        self.assertEqual(resp_reset.status_code, 403)
+
 
 if __name__ == "__main__":
     unittest.main()

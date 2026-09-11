@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 
 logger = logging.getLogger("snist_erp.admin")
-from sqlalchemy import or_, func
+from sqlalchemy import or_, func, case
 from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -16,7 +16,8 @@ from app.core.security import get_password_hash
 from app.core.config import settings
 from app.models.models import (
     User, UserRole, Department, AcademicYear, Section, Subject, 
-    Teacher, Student, TeacherAssignment, SystemSettings, AuditLog, AttendanceRecord, AttendanceSession
+    Teacher, Student, TeacherAssignment, SystemSettings, AuditLog, 
+    AttendanceRecord, AttendanceSession, AttendanceStatus, DeviceRegistration
 )
 from app.services.excel_service import ExcelAttendanceService
 from app.services.qr_service import QRService
@@ -67,10 +68,25 @@ class AssignmentCreate(BaseModel):
 class SettingsUpdate(BaseModel):
     settings: Dict[str, str]
 
+import time
+import threading
+
+_DASHBOARD_STATS_CACHE: Optional[Dict[str, Any]] = None
+_DASHBOARD_STATS_CACHE_AT: float = 0.0
+_DASHBOARD_STATS_LOCK = threading.Lock()
+_DASHBOARD_STATS_TTL = 30.0  # 30-second TTL cache to eliminate redundant multi-query DB stalls
+
 # --- Dashboard & Stats ---
 @router.get("/dashboard-stats")
 def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    global _DASHBOARD_STATS_CACHE, _DASHBOARD_STATS_CACHE_AT
+    now = time.time()
+    with _DASHBOARD_STATS_LOCK:
+        if _DASHBOARD_STATS_CACHE is not None and (now - _DASHBOARD_STATS_CACHE_AT) < _DASHBOARD_STATS_TTL:
+            return _DASHBOARD_STATS_CACHE
+
+    from app.core.security import get_server_ist_date
+    today_str = get_server_ist_date()
     total_students = db.query(Student).count()
     total_teachers = db.query(Teacher).count()
     total_depts = db.query(Department).count()
@@ -86,7 +102,7 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depe
         AttendanceSession.status == "OPEN"
     ).count()
 
-    return {
+    stats = {
         "total_students": total_students,
         "total_teachers": total_teachers,
         "total_departments": total_depts,
@@ -95,6 +111,223 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depe
         "attendance_percentage": att_percentage,
         "active_live_classes": active_sessions
     }
+    with _DASHBOARD_STATS_LOCK:
+        _DASHBOARD_STATS_CACHE = stats
+        _DASHBOARD_STATS_CACHE_AT = time.time()
+
+    return stats
+
+# --- Enrollment Analytics & Mermaid Drill-Down ---
+@router.get("/analytics/enrollment")
+def get_enrollment_analytics(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """
+    Returns department enrollment distribution for Level-1 Mermaid hierarchy diagram.
+    Guarantees mathematical reconciliation: sum(departments) + unassigned == total_enrolled.
+    """
+    total_enrolled = db.query(func.count(Student.id)).scalar() or 0
+    
+    # Single aggregation query grouping students by department_id
+    dept_counts_query = db.query(
+        Student.department_id,
+        func.count(Student.id).label("student_count")
+    ).group_by(Student.department_id).all()
+    
+    counts_map = {row[0]: row[1] for row in dept_counts_query}
+    
+    try:
+        from app.services.attendance_engine import AttendanceEngine
+        compliance_summary = AttendanceEngine.get_department_compliance_summary(db=db, use_cache=True)
+        defaulters_by_code = {
+            d["department_code"]: d.get("condonable_count", 0) + d.get("detained_count", 0)
+            for d in compliance_summary.get("departments", [])
+        }
+    except Exception as e:
+        logger.warning(f"Could not compute department defaulters in enrollment analytics: {e}")
+        defaulters_by_code = {}
+
+    departments = db.query(Department).order_by(Department.name).all()
+    
+    dept_list = []
+    accounted_students = 0
+    
+    for d in departments:
+        count = counts_map.get(d.id, 0)
+        pct = round((count / total_enrolled * 100), 1) if total_enrolled > 0 else 0.0
+        d_defaulters = defaulters_by_code.get(d.code, 0)
+        dept_list.append({
+            "id": d.id,
+            "code": d.code,
+            "name": d.name,
+            "count": count,
+            "percentage": pct,
+            "share_pct": pct,
+            "defaulters_count": d_defaulters
+        })
+        accounted_students += count
+        
+    unassigned_count = total_enrolled - accounted_students
+    if unassigned_count > 0:
+        pct = round((unassigned_count / total_enrolled * 100), 1) if total_enrolled > 0 else 0.0
+        u_defaulters = defaulters_by_code.get("UNASSIGNED", 0)
+        dept_list.append({
+            "id": -1,
+            "code": "UNASSIGNED",
+            "name": "Unassigned Department",
+            "count": unassigned_count,
+            "percentage": pct,
+            "share_pct": pct,
+            "defaulters_count": u_defaulters
+        })
+
+    return {
+        "total_enrolled": total_enrolled,
+        "unassigned_count": max(0, unassigned_count),
+        "departments": dept_list
+    }
+
+@router.get("/analytics/enrollment/students")
+def get_department_enrolled_students(
+    dept_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """
+    Level-2 drill-down: Lazy-loads students for a specific department with device and attendance telemetry.
+    Uses batch queries (zero N+1) to resolve today's attendance, total session stats, and device details.
+    """
+    from app.core.security import get_server_ist_date
+    today_str = get_server_ist_date()
+
+    query = db.query(Student).options(
+        joinedload(Student.department),
+        joinedload(Student.academic_year),
+        joinedload(Student.section)
+    )
+    if dept_id == -1:
+        valid_dept_ids = [d.id for d in db.query(Department.id).all()]
+        query = query.filter(or_(Student.department_id == None, ~Student.department_id.in_(valid_dept_ids)))
+    else:
+        query = query.filter(Student.department_id == dept_id)
+        
+    students = query.order_by(Student.roll_number).all()
+    if not students:
+        return []
+
+    student_ids = [s.id for s in students]
+
+    # Batch Query 1: Present today status
+    today_present_query = db.query(AttendanceRecord.student_id).filter(
+        AttendanceRecord.session_date == today_str,
+        AttendanceRecord.student_id.in_(student_ids),
+        AttendanceRecord.status.in_([
+            AttendanceStatus.PRESENT, "PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"
+        ])
+    ).distinct().all()
+    today_present_set = {r[0] for r in today_present_query}
+
+    # Batch Query 2: Attendance aggregation per student
+    rec_aggregates = db.query(
+        AttendanceRecord.student_id,
+        func.count(AttendanceRecord.id).label("total_records"),
+        func.sum(
+            case(
+                (AttendanceRecord.status.in_([
+                    AttendanceStatus.PRESENT, "PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"
+                ]), 1),
+                else_=0
+            )
+        ).label("present_records")
+    ).filter(AttendanceRecord.student_id.in_(student_ids)).group_by(AttendanceRecord.student_id).all()
+
+    stats_map = {row[0]: (row[1] or 0, int(row[2] or 0)) for row in rec_aggregates}
+
+    # Batch Query 3: Device registration info for enrolled devices
+    device_ids = [s.registered_device_id for s in students if s.registered_device_id]
+    device_map = {}
+    if device_ids:
+        devices = db.query(DeviceRegistration).filter(DeviceRegistration.id.in_(device_ids)).all()
+        device_map = {d.id: d for d in devices}
+
+    results = []
+    for s in students:
+        dev = device_map.get(s.registered_device_id) if s.registered_device_id else None
+        tot, pres = stats_map.get(s.id, (0, 0))
+        pct = round((pres / tot * 100), 1) if tot > 0 else 0.0
+
+        try:
+            from app.services.attendance_engine import get_student_full_compliance, determine_jntuh_band
+            from app.core.config import R25Config
+            comp = get_student_full_compliance(db, s.id, getattr(s, "join_date", None))
+            agg = comp.get("aggregate", {})
+            agg_pct = agg.get("aggregate_percentage")
+            display_pct = agg.get("aggregate_display", f"{pct:.2f}%")
+            band = agg.get("band", determine_jntuh_band(pct, sessions_held=tot))
+            courses_below_75 = agg.get("courses_below_75_count", 0)
+            condonation_status = agg.get("condonation_status", "pending")
+        except Exception:
+            from app.services.attendance_engine import determine_jntuh_band
+            agg_pct = pct
+            display_pct = f"{pct:.2f}%"
+            band = determine_jntuh_band(pct, sessions_held=tot)
+            courses_below_75 = 0
+            condonation_status = "pending"
+
+        device_info = None
+        if dev:
+            device_info = {
+                "id": dev.id,
+                "public_id": dev.device_public_id,
+                "is_active": dev.is_active,
+                "last_seen_at": dev.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if dev.last_seen_at else None,
+                "first_registered_at": dev.first_registered_at.strftime("%Y-%m-%d %H:%M:%S") if dev.first_registered_at else None
+            }
+
+        sec_name = s.section.name if s.section else "N/A"
+        yr_name = s.academic_year.name if s.academic_year else "N/A"
+        dept_name = s.department.name if s.department else "Unassigned"
+        dept_code = s.department.code if s.department else "UNASSIGNED"
+
+        results.append({
+            "id": s.id,
+            "roll_number": s.roll_number,
+            "name": s.name,
+            "department_id": s.department_id,
+            "department_code": dept_code,
+            "department_name": dept_name,
+            "year": yr_name,
+            "academic_year": yr_name,
+            "section": sec_name,
+            "section_name": sec_name,
+            "email": s.email or "",
+            "mobile": s.mobile or "",
+            "agency": getattr(s, "agency", "Regular") or "Regular",
+            "registered_device_id": s.registered_device_id,
+            "device_bound": s.registered_device_id is not None,
+            "device_info": device_info,
+            "present_today": s.id in today_present_set,
+            "total_classes": tot,
+            "attended_classes": pres,
+            "attendance_percentage": agg_pct if agg_pct is not None else pct,
+            "display_percentage": display_pct,
+            "band": band,
+            "condonation_status": condonation_status,
+            "courses_below_75_count": courses_below_75,
+            "join_date": getattr(s, "join_date", None),
+            "attendance_summary": {
+                "attended_sessions": pres,
+                "total_sessions": tot,
+                "attendance_percentage": agg_pct if agg_pct is not None else pct,
+                "display_percentage": display_pct,
+                "band": band,
+                "condonation_status": condonation_status,
+                "courses_below_75_count": courses_below_75,
+            }
+        })
+
+    return results
 
 # --- Departments, Years, Sections, Subjects ---
 @router.get("/departments")
@@ -610,7 +843,7 @@ def get_audit_logs(
 
     # Offset pagination if page is provided
     if page is not None:
-        total = query.count()
+        total = db.query(func.count(AuditLog.id)).scalar() or 0
         page_num = max(1, page)
         limit_val = max(1, min(100, limit))
         offset_val = (page_num - 1) * limit_val

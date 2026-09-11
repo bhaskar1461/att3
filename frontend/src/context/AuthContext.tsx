@@ -1,10 +1,12 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { UserProfile } from '../types';
+import { scheduleTokenAutoRefresh } from '../services/api';
+import { getDeviceHeaders } from '../services/deviceCredential';
 
 interface AuthContextType {
   user: UserProfile | null;
   token: string | null;
-  login: (token: string, user: UserProfile) => void;
+  login: (token: string, user: UserProfile, refreshToken?: string) => void;
   logout: () => void;
   isLoading: boolean;
 }
@@ -24,6 +26,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setToken(storedToken);
       try {
         setUser(JSON.parse(storedUser));
+        scheduleTokenAutoRefresh();
       } catch {
         localStorage.removeItem('user');
       }
@@ -31,19 +34,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(false);
   }, []);
 
-  const login = (newToken: string, newUser: UserProfile) => {
+  const login = (newToken: string, newUser: UserProfile, newRefreshToken?: string) => {
     setToken(newToken);
     setUser(newUser);
     localStorage.setItem('token', newToken);
+    if (newRefreshToken) {
+      localStorage.setItem('refresh_token', newRefreshToken);
+    }
     localStorage.setItem('user', JSON.stringify(newUser));
+    scheduleTokenAutoRefresh();
   };
 
-  const logout = () => {
+  const logout = async () => {
+    try {
+      await fetch('/api/v1/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getDeviceHeaders()
+        }
+      });
+    } catch {}
+
     setToken(null);
     setUser(null);
     localStorage.removeItem('token');
+    localStorage.removeItem('refresh_token');
     localStorage.removeItem('user');
-    window.location.href = '/login';
+    window.location.href = '/login?reason=user_logout';
   };
 
   return (

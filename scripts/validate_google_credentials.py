@@ -33,7 +33,7 @@ def main():
         with open(creds_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
-        print(f"[✓] Valid JSON format!")
+        print(f"[OK] Valid JSON format!")
         if isinstance(data, dict) and data.get("type") == "service_account":
             print(f"    Credential Type       : Service Account Key")
             print(f"    Project ID            : {data.get('project_id', 'Unknown')}")

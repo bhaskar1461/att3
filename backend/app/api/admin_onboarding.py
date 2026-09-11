@@ -339,42 +339,71 @@ def dispatch_magic_links(
     failed = 0
     results = []
 
+    import secrets
+    from sqlalchemy import func
+    from app.core.security import get_password_hash
+
     for onboarding in targets:
         try:
-            raw_token = generate_magic_token(
-                db=db,
-                onboarding_id=onboarding.id,
-                roll_number=onboarding.roll_number,
-                performed_by=admin.id,
-            )
+            clean_roll = onboarding.roll_number.strip().upper()
+            from app.core.security import create_magic_login_token
+            magic_token = create_magic_login_token(username=clean_roll, role="STUDENT", expires_days=7)
+            magic_login_link = f"{frontend_url}/login?magic_token={magic_token}"
+            login_link = f"{frontend_url}/login?ref=onboarding"
 
-            magic_link = f"{frontend_url}/onboard?token={raw_token}"
+            # Always generate a fresh PIN so student has valid credentials in email
+            temp_pin = f"{secrets.randbelow(900000) + 100000}"
+            pin_hash = get_password_hash(temp_pin)
+            onboarding.pin_hash = pin_hash
+            
+            # Sync / provision User record
+            user_rec = db.query(User).filter(func.upper(User.username) == clean_roll).first()
+            if not user_rec:
+                user_rec = User(
+                    username=clean_roll,
+                    email=onboarding.email or f"{clean_roll.lower()}@cs.sreenidhi.edu.in",
+                    password_hash=pin_hash,
+                    role=UserRole.STUDENT,
+                    is_active=True,
+                    must_change_password=False
+                )
+                db.add(user_rec)
+                db.flush()
+            else:
+                user_rec.password_hash = pin_hash
+                user_rec.is_active = True
 
-            # Render email
+            # Render email with permanent login link and 1-click magic link
             try:
                 html_body = render_email_template("magic_link_email.html", {
                     "student_name": onboarding.name,
-                    "roll_number": onboarding.roll_number,
-                    "magic_link": magic_link,
-                    "expiry_hours": settings.MAGIC_LINK_EXPIRY_HOURS,
+                    "roll_number": clean_roll,
+                    "magic_link": magic_login_link,
+                    "login_link": login_link,
+                    "temp_pin": temp_pin,
+                    "pin": temp_pin,
+                    "password": temp_pin,
+                    "temp_password": temp_pin,
                     "department": onboarding.department,
                     "section": onboarding.section,
                 })
             except Exception:
                 html_body = f"""
                 <html><body>
-                <h2>SNIST ERP — Student Onboarding</h2>
-                <p>Dear {onboarding.name} ({onboarding.roll_number}),</p>
-                <p>Click the link below to complete your onboarding:</p>
-                <p><a href="{magic_link}" style="font-size: 18px; font-weight: bold;">Complete Onboarding →</a></p>
-                <p>This link expires in {settings.MAGIC_LINK_EXPIRY_HOURS} hours and can only be used once.</p>
+                <h2>SNIST ERP — Student Portal Access</h2>
+                <p>Dear {onboarding.name} ({clean_roll}),</p>
+                <p>Your student portal account is ready. Sign in with 1-click:</p>
+                <p><a href="{magic_login_link}" style="display: inline-block; padding: 12px 24px; background: #059669; color: #fff; text-decoration: none; border-radius: 6px; font-weight: bold;">Instant 1-Click Sign-In →</a></p>
+                <p>Or log in manually at <a href="{login_link}">{login_link}</a> using:</p>
+                <p><strong>Roll Number:</strong> {clean_roll}</p>
+                <p><strong>Login PIN:</strong> <strong style="font-size: 20px; color: #059669;">{temp_pin}</strong></p>
                 <p style="color: #999;">Sreenidhi Institute of Science & Technology</p>
                 </body></html>
                 """
 
             result = send_single_email(
                 to_email=onboarding.email,
-                subject=f"SNIST — Complete Your Account Onboarding ({onboarding.roll_number})",
+                subject=f"SNIST — Student Portal Access Credentials ({onboarding.roll_number})",
                 html_body=html_body,
                 cc=None,  # Anti-Spam: strictly NEVER CC class in-charge on individual student emails
             )
@@ -547,34 +576,37 @@ def get_individual_onboarding_status(
     }
 
 
+def require_admin_or_teacher(current_user: User = Depends(get_current_user)) -> User:
+    """Requires SUPER_ADMIN or TEACHER role for student onboarding and credential management."""
+    if current_user.role not in (UserRole.SUPER_ADMIN, UserRole.TEACHER):
+        raise HTTPException(status_code=403, detail="Faculty or Administrative permission required")
+    return current_user
+
+
 @router.post("/resend/{roll_number}")
 def resend_magic_link(
     roll_number: str,
     request: Request,
     req: Optional[ResendLinkRequest] = None,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
+    admin: User = Depends(require_admin_or_teacher),
 ):
-    """Invalidates old link, generates new, and sends it to the student."""
+    """
+    Re-sends the onboarding / welcome email anytime, for any state (activated students included).
+    Sends the permanent login link (https://ather-os.de5.net/login) and PIN instructions.
+    Logs audit event to qr_audit_logs.
+    """
     from app.services.email_service import send_single_email, render_email_template
+    from app.core.device_security import record_audit_log
+    from sqlalchemy import func
 
+    clean_roll = roll_number.upper().strip()
     record = db.query(StudentOnboarding).filter(
-        StudentOnboarding.roll_number == roll_number.upper().strip()
+        func.upper(StudentOnboarding.roll_number) == clean_roll
     ).first()
 
     if not record:
-        raise HTTPException(status_code=404, detail=f"No onboarding record for {roll_number}")
-
-    if record.state == OnboardingState.ACTIVATED:
-        raise HTTPException(status_code=409, detail="Student is already activated — cannot resend.")
-
-    # Generate new token (automatically invalidates old ones)
-    raw_token = generate_magic_token(
-        db=db,
-        onboarding_id=record.id,
-        roll_number=record.roll_number,
-        performed_by=admin.id,
-    )
+        raise HTTPException(status_code=404, detail=f"No onboarding record for {clean_roll}")
 
     frontend_url = settings.FRONTEND_URL
     if not frontend_url:
@@ -582,45 +614,258 @@ def resend_magic_link(
         scheme = request.headers.get("x-forwarded-proto", "https")
         frontend_url = f"{scheme}://{host}"
 
-    magic_link = f"{frontend_url}/onboard?token={raw_token}"
+    # Generate 1-click magic link and permanent login link
+    from app.core.security import create_magic_login_token, get_password_hash
+    from app.models.models import DeviceAccountBinding, BindingStatus
+    from app.api.auth import failed_login_limiter
+    import secrets
+
+    magic_token = create_magic_login_token(username=clean_roll, role="STUDENT", expires_days=7)
+    magic_login_link = f"{frontend_url}/login?magic_token={magic_token}"
+    login_link = f"{frontend_url}/login?ref=onboarding"
+
+    # Always ensure a valid PIN / password exists and is provided in the email
+    temp_pin = f"{secrets.randbelow(900000) + 100000}"
+    pin_hash = get_password_hash(temp_pin)
+    record.pin_hash = pin_hash
+
+    user_rec = db.query(User).filter(func.upper(User.username) == clean_roll).first()
+    if user_rec:
+        user_rec.password_hash = pin_hash
+        user_rec.is_active = True
+    else:
+        user_rec = User(
+            username=record.roll_number,
+            email=record.email or f"{record.roll_number.lower()}@cs.sreenidhi.edu.in",
+            password_hash=pin_hash,
+            role=UserRole.STUDENT,
+            is_active=True,
+            must_change_password=False
+        )
+        db.add(user_rec)
+
+    # Clear/expire active 30-minute device lockouts and failed login attempts for this student
+    active_bindings = db.query(DeviceAccountBinding).filter(
+        DeviceAccountBinding.roll_number == clean_roll,
+        DeviceAccountBinding.status == BindingStatus.ACTIVE
+    ).all()
+    for b in active_bindings:
+        b.status = BindingStatus.EXPIRED
+    failed_login_limiter.record_success(None, clean_roll)
 
     # Send email
     try:
         html_body = render_email_template("magic_link_email.html", {
             "student_name": record.name,
-            "roll_number": record.roll_number,
-            "magic_link": magic_link,
-            "expiry_hours": settings.MAGIC_LINK_EXPIRY_HOURS,
+            "roll_number": clean_roll,
+            "magic_link": magic_login_link,
+            "login_link": login_link,
+            "temp_pin": temp_pin,
+            "pin": temp_pin,
+            "password": temp_pin,
+            "temp_password": temp_pin,
             "department": record.department,
             "section": record.section,
         })
     except Exception:
         html_body = f"""
         <html><body>
-        <h2>SNIST ERP — Onboarding Link (Resent)</h2>
-        <p>Dear {record.name},</p>
-        <p><a href="{magic_link}">Complete Onboarding →</a></p>
-        <p>This link expires in {settings.MAGIC_LINK_EXPIRY_HOURS} hours.</p>
+        <h2>SNIST ERP — Student Portal Access</h2>
+        <p>Dear {record.name} ({clean_roll}),</p>
+        <p>Your student portal account is ready. Sign in with 1-click:</p>
+        <p><a href="{magic_login_link}" style="display: inline-block; padding: 12px 24px; background: #059669; color: #fff; text-decoration: none; border-radius: 6px; font-weight: bold;">Instant 1-Click Sign-In →</a></p>
+        <p>Or log in manually at <a href="{login_link}">{login_link}</a> using:</p>
+        <p><strong>Roll Number:</strong> {clean_roll}</p>
+        <p><strong>Login PIN:</strong> <strong style="font-size: 20px; color: #059669;">{temp_pin}</strong></p>
+        <p style="color: #999;">Sreenidhi Institute of Science & Technology</p>
         </body></html>
         """
 
     result = send_single_email(
         to_email=record.email,
-        subject=f"SNIST — Onboarding Link Resent ({record.roll_number})",
+        subject=f"SNIST — Student Portal Access ({clean_roll})",
         html_body=html_body,
         cc=None,  # Anti-Spam: strictly NEVER CC class in-charge
     )
 
-    # Update state
-    record.state = OnboardingState.LINK_SENT
+    # Update state & timestamp (Student is immediately active)
     record.link_sent_at = get_server_ist_datetime().replace(tzinfo=None)
+    record.state = OnboardingState.ACTIVATED
+    record.activated_at = get_server_ist_datetime().replace(tzinfo=None)
     db.commit()
+
+    # Log to qr_audit_logs per Hard Rules
+    record_audit_log(
+        db=db,
+        user_id=admin.id,
+        roll_number=clean_roll,
+        event_type="ONBOARDING",
+        action="RESEND_WELCOME_EMAIL",
+        details=f"Staff/Admin {admin.username} resent welcome email to {clean_roll} ({record.email})",
+        ip_address=request.client.host if request.client else None
+    )
 
     return {
         "status": "ok",
         "roll_number": record.roll_number,
         "email_result": result["status"],
-        "new_link_generated": True,
+        "is_activated": True,
+    }
+
+
+@router.post("/reset-pin/{roll_number}")
+def reset_student_pin(
+    roll_number: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin_or_teacher),
+):
+    """
+    Admin-triggered PIN reset:
+    - Generates fresh 6-digit numeric PIN
+    - Hashes with bcrypt and syncs to User and StudentOnboarding
+    - Clears active 30-minute device lockouts and rate limiter
+    - Emails new PIN and 1-click magic link to student
+    - Writes audit record to qr_audit_logs
+    """
+    import secrets
+    from sqlalchemy import func
+    from app.core.security import get_password_hash, create_magic_login_token
+    from app.services.email_service import send_single_email, render_email_template
+    from app.core.device_security import record_audit_log
+    from app.models.models import DeviceAccountBinding, BindingStatus
+    from app.api.auth import failed_login_limiter
+
+    clean_roll = roll_number.upper().strip()
+    record = db.query(StudentOnboarding).filter(
+        func.upper(StudentOnboarding.roll_number) == clean_roll
+    ).first()
+
+    if not record:
+        raise HTTPException(status_code=404, detail=f"No student onboarding record found for {clean_roll}")
+
+    # Generate fresh 6-digit numeric PIN
+    new_pin = f"{secrets.randbelow(900000) + 100000}"
+    pin_hash = get_password_hash(new_pin)
+
+    # 1. Resolve or provision User record
+    user = db.query(User).filter(func.upper(User.username) == clean_roll).first()
+    student_rec = db.query(Student).filter(func.upper(Student.roll_number) == clean_roll).first()
+
+    if not user:
+        user = User(
+            username=clean_roll,
+            email=record.email or f"{clean_roll.lower()}@cs.sreenidhi.edu.in",
+            password_hash=pin_hash,
+            role=UserRole.STUDENT,
+            is_active=True,
+            must_change_password=False
+        )
+        db.add(user)
+        db.flush()
+    else:
+        user.password_hash = pin_hash
+        user.is_active = True
+        user.must_change_password = False
+
+    if student_rec:
+        student_rec.user_id = user.id
+        student_rec.registered_device_id = None
+
+    # 2. Update StudentOnboarding record
+    record.pin_hash = pin_hash
+    record.state = OnboardingState.ACTIVATED
+    record.activated_at = get_server_ist_datetime().replace(tzinfo=None)
+
+    # 3. Clear/expire active 30-minute device lockouts and rate limiter for this roll number
+    active_bindings = db.query(DeviceAccountBinding).filter(
+        DeviceAccountBinding.roll_number == clean_roll,
+        DeviceAccountBinding.status == BindingStatus.ACTIVE
+    ).all()
+    for b in active_bindings:
+        b.status = BindingStatus.EXPIRED
+
+    failed_login_limiter.record_success(None, clean_roll)
+    db.commit()
+
+    # 4. Dispatch Email with new PIN, 1-click magic link and permanent login link
+    frontend_url = settings.FRONTEND_URL
+    if not frontend_url:
+        host = request.headers.get("host", "localhost:8000")
+        scheme = request.headers.get("x-forwarded-proto", "https")
+        frontend_url = f"{scheme}://{host}"
+    login_url = f"{frontend_url}/login"
+    magic_token = create_magic_login_token(username=clean_roll, role="STUDENT", expires_days=7)
+    magic_login_url = f"{frontend_url}/login?magic_token={magic_token}"
+
+    try:
+        html_body = render_email_template("student_credentials_email.html", {
+            "name": record.name,
+            "sap_id": clean_roll,
+            "username": clean_roll,
+            "temp_password": new_pin,
+            "password": new_pin,
+            "magic_link": magic_login_url,
+            "portal_url": login_url,
+        })
+    except Exception as tmpl_err:
+        logger.warning(f"Failed to render student_credentials_email: {tmpl_err}")
+        html_body = f"""
+        <html><body>
+        <p>Dear {record.name},</p>
+        <p>Your SNIST ERP login PIN has been reset: <strong style="font-size: 20px; color: #059669;">{new_pin}</strong></p>
+        <p><a href="{magic_login_url}" style="display: inline-block; padding: 12px 24px; background: #059669; color: #fff; text-decoration: none; border-radius: 6px; font-weight: bold;">Instant 1-Click Sign-In →</a></p>
+        <p>Or login manually: <a href='{login_url}'>{login_url}</a></p>
+        </body></html>
+        """
+
+    email_res = send_single_email(
+        to_email=record.email,
+        subject=f"SNIST — Your Student Portal PIN has been reset ({clean_roll})",
+        html_body=html_body,
+        cc=None,
+    )
+
+    # 5. Record Audit Log in qr_audit_logs
+    record_audit_log(
+        db=db,
+        user_id=admin.id,
+        roll_number=clean_roll,
+        event_type="SECURITY_EVENT",
+        action="ADMIN_PIN_RESET",
+        details=f"Staff/Admin {admin.username} reset PIN for {clean_roll} and dispatched email to {record.email}",
+        ip_address=request.client.host if request.client else None
+    )
+
+    return {
+        "status": "success",
+        "roll_number": clean_roll,
+        "email": record.email,
+        "temp_pin": new_pin,
+        "email_status": email_res.get("status")
+    }
+
+
+@router.get("/login-link/{roll_number}")
+def get_student_login_link(
+    roll_number: str,
+    request: Request,
+    admin: User = Depends(require_admin_or_teacher),
+):
+    """
+    Returns the permanent login link for a student (zero secrets / tokens).
+    Permitted for Super Admin and Teachers to copy/hand over in person.
+    """
+    clean_roll = roll_number.upper().strip()
+    frontend_url = settings.FRONTEND_URL
+    if not frontend_url:
+        host = request.headers.get("host", "localhost:8000")
+        scheme = request.headers.get("x-forwarded-proto", "https")
+        frontend_url = f"{scheme}://{host}"
+
+    return {
+        "roll_number": clean_roll,
+        "login_url": f"{frontend_url}/login?roll={clean_roll}"
     }
 
 

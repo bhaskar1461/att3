@@ -4,7 +4,7 @@ import { TeacherAssignment, AttendanceSession, HistoricalAttendanceSession } fro
 import { 
   Camera, Lock, Unlock, RefreshCw, Search, Calendar, History, 
   FileSpreadsheet, ExternalLink, Users, Zap, CheckCircle, X,
-  UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Maximize2, Smartphone
+  UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Maximize2, Smartphone, ShieldAlert
 } from 'lucide-react';
 // Lazy-load heavy camera scanner and excel register modals
 const QRScannerModal = React.lazy(() => import('../components/QRScannerModal').then(m => ({ default: m.QRScannerModal })));
@@ -12,6 +12,7 @@ const ClassExcelRegisterModal = React.lazy(() => import('../components/ClassExce
 import { ManualSearchModal } from '../components/ManualSearchModal';
 import { ProjectorBroadcastModal } from '../components/ProjectorBroadcastModal';
 import { Toast } from '../components/Toast';
+import { FacultyDefaultersTab } from '../components/FacultyDefaultersTab';
 
 const PERIOD_LIST = [
   { num: 1, label: 'Period 1', time: '09:10 - 10:00' },
@@ -54,10 +55,11 @@ const extractPeriodCount = (periodStr?: string): number => {
 };
 
 export const TeacherDashboard: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'today' | 'historical' | 'settings'>('today');
+  const [activeTab, setActiveTab] = useState<'today' | 'historical' | 'defaulters' | 'settings'>('today');
   const [assignments, setAssignments] = useState<TeacherAssignment[]>([]);
   const [selectedAssignment, setSelectedAssignment] = useState<TeacherAssignment | null>(null);
   const [selectedPeriods, setSelectedPeriods] = useState<number[]>([1, 2, 3, 4]); // Defaults to 4-period CET/Lab block
+  const [displayType, setDisplayType] = useState<'projector' | 'phone_screen' | 'laptop'>('projector');
   
   const todayStr = new Date().toISOString().split('T')[0];
   const [selectedDate, setSelectedDate] = useState<string>(todayStr);
@@ -78,6 +80,7 @@ export const TeacherDashboard: React.FC = () => {
   const [isManualOpen, setIsManualOpen] = useState(false);
   const [isExcelRegisterOpen, setIsExcelRegisterOpen] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'warning' } | null>(null);
+  const [isLoadingInitial, setIsLoadingInitial] = useState(true);
 
   // Roster Filter & Search state
   const [rosterSearch, setRosterSearch] = useState('');
@@ -111,10 +114,20 @@ export const TeacherDashboard: React.FC = () => {
   };
 
   useEffect(() => {
-    fetchAssignedClasses();
-    fetchHistoricalSessions();
-    fetchTeacherProfile();
-    fetchCurrentClass();
+    const init = async () => {
+      setIsLoadingInitial(true);
+      try {
+        await Promise.allSettled([
+          fetchAssignedClasses(),
+          fetchHistoricalSessions(),
+          fetchTeacherProfile(),
+          fetchCurrentClass()
+        ]);
+      } finally {
+        setIsLoadingInitial(false);
+      }
+    };
+    init();
   }, []);
 
   const fetchTeacherProfile = async () => {
@@ -205,13 +218,14 @@ export const TeacherDashboard: React.FC = () => {
           section_id: selectedAssignment.section_id,
           period: periodStr,
           period_count: periodCount,
-          date: sessionDate
+          date: sessionDate,
+          display_type: displayType
         })
       });
       await fetchSessionDetails(response.session_id);
       fetchHistoricalSessions();
       fetchCurrentClass();
-      setIsScannerOpen(true);
+      setIsProjectorOpen(true);
       setToast({ 
         message: `Session started for ${periodStr}! (${periodCount} Period${periodCount > 1 ? 's' : ''} credit)`, 
         type: 'success' 
@@ -227,7 +241,7 @@ export const TeacherDashboard: React.FC = () => {
     if (!currentClassInfo) return;
     if (currentClassInfo.existing_session_id) {
       await fetchSessionDetails(currentClassInfo.existing_session_id);
-      setIsScannerOpen(true);
+      setIsProjectorOpen(true);
       return;
     }
 
@@ -244,13 +258,14 @@ export const TeacherDashboard: React.FC = () => {
           subject_id: currentClassInfo.assignment.subject_id,
           section_id: currentClassInfo.assignment.section_id,
           period: currentClassInfo.detected_period,
-          date: currentClassInfo.current_date
+          date: currentClassInfo.current_date,
+          display_type: displayType
         })
       });
       await fetchSessionDetails(response.session_id);
       fetchHistoricalSessions();
       fetchCurrentClass();
-      setIsScannerOpen(true);
+      setIsProjectorOpen(true);
       setToast({ message: `Session started for ${currentClassInfo.detected_period}!`, type: 'success' });
     } catch (err: any) {
       setToast({ message: err.message || 'Failed to start session', type: 'error' });
@@ -509,6 +524,17 @@ export const TeacherDashboard: React.FC = () => {
         </button>
 
         <button
+          onClick={() => setActiveTab('defaulters')}
+          className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 ${
+            activeTab === 'defaulters'
+              ? 'bg-white text-[#2f53d7] shadow-sm font-black'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <ShieldAlert className="w-4 h-4 text-amber-600" /> Defaulter Lists & Alerts
+        </button>
+
+        <button
           onClick={() => setActiveTab('settings')}
           className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 ${
             activeTab === 'settings'
@@ -522,6 +548,12 @@ export const TeacherDashboard: React.FC = () => {
 
       {/* TAB 1: TODAY'S LIVE ATTENDANCE */}
       {activeTab === 'today' && (
+        isLoadingInitial ? (
+          <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center shadow-sm flex flex-col items-center justify-center space-y-3">
+            <RefreshCw className="w-8 h-8 text-[#15347e] animate-spin" />
+            <p className="text-sm font-bold text-slate-700">Loading attendance status...</p>
+          </div>
+        ) : (
         <div className="space-y-5">
           
           {/* Active Session Controller Card */}
@@ -547,22 +579,32 @@ export const TeacherDashboard: React.FC = () => {
                   </span>
                 </div>
 
-                {/* Session Lock Toggle */}
-                {activeSession.status === 'OPEN' ? (
+                {/* Session Actions: Start New / Change Periods & Lock Toggle */}
+                <div className="flex items-center gap-2">
                   <button
-                    onClick={handleLockSession}
-                    className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
+                    onClick={() => setActiveSession(null)}
+                    className="px-3 py-1.5 bg-white/10 hover:bg-white/20 text-slate-200 border border-white/20 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
+                    title="Change class or select different periods"
                   >
-                    <Lock className="w-3.5 h-3.5" /> Lock Attendance
+                    <RefreshCw className="w-3.5 h-3.5" /> Select Periods / New
                   </button>
-                ) : (
-                  <button
-                    onClick={() => handleUnlockSession(activeSession.session_id)}
-                    className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
-                  >
-                    <Unlock className="w-3.5 h-3.5" /> Unlock Session
-                  </button>
-                )}
+
+                  {activeSession.status === 'OPEN' ? (
+                    <button
+                      onClick={handleLockSession}
+                      className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 border border-rose-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
+                    >
+                      <Lock className="w-3.5 h-3.5" /> Lock Attendance
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => handleUnlockSession(activeSession.session_id)}
+                      className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 rounded-xl text-xs font-bold transition flex items-center gap-1.5"
+                    >
+                      <Unlock className="w-3.5 h-3.5" /> Unlock Session
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Subject & Section Title */}
@@ -597,8 +639,8 @@ export const TeacherDashboard: React.FC = () => {
                 </div>
               </div>
 
-              {/* Action Buttons Bar */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
+              {/* Action Buttons Bar: Projector QR, Manual Search, Absence Callout */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
                 <button
                   onClick={() => setIsProjectorOpen(true)}
                   disabled={activeSession.status !== 'OPEN'}
@@ -608,12 +650,10 @@ export const TeacherDashboard: React.FC = () => {
                 </button>
 
                 <button
-                  onClick={() => setIsScannerOpen(true)}
-                  disabled={activeSession.status !== 'OPEN'}
-                  className="py-3.5 px-4 bg-white/10 hover:bg-white/20 disabled:opacity-50 text-slate-200 font-bold text-xs rounded-xl border border-white/20 transition flex items-center justify-center gap-2 active:scale-98"
-                  title="Legacy webcam scanner for scanning student pass"
+                  onClick={() => setIsManualOpen(true)}
+                  className="py-3.5 px-4 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl border border-white/20 transition flex items-center justify-center gap-2"
                 >
-                  <Camera className="w-4 h-4 text-slate-300" /> Webcam Scanner (Backup)
+                  <Search className="w-4 h-4 text-cyan-300" /> Manual Search / Mark
                 </button>
 
                 <button
@@ -621,13 +661,6 @@ export const TeacherDashboard: React.FC = () => {
                   className="py-3.5 px-4 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl border border-white/20 transition flex items-center justify-center gap-2"
                 >
                   <Users className="w-4 h-4 text-amber-300" /> Absence Callout
-                </button>
-
-                <button
-                  onClick={() => setIsManualOpen(true)}
-                  className="py-3.5 px-4 bg-white/10 hover:bg-white/20 text-white font-bold text-xs rounded-xl border border-white/20 transition flex items-center justify-center gap-2"
-                >
-                  <Search className="w-4 h-4 text-cyan-300" /> Manual Search / Mark
                 </button>
               </div>
 
@@ -836,6 +869,37 @@ export const TeacherDashboard: React.FC = () => {
                     })}
                   </div>
                 </div>
+
+                {/* Part A.5: Display Medium Selector (Projector | Phone Screen | Laptop) */}
+                <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5">
+                  <label className="text-xs font-bold text-slate-800 flex items-center justify-between">
+                    <span>Display Medium (QR Target)</span>
+                    <span className="text-[10px] text-slate-500 font-semibold">Telemetry Display Tag</span>
+                  </label>
+                  <div className="grid grid-cols-3 gap-2 pt-1">
+                    {[
+                      { id: 'projector', label: '📽️ Projector', desc: 'Classroom Wall' },
+                      { id: 'phone_screen', label: '📱 Phone Screen', desc: 'Mobile Screen' },
+                      { id: 'laptop', label: '💻 Laptop', desc: 'Desk / Podium' }
+                    ].map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => setDisplayType(m.id as any)}
+                        className={`p-2 rounded-xl border text-center transition cursor-pointer ${
+                          displayType === m.id
+                            ? 'bg-[#15347e] text-white border-[#15347e] shadow-sm font-bold'
+                            : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-100'
+                        }`}
+                      >
+                        <div className="text-xs font-bold">{m.label}</div>
+                        <div className={`text-[10px] ${displayType === m.id ? 'text-blue-200' : 'text-slate-400'}`}>
+                          {m.desc}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               </div>
 
               <button
@@ -843,8 +907,8 @@ export const TeacherDashboard: React.FC = () => {
                 disabled={isStartingSession}
                 className="w-full py-3.5 snist-btn-primary font-bold text-sm flex items-center justify-center gap-2 shadow-md transition active:scale-98"
               >
-                <Camera className="w-5 h-5" /> 
-                {isStartingSession ? 'Starting Session...' : 'Start Attendance Session & Launch Scanner'}
+                <Maximize2 className="w-5 h-5" /> 
+                {isStartingSession ? 'Starting Session...' : 'Start Attendance Session & Launch Projector QR'}
               </button>
             </div>
           )}
@@ -995,6 +1059,7 @@ export const TeacherDashboard: React.FC = () => {
           )}
 
         </div>
+        )
       )}
 
       {/* TAB 2: PAST SESSIONS & HISTORICAL EDITS */}
@@ -1091,11 +1156,11 @@ export const TeacherDashboard: React.FC = () => {
                           <button
                             onClick={() => {
                               fetchSessionDetails(hs.session_id);
-                              setIsScannerOpen(true);
+                              setIsProjectorOpen(true);
                             }}
                             className="px-3.5 py-2 snist-btn-primary text-xs font-bold flex items-center gap-1.5"
                           >
-                            <Camera className="w-3.5 h-3.5" /> Scan QR
+                            <Maximize2 className="w-3.5 h-3.5" /> Projector QR
                           </button>
                           <button
                             onClick={() => {
@@ -1192,37 +1257,22 @@ export const TeacherDashboard: React.FC = () => {
         </div>
       )}
 
-      {/* QR Camera Modal */}
-      {isScannerOpen && activeSession && (
-        <React.Suspense fallback={null}>
-          <QRScannerModal
-            sessionId={activeSession.session_id}
-            sessionDate={activeSession.session_date}
-            periodText={activeSession.period}
-            subjectName={activeSession.subject_name}
-            sectionName={activeSession.section_name}
-            initialPeriodCount={parseInt(activeSession.period?.replace(/\D/g, '') || '4') || 4}
-            onClose={() => {
-              setIsScannerOpen(false);
-              fetchSessionDetails(activeSession.session_id);
-            }}
-            onScanSuccess={() => {
-              fetchSessionDetails(activeSession.session_id);
-            }}
-            onOpenManualSearch={() => {
-              setIsScannerOpen(false);
-              setIsManualOpen(true);
-            }}
-          />
-        </React.Suspense>
+      {/* TAB 3: DEFAULTER LISTS & EARLY-WARNING INTERVENTIONS */}
+      {activeTab === 'defaulters' && (
+        <FacultyDefaultersTab 
+          assignments={assignments} 
+          onToast={(msg, type) => setToast({ message: msg, type: type === 'warning' ? 'error' : type })} 
+        />
       )}
+
+
 
       {/* Manual Search Modal */}
       {isManualOpen && activeSession && (
         <ManualSearchModal
           sessionId={activeSession.session_id}
           students={activeSession.students}
-          initialPeriodCount={parseInt(activeSession.period?.replace(/\D/g, '') || '4') || 4}
+          initialPeriodCount={activeSession.period_count || extractPeriodCount(activeSession.period) || 4}
           onClose={() => setIsManualOpen(false)}
           onMarkSuccess={() => fetchSessionDetails(activeSession.session_id)}
         />
@@ -1300,7 +1350,7 @@ export const TeacherDashboard: React.FC = () => {
       {isProjectorOpen && activeSession && (
         <ProjectorBroadcastModal
           sessionId={activeSession.session_id}
-          initialPeriodCount={parseInt(activeSession.period?.replace(/\D/g, '') || '1') || 1}
+          initialPeriodCount={activeSession.period_count || extractPeriodCount(activeSession.period) || 1}
           onClose={() => {
             setIsProjectorOpen(false);
             fetchSessionDetails(activeSession.session_id);

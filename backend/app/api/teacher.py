@@ -30,6 +30,7 @@ class StartSessionRequest(BaseModel):
     period: str
     period_count: Optional[int] = None
     date: Optional[str] = None # Defaults to YYYY-MM-DD
+    display_type: Optional[str] = "projector" # 'projector' | 'phone_screen' | 'laptop'
 
 from app.core.security import get_server_ist_date, get_server_ist_datetime
 from app.core.device_security import log_security_audit_event, SecurityEventType
@@ -192,7 +193,7 @@ def start_attendance_session(req: StartSessionRequest, db: Session = Depends(get
         )
 
     date_str = req.date or get_server_ist_date()
-    p_count = req.period_count or _extract_period_count(req.period)
+    p_count = max(1, min(8, req.period_count or _extract_period_count(req.period)))
     period_label = req.period.strip()
     if p_count > 1 and f"({p_count} Period" not in period_label and "periods" not in period_label.lower():
         period_label = f"{period_label} ({p_count} Periods)"
@@ -207,22 +208,28 @@ def start_attendance_session(req: StartSessionRequest, db: Session = Depends(get
     ).order_by(AttendanceSession.id.desc()).first()
 
     if existing:
+        if req.display_type and existing.display_type != req.display_type:
+            existing.display_type = req.display_type
+            db.commit()
         return {
             "session_id": existing.id,
             "status": existing.status.value,
             "session_date": existing.session_date,
             "period": existing.period,
             "period_count": _extract_period_count(existing.period),
+            "display_type": existing.display_type or "projector",
             "message": "Resumed existing attendance session"
         }
 
+    disp_type = req.display_type if req.display_type in ["projector", "phone_screen", "laptop"] else "projector"
     new_session = AttendanceSession(
         teacher_id=current_teacher.id,
         subject_id=req.subject_id,
         section_id=req.section_id,
         period=period_label,
         session_date=date_str,
-        status=SessionStatus.OPEN
+        status=SessionStatus.OPEN,
+        display_type=disp_type
     )
     db.add(new_session)
     db.commit()
@@ -234,6 +241,7 @@ def start_attendance_session(req: StartSessionRequest, db: Session = Depends(get
         "session_date": new_session.session_date,
         "period": new_session.period,
         "period_count": p_count,
+        "display_type": new_session.display_type,
         "message": f"Started new attendance session for {p_count} period{'s' if p_count > 1 else ''}"
     }
 
@@ -317,8 +325,11 @@ def get_session_details(session_id: int, db: Session = Depends(get_db), current_
         raise HTTPException(status_code=403, detail="You are not authorized to view this session")
 
     total_section_students = db.query(Student).filter(Student.section_id == session.section_id).all()
-    records = db.query(AttendanceRecord).filter(AttendanceRecord.session_id == session_id).all()
-    scanned_rolls = {r.roll_number: r.status.value for r in records}
+    records = db.query(AttendanceRecord).filter(AttendanceRecord.session_id == session_id).order_by(AttendanceRecord.id.desc()).all()
+    scanned_rolls = {}
+    for r in records:
+        if r.roll_number not in scanned_rolls:
+            scanned_rolls[r.roll_number] = r.status.value
 
     students_list = []
     present_count = 0
@@ -354,6 +365,7 @@ def get_session_details(session_id: int, db: Session = Depends(get_db), current_
     }
 
 from app.core.security import generate_projector_session_token
+from app.services.qr_token import ShortTokenService
 from app.services.qr_service import QRService
 
 @router.get("/sessions/{session_id}/broadcast-token")
@@ -377,15 +389,39 @@ def get_session_broadcast_token(
     if session.status != SessionStatus.OPEN:
         raise HTTPException(status_code=400, detail="Cannot broadcast a locked session. Please unlock the session first.")
 
-    p_count = period_count or _extract_period_count(session.period)
+    p_count = max(1, min(8, period_count or _extract_period_count(session.period)))
 
-    token_info = generate_projector_session_token(
+    from app.services.qr_token import get_effective_qr_format
+    active_format, format_reason = get_effective_qr_format(
+        db=db,
+        session_id=session.id,
+        section_id=session.section_id,
+        dept_code=session.section.department.code if session.section and session.section.department else None
+    )
+
+    short_info = ShortTokenService.issue_or_get_short_code(
+        db=db,
         session_id=session.id,
         period_count=p_count,
         step_window=10
     )
 
-    qr_base64 = QRService.generate_projector_qr_code(token_info["payload"], as_base64=True)
+    legacy_info = generate_projector_session_token(
+        session_id=session.id,
+        period_count=p_count,
+        step_window=10
+    )
+
+    if active_format == "legacy":
+        chosen_payload = legacy_info["payload"]
+        chosen_step = legacy_info.get("step")
+        chosen_seconds = legacy_info.get("seconds_remaining", 10)
+    else:
+        chosen_payload = short_info["payload"]
+        chosen_step = short_info["v"]
+        chosen_seconds = short_info["seconds_remaining"]
+
+    qr_base64 = QRService.generate_projector_qr_code(chosen_payload, as_base64=True)
 
     total_enrolled = db.query(Student).filter(Student.section_id == session.section_id).count()
     records = db.query(AttendanceRecord).filter(AttendanceRecord.session_id == session.id).all()
@@ -394,10 +430,15 @@ def get_session_broadcast_token(
 
     return {
         "session_id": session.id,
-        "qr_payload": token_info["payload"],
+        "format": active_format,
+        "format_reason": format_reason,
+        "qr_payload": chosen_payload,
+        "legacy_payload": legacy_info["payload"],
+        "short_payload": short_info["payload"],
+        "short_code": short_info["short_code"],
         "qr_base64": qr_base64,
-        "step": token_info["step"],
-        "seconds_remaining": token_info["seconds_remaining"],
+        "step": chosen_step,
+        "seconds_remaining": chosen_seconds,
         "refresh_interval": 10,
         "period_count": p_count,
         "period_name": session.period,
@@ -405,6 +446,7 @@ def get_session_broadcast_token(
         "subject_code": session.subject.code if session.subject else "",
         "section_name": session.section.name if session.section else "",
         "session_date": session.session_date,
+        "display_type": session.display_type or "projector",
         "total_enrolled": total_enrolled,
         "total_marked": total_marked,
         "attendance_pct": attendance_pct
@@ -415,14 +457,25 @@ from app.core.frappe_sync import sync_session_to_frappe
 from app.services.gsheets_service import GoogleSheetsService
 from app.services.excel_service import ExcelAttendanceService
 
+import threading
+
+_active_sync_locks = set()
+_sync_lock_mutex = threading.Lock()
+
 def _async_full_session_sync(session_id: int, target_sheet_id: Optional[str] = None):
     """
     Defensively executes asynchronous multi-target sync for a locked attendance session:
     1. Institutional Frappe ERP
     2. Google Sheets Attendance Register (atomic single-call batch sync)
     3. Official Master Excel Register
-    Any individual target failure is logged without impacting other sync targets or the API response.
+    Deduplicated with _active_sync_locks to prevent worker pool starvation from duplicate sync clicks.
     """
+    with _sync_lock_mutex:
+        if session_id in _active_sync_locks:
+            logger.info(f"[Sync Debounce] Sync already running for session {session_id}. Skipping duplicate job.")
+            return
+        _active_sync_locks.add(session_id)
+
     sync_db = SessionLocal()
     try:
         session = sync_db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
@@ -433,8 +486,13 @@ def _async_full_session_sync(session_id: int, target_sheet_id: Optional[str] = N
         all_students = sync_db.query(Student).filter(Student.section_id == session.section_id).all()
         all_rolls = [s.roll_number for s in all_students]
 
+        session_p_count = max(1, min(8, _extract_period_count(session.period)))
+
         records = sync_db.query(AttendanceRecord).filter(AttendanceRecord.session_id == session_id).all()
-        present_rolls = [r.roll_number for r in records if getattr(r.status, "value", str(r.status)) in ["PRESENT", "4"]]
+        present_rolls = [
+            r.roll_number for r in records
+            if getattr(r.status, "value", str(r.status)).upper() in ["PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"]
+        ]
 
         # 1. Sync to Frappe ERP
         try:
@@ -452,7 +510,7 @@ def _async_full_session_sync(session_id: int, target_sheet_id: Optional[str] = N
                     date_str=date_str,
                     present_rolls=present_rolls,
                     all_section_rolls=all_rolls,
-                    period_total="4"
+                    period_total=str(session_p_count)
                 )
             except Exception as gs_err:
                 logger.warning(f"[Google Sheets Sync Warning] Session {session_id} GSheets sync failed: {gs_err}")
@@ -469,7 +527,7 @@ def _async_full_session_sync(session_id: int, target_sheet_id: Optional[str] = N
                     d_formatted = date_str
 
                 for r_num in all_rolls:
-                    status_val = "4" if r_num in present_rolls else "A"
+                    status_val = str(session_p_count) if r_num in present_rolls else "A"
                     ExcelAttendanceService.record_attendance_in_excel(
                         file_path=master_excel,
                         roll_number=r_num,
@@ -483,6 +541,8 @@ def _async_full_session_sync(session_id: int, target_sheet_id: Optional[str] = N
     except Exception as general_err:
         logger.error(f"[Async Full Session Sync Error] Session {session_id}: {general_err}", exc_info=True)
     finally:
+        with _sync_lock_mutex:
+            _active_sync_locks.discard(session_id)
         sync_db.close()
 
 @router.post("/sessions/{session_id}/lock")
@@ -503,6 +563,7 @@ def lock_session(
     session.locked_at = datetime.utcnow()
     db.commit()
     invalidate_session_cache(session_id)
+    ShortTokenService.purge_session_tokens(db=db, session_id=session_id)
 
     # Determine Google Sheet ID for this teacher
     teacher_sheet_id = (current_teacher.google_sheet_id or "").strip()

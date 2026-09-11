@@ -127,11 +127,11 @@ class TestDeviceBindingSecurity(unittest.TestCase):
         self.assertEqual(res_switch.status_code, 403)
         self.assertIn("temporarily associated with another student account", res_switch.json()["detail"])
 
-    def test_05_six_attempts_limit(self):
-        """Test 5 — Six Attempts (Device 05 -> 21CS001 x 6) -> Attempt 6 REJECTED 429"""
+    def test_05_eleven_attempts_limit(self):
+        """Test 5 — Eleven Attempts (Device 05 -> 21CS001 x 10 allowed, Attempt 11 REJECTED 429)"""
         device = register_or_get_device(self.db, "DEVICE_TEST_05", "SECRET_05")
 
-        for _ in range(5):
+        for _ in range(10):
             enforce_device_binding(self.db, device, "21CS001")
 
         with self.assertRaises(HTTPException) as cm:
@@ -266,6 +266,39 @@ class TestDeviceBindingSecurity(unittest.TestCase):
             "cannot submit attendance for another student account" in detail_msg or
             "Faculty or Administrative privileges required" in detail_msg
         )
+
+    def test_11_silent_token_refresh_does_not_increment_attempt_count(self):
+        """Test 11 — Silent token refresh (/auth/refresh) must not increment attempt_count or trigger HTTP 429"""
+        res_login = self.client.post("/api/v1/auth/login", json={
+            "username": "21CS001",
+            "password": "pass123",
+            "device_public_id": "DEVICE_REFRESH_TEST",
+            "device_secret": "SECRET_REFRESH_TEST"
+        })
+        self.assertEqual(res_login.status_code, 200)
+        token = res_login.json()["access_token"]
+
+        # Simulate 10 silent background refreshes (would have locked out at 5 before)
+        for i in range(10):
+            res_refresh = self.client.post(
+                "/api/v1/auth/refresh",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "X-Device-Public-Id": "DEVICE_REFRESH_TEST",
+                    "X-Device-Secret": "SECRET_REFRESH_TEST"
+                }
+            )
+            self.assertEqual(res_refresh.status_code, 200)
+            token = res_refresh.json()["access_token"]
+
+        # Verify binding attempt_count is still 1
+        from app.models.models import DeviceAccountBinding
+        binding = self.db.query(DeviceAccountBinding).filter(
+            DeviceAccountBinding.roll_number == "21CS001",
+            DeviceAccountBinding.status == "ACTIVE"
+        ).order_by(DeviceAccountBinding.id.desc()).first()
+        self.assertIsNotNone(binding)
+        self.assertEqual(binding.attempt_count, 1)
 
 if __name__ == "__main__":
     unittest.main()

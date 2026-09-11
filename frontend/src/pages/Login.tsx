@@ -3,7 +3,6 @@ import { useAuth } from '../context/AuthContext';
 import { ArrowRight, Eye, EyeOff, Lock, Mail, Clock, AlertTriangle, Smartphone, Download, PlusSquare, X } from 'lucide-react';
 import { Toast } from '../components/Toast';
 import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/deviceCredential';
-import { IosSafariInterstitial } from '../components/IosSafariInterstitial';
 import { SelfServiceDeviceResetModal } from '../components/SelfServiceDeviceResetModal';
 import { initPwaTelemetryListeners } from '../services/telemetryService';
 import { usePwaInstall } from '../hooks/usePwaInstall';
@@ -21,7 +20,6 @@ export const Login: React.FC = () => {
   const [attemptsRemaining, setAttemptsRemaining] = useState<number | null>(null);
   const [showResetModal, setShowResetModal] = useState<boolean>(false);
   const [deviceMismatchError, setDeviceMismatchError] = useState<boolean>(false);
-  const [installBannerDismissed, setInstallBannerDismissed] = useState<boolean>(false);
   const {
     isStandalone,
     platform,
@@ -49,6 +47,16 @@ export const Login: React.FC = () => {
 
   React.useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+    const reason = params.get('reason');
+    if (reason === 'session_expired' || reason === 'idle_timeout') {
+      setToast({ message: 'Your session expired after inactivity. Please sign in again.', type: 'warning' });
+    } else if (reason === 'user_logout') {
+      setToast({ message: 'You have been safely signed out.', type: 'success' });
+    } else if (reason === 'binding_403' || reason === 'device_mismatch') {
+      setDeviceMismatchError(true);
+      setToast({ message: 'Your account is bound to another device. Please reset device binding or sign in on your registered device.', type: 'error' });
+    }
+
     const token = params.get('magic_token') || params.get('token');
     if (token) {
       setMagicToken(token);
@@ -111,6 +119,7 @@ export const Login: React.FC = () => {
       const deviceCreds = getOrCreateDeviceCredentials();
       const res = await fetch('/api/v1/auth/magic-login', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           token: magicToken,
@@ -130,7 +139,7 @@ export const Login: React.FC = () => {
         username: data.username,
         role: data.role,
         full_name: data.full_name,
-      });
+      }, data.refresh_token);
 
       if (data.password_updated) {
         setToast({ message: "Password set successfully! Entering portal...", type: 'success' });
@@ -139,7 +148,7 @@ export const Login: React.FC = () => {
       setTimeout(() => {
         if (data.role === 'SUPER_ADMIN') window.location.href = '/admin';
         else if (data.role === 'TEACHER') window.location.href = '/teacher';
-        else window.location.href = '/student';
+        else window.location.href = '/student?scan=true';
       }, 400);
 
     } catch (err: any) {
@@ -165,14 +174,18 @@ export const Login: React.FC = () => {
       const deviceCreds = getOrCreateDeviceCredentials();
       const deviceHeaders = getDeviceHeaders();
 
+      const cleanUsername = username.trim();
+      const cleanPassword = password.trim();
+
       const formData = new URLSearchParams();
-      formData.append('username', username);
-      formData.append('password', password);
+      formData.append('username', cleanUsername);
+      formData.append('password', cleanPassword);
       formData.append('device_public_id', deviceCreds.device_public_id);
       formData.append('device_secret', deviceCreds.device_secret);
 
       const res = await fetch('/api/v1/auth/login', {
         method: 'POST',
+        credentials: 'include',
         headers: { 
           'Content-Type': 'application/x-www-form-urlencoded',
           ...deviceHeaders
@@ -246,11 +259,11 @@ export const Login: React.FC = () => {
         username: response.username,
         role: response.role,
         full_name: response.full_name
-      });
+      }, response.refresh_token);
 
       if (response.role === 'SUPER_ADMIN') window.location.href = '/admin';
       else if (response.role === 'TEACHER') window.location.href = '/teacher';
-      else window.location.href = '/student';
+      else window.location.href = '/student?scan=true';
 
     } catch (err: any) {
       let message = err?.message || 'Login failed';
@@ -300,67 +313,6 @@ export const Login: React.FC = () => {
         <p className="text-xs text-[#5e5e63] mb-8 text-center font-medium">
           {magicUserInfo ? 'Faculty Direct Access & Password Setup' : 'SNIST Academic Attendance Portal'}
         </p>
-
-        {/* 1-Tap Quick Install Banner for Mobile & Supported Browsers */}
-        {!isStandalone && !installBannerDismissed && (platform !== 'desktop' || canInstallPrompt) && (
-          <div className="w-full mb-6 bg-gradient-to-r from-[#001e40] to-[#0a2e5c] text-white rounded-2xl p-3.5 shadow-lg border border-blue-900/40 animate-in fade-in">
-            <div className="flex items-center justify-between gap-2.5">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-9 h-9 rounded-xl overflow-hidden bg-[#08142c] p-0.5 shrink-0 border border-amber-400/40 shadow-sm flex items-center justify-center">
-                  <img src="/apple-touch-icon.png" alt="SNIST Icon" className="w-full h-full object-contain rounded-lg" />
-                </div>
-                <div className="text-left min-w-0">
-                  <p className="text-xs font-bold text-white truncate flex items-center gap-1.5">
-                    Install SNIST App
-                    <span className="text-[9px] bg-amber-400 text-slate-950 font-black px-1.5 py-0.5 rounded-full uppercase leading-none">1-Tap</span>
-                  </p>
-                  <p className="text-[10px] text-blue-200 truncate">
-                    {platform === 'ios' ? 'Create home screen shortcut' : '1-tap install to device'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-1.5 shrink-0">
-                {platform === 'ios' && browser !== 'safari' ? (
-                  <button
-                    type="button"
-                    onClick={() => copyLink()}
-                    className="py-1.5 px-3 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold transition shadow cursor-pointer"
-                  >
-                    {copied ? 'Copied!' : 'Copy Link'}
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => promptInstall()}
-                    disabled={isInstalling}
-                    className="py-1.5 px-3 bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 rounded-xl text-xs font-black transition shadow active:scale-95 flex items-center gap-1 cursor-pointer"
-                  >
-                    {platform === 'ios' ? (
-                      <>
-                        <PlusSquare className="w-3.5 h-3.5" />
-                        <span>Add to Home</span>
-                      </>
-                    ) : (
-                      <>
-                        <Download className="w-3.5 h-3.5" />
-                        <span>{isInstalling ? 'Opening...' : 'Install App'}</span>
-                      </>
-                    )}
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => setInstallBannerDismissed(true)}
-                  aria-label="Dismiss banner"
-                  className="p-1 rounded-lg text-slate-400 hover:text-white transition cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
 
         {isVerifyingMagic ? (
           <div className="w-full bg-white border border-[#D2D2D7] rounded-xl p-8 text-center shadow-sm">
@@ -535,6 +487,9 @@ export const Login: React.FC = () => {
                   name="college-id"
                   type="text"
                   required
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   placeholder="College Email or Roll Number"
@@ -626,9 +581,6 @@ export const Login: React.FC = () => {
         )}
 
       </div>
-
-      {/* iOS Non-Safari Interstitial */}
-      <IosSafariInterstitial />
 
       {/* iOS Safari Native Toolbar Install Guide */}
       <IosInstallGuideModal

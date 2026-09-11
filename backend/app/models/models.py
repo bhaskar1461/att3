@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, Float, Enum as SQLEnum, Index, UniqueConstraint
+from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Text, Float, Enum as SQLEnum, Index, UniqueConstraint, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -157,13 +157,14 @@ class Student(Base):
     user_id = Column(Integer, unique=True, nullable=True)
     roll_number = Column(String(50), unique=True, nullable=False)
     name = Column(String(100), nullable=False)
-    department_id = Column(Integer, nullable=False)
-    academic_year_id = Column(Integer, nullable=False)
-    section_id = Column(Integer, nullable=False)
+    department_id = Column(Integer, nullable=True)  # Nullable to support Unassigned department reconciliation
+    academic_year_id = Column(Integer, nullable=True)
+    section_id = Column(Integer, nullable=True)
     email = Column(String(100), nullable=True)
     mobile = Column(String(20), nullable=True)
     agency = Column(String(100), default="Regular")
     registered_device_id = Column(Integer, nullable=True)  # Bi-directional device binding (Layer 2 anti-proxy)
+    join_date = Column(String(20), nullable=True)  # YYYY-MM-DD for late-join proration
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", primaryjoin="Student.user_id==User.id", foreign_keys="[Student.user_id]", back_populates="student_profile")
@@ -189,6 +190,8 @@ class AttendanceSession(Base):
     __tablename__ = "qr_attendance_sessions"
     __table_args__ = (
         Index("idx_att_sess_teacher_date", "teacher_id", "session_date"),
+        Index("idx_att_sess_subject_date", "subject_id", "session_date"),
+        Index("idx_att_sess_section_date", "section_id", "session_date"),
     )
 
     id = Column(Integer, primary_key=True)
@@ -198,6 +201,7 @@ class AttendanceSession(Base):
     period = Column(String(100), nullable=False) # e.g. Period 1, Period 1-4 (4 Periods)
     session_date = Column(String(20), nullable=False) # YYYY-MM-DD
     status = Column(SQLEnum(SessionStatus), default=SessionStatus.OPEN, nullable=False)
+    display_type = Column(String(30), default="projector", nullable=True) # 'projector' | 'phone_screen' | 'laptop'
     created_at = Column(DateTime, default=datetime.utcnow)
     locked_at = Column(DateTime, nullable=True)
 
@@ -222,6 +226,8 @@ class AttendanceRecord(Base):
     session_date = Column(String(20), nullable=False)
     period_count = Column(Integer, default=4, nullable=True)
     status = Column(SQLEnum(AttendanceStatus), default=AttendanceStatus.PRESENT, nullable=False)
+    is_approved_absence = Column(Boolean, default=False, nullable=False, index=True)
+    approved_absence_reason = Column(String(100), nullable=True) # e.g. MEDICAL, SPORTS, DUTY
     scan_mode = Column(String(50), default="QR") # QR or MANUAL or PROJECTOR_SCAN
     scanned_at = Column(DateTime, default=datetime.utcnow)
 
@@ -240,6 +246,26 @@ class QRToken(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     student = relationship("Student", primaryjoin="QRToken.student_id==Student.id", foreign_keys="[QRToken.student_id]", back_populates="qr_tokens")
+
+class ShortTokenRegistry(Base):
+    """
+    Week 3 Short-Token Registry:
+    Maps compact 8-character Crockford Base32 short codes to active session IDs.
+    Indexed by short_code for O(1) in-memory/DB lookup with zero scan-path latency overhead.
+    """
+    __tablename__ = "qr_short_tokens"
+    __table_args__ = (
+        Index("idx_short_token_code", "short_code", unique=True),
+        Index("idx_short_token_session", "session_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    short_code = Column(String(16), unique=True, nullable=False, index=True)
+    session_id = Column(Integer, nullable=False, index=True)
+    issued_slot = Column(Integer, nullable=False)
+    expires_slot = Column(Integer, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 class SystemSettings(Base):
     __tablename__ = "qr_system_settings"
@@ -475,3 +501,193 @@ class OnboardingAuditLog(Base):
     ip_address = Column(String(50), nullable=True)
     performed_by = Column(Integer, nullable=True)  # Admin user_id or null for student self-service
     created_at = Column(DateTime, default=datetime.utcnow)  # Server IST
+
+
+# ============================================================
+# JNTUH R25 COMPLIANCE & CONDONATION MODELS
+# ============================================================
+
+class StudentCondonation(Base):
+    """Tracks condonation fine status per student per course or semester aggregate."""
+    __tablename__ = "qr_student_condonations"
+    __table_args__ = (
+        Index("idx_condonation_student", "student_id"),
+        UniqueConstraint("student_id", "course_id", "academic_year_id", name="uq_student_course_condonation"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, nullable=False, index=True)
+    course_id = Column(Integer, nullable=True)  # Nullable: None represents aggregate semester condonation
+    academic_year_id = Column(Integer, nullable=True)
+    status = Column(String(50), default="pending", nullable=False)  # pending, approved, paid, waived, rejected
+    fine_amount = Column(Float, default=0.0)
+    remarks = Column(Text, nullable=True)
+    updated_by = Column(Integer, nullable=True)  # Admin user_id
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    @staticmethod
+    def validate_transition(current_status: str, new_status: str) -> bool:
+        """
+        Validates condonation state machine transitions:
+        - pending -> applied, approved, waived, rejected
+        - applied -> approved, fine_paid, waived, rejected
+        - approved -> fine_paid, waived
+        - fine_paid / waived -> terminal
+        - rejected -> terminal (STRICT: no rejected -> applied skip)
+        """
+        cur = (current_status or "pending").strip().lower()
+        nxt = (new_status or "").strip().lower()
+        if nxt == "paid":
+            nxt = "fine_paid"
+        if cur == "paid":
+            cur = "fine_paid"
+
+        allowed = {
+            "pending": {"pending", "applied", "approved", "waived", "rejected"},
+            "applied": {"applied", "approved", "fine_paid", "waived", "rejected"},
+            "approved": {"approved", "fine_paid", "waived"},
+            "fine_paid": {"fine_paid"},
+            "waived": {"waived"},
+            "rejected": {"rejected"}
+        }
+        return nxt in allowed.get(cur, set())
+
+
+class Semester(Base):
+    """Academic semester entities with planned session targets and date ranges."""
+    __tablename__ = "qr_semesters"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(100), nullable=False)  # e.g. "Odd Semester 2026-27"
+    academic_year_id = Column(Integer, nullable=True)
+    start_date = Column(String(20), nullable=False)  # ISO YYYY-MM-DD
+    end_date = Column(String(20), nullable=False)    # ISO YYYY-MM-DD
+    total_planned_sessions = Column(Integer, default=60, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    academic_year = relationship("AcademicYear", primaryjoin="Semester.academic_year_id==AcademicYear.id", foreign_keys="[Semester.academic_year_id]")
+
+
+class FortnightSnapshot(Base):
+    """Fortnightly certified attendance snapshot records (Compliance certification evidence)."""
+    __tablename__ = "qr_fortnight_snapshots"
+    __table_args__ = (
+        Index("idx_fn_student_course", "student_id", "course_id"),
+        Index("idx_fn_semester_num", "semester_id", "fortnight_number"),
+        UniqueConstraint("student_id", "course_id", "semester_id", "fortnight_number", name="uq_student_course_semester_fortnight"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    semester_id = Column(Integer, nullable=True)
+    fortnight_number = Column(Integer, nullable=False)
+    start_date = Column(String(20), nullable=True)
+    end_date = Column(String(20), nullable=True)
+    student_id = Column(Integer, nullable=False, index=True)
+    course_id = Column(Integer, nullable=True)  # Nullable: None represents aggregate semester fortnight
+    sessions_held = Column(Integer, default=0, nullable=False)
+    sessions_present = Column(Integer, default=0, nullable=False)
+    percentage = Column(Float, nullable=True)
+    band = Column(String(50), nullable=True)
+    certified_by = Column(Integer, nullable=True)  # User ID who certified
+    certified_at = Column(DateTime, nullable=True)
+    is_countersigned = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    student = relationship("Student", primaryjoin="FortnightSnapshot.student_id==Student.id", foreign_keys="[FortnightSnapshot.student_id]")
+    course = relationship("Subject", primaryjoin="FortnightSnapshot.course_id==Subject.id", foreign_keys="[FortnightSnapshot.course_id]")
+    semester = relationship("Semester", primaryjoin="FortnightSnapshot.semester_id==Semester.id", foreign_keys="[FortnightSnapshot.semester_id]")
+
+
+class StudentWarning(Base):
+    """Immutable early-warning alert snapshots issued to students trending toward detention."""
+    __tablename__ = "qr_student_warnings"
+    __table_args__ = (
+        Index("idx_warning_student", "student_id"),
+        Index("idx_warning_course", "course_id"),
+        Index("idx_warning_issued_at", "issued_at"),
+        Index("idx_warning_student_course", "student_id", "course_id"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    student_id = Column(Integer, nullable=False, index=True)
+    course_id = Column(Integer, nullable=True)  # Nullable: None represents aggregate warning
+    semester_id = Column(Integer, nullable=True)
+    warning_type = Column(String(50), default="ATTENDANCE_DEFICIT", nullable=False)  # ATTENDANCE_DEFICIT, RAPID_DECLINE, NOT_RECOVERABLE
+    # Immutable snapshot numbers at time of warning issuance
+    percentage_at_issue = Column(Float, nullable=False)
+    band_at_issue = Column(String(50), nullable=False)
+    classes_needed_at_issue = Column(Integer, nullable=True)
+    sessions_held_at_issue = Column(Integer, nullable=True)
+    sessions_present_at_issue = Column(Integer, nullable=True)
+    issued_by_user_id = Column(Integer, nullable=False)
+    issued_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    message = Column(Text, nullable=True)
+    parent_notified = Column(Boolean, default=False, nullable=False)
+    parent_notification_status = Column(String(50), default="SKIPPED_DISABLED", nullable=True)  # SENT, SKIPPED_DISABLED, LOGGED_NO_GATEWAY, FAILED
+    parent_email = Column(String(150), nullable=True)
+    parent_notified_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    student = relationship("Student", primaryjoin="StudentWarning.student_id==Student.id", foreign_keys="[StudentWarning.student_id]")
+    course = relationship("Subject", primaryjoin="StudentWarning.course_id==Subject.id", foreign_keys="[StudentWarning.course_id]")
+    semester = relationship("Semester", primaryjoin="StudentWarning.semester_id==Semester.id", foreign_keys="[StudentWarning.semester_id]")
+
+
+class ScanTelemetryEvent(Base):
+    """
+    Raw QR scan funnel events (retention: 30 days).
+    Strictly NO PII: stores pipeline stages, device tiers, timings, and error types.
+    """
+    __tablename__ = "qr_scan_telemetry_events"
+
+    id = Column(Integer, primary_key=True)
+    session_id = Column(String(100), nullable=True)
+    event_type = Column(String(50), nullable=False)
+    stage = Column(String(50), nullable=True)
+    error_type = Column(String(50), nullable=True)
+    device_bucket = Column(String(20), nullable=False)  # 'old', 'mid', 'new'
+    duration_ms = Column(Float, nullable=True)
+    decode_duration_ms = Column(Float, nullable=True)  # delta from first_frame_captured to frame_decoded
+    display_type = Column(String(30), default="projector", nullable=True)  # 'projector' | 'phone_screen' | 'laptop'
+    token_format = Column(String(20), nullable=True)  # 'legacy' | 'short'
+    app_version = Column(String(30), nullable=True)
+    payload_json = Column(Text, nullable=True)  # sanitized JSON metadata (strictly no PII)
+    client_timestamp = Column(BigInteger, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ScanTelemetryDailyRollup(Base):
+    """
+    Aggregated historical daily scan metrics per device bucket (kept indefinitely).
+    Generated by nightly rollup job on the background worker budget.
+    """
+    __tablename__ = "qr_scan_telemetry_daily_rollup"
+    __table_args__ = (
+        UniqueConstraint("date", "device_bucket", name="uq_telemetry_date_bucket"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    date = Column(String(20), nullable=False)  # ISO YYYY-MM-DD
+    device_bucket = Column(String(20), nullable=False)  # 'old', 'mid', 'new', 'all'
+    total_scans_started = Column(Integer, default=0, nullable=False)
+    total_scans_confirmed = Column(Integer, default=0, nullable=False)
+    first_attempt_success_count = Column(Integer, default=0, nullable=False)
+    first_attempt_success_rate = Column(Float, default=0.0, nullable=False)
+    legacy_format_count = Column(Integer, default=0, nullable=False)
+    short_format_count = Column(Integer, default=0, nullable=False)
+    avg_time_to_mark_ms = Column(Float, default=0.0, nullable=False)
+    p50_time_to_mark_ms = Column(Float, default=0.0, nullable=False)
+    p95_time_to_mark_ms = Column(Float, default=0.0, nullable=False)
+    stage_dropoffs_json = Column(Text, nullable=True)  # JSON dict of counts per stage
+    failure_counts_json = Column(Text, nullable=True)  # JSON dict of counts per error_type
+    decode_p50_ms = Column(Float, nullable=True)
+    decode_p95_ms = Column(Float, nullable=True)
+    decode_histogram_json = Column(Text, nullable=True)  # JSON dict with brackets: <1s, 1-3s, 3-5s, 5-8s, 8-15s, >15s
+    manual_searches_count = Column(Integer, default=0, nullable=False)
+    manual_marks_count = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
