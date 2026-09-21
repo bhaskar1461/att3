@@ -187,7 +187,7 @@ except ImportError:
             return None
 
 
-def create_magic_login_token(username: str, role: str = "TEACHER", expires_days: int = 7) -> str:
+def create_magic_login_token(username: str, role: str = "TEACHER", expires_days: int = 30) -> str:
     """Creates a secure time-bound magic link login token for faculty/students."""
     data = {
         "sub": username,
@@ -199,13 +199,34 @@ def create_magic_login_token(username: str, role: str = "TEACHER", expires_days:
 
 
 def verify_magic_login_token(token: str) -> Optional[dict]:
-    """Decodes and validates a magic link login token."""
+    """Decodes and validates a magic link login token with a signature-verified grace period."""
+    if not token or not isinstance(token, str):
+        return None
+
+    # 1. Standard decode (active unexpired token)
     payload = decode_access_token(token)
-    if not payload:
-        return None
-    if payload.get("type") != "magic_login":
-        return None
-    return payload
+    if payload and payload.get("type") == "magic_login":
+        return payload
+
+    # 2. Cryptographic grace period: If token was genuinely signed by our SECRET_KEY
+    # but has expired within the last 30 days, allow it so students are not locked out.
+    try:
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=[settings.ALGORITHM],
+            options={"verify_exp": False}
+        )
+        if payload.get("type") == "magic_login":
+            exp = payload.get("exp", 0)
+            now = datetime.utcnow().timestamp()
+            # Allow up to 30 days grace period past expiration timestamp
+            if (now - exp) < (30 * 86400):
+                return payload
+    except Exception:
+        pass
+
+    return None
 
 
 # --- AES / HMAC Security for Student QR Codes ---
@@ -494,25 +515,39 @@ def generate_projector_session_token(
         "step_window": step_window
     }
 
+class TokenValidationError(ValueError):
+    """Exception raised when QR / launch token validation fails."""
+    def __init__(self, code: str, message: str, server_now: Optional[float] = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.server_now = server_now if server_now is not None else time.time()
+
+
 def validate_projector_session_token(
     token_str: str, 
     step_window: int = 10, 
     max_grace_steps: Optional[int] = None,
     grace_seconds: Optional[float] = None,
-    now_ts: Optional[float] = None
+    now_ts: Optional[float] = None,
+    is_offline_submission: bool = False
 ) -> Dict[str, Any]:
     """
-    Validates rotating projector session token with sub-second sliding grace window.
-    Accepts tokens up to TOKEN_GRACE_SECONDS past slot end (default 3s).
+    Validates rotating projector session token.
+    For live online submissions, accepts ONLY the current window (v) and previous window (v - 1).
+    Supports bounded SUBMIT_GRACE_MINUTES window for queued offline submissions.
     Preserves cryptographic HMAC signature verification and device-binding/single-use invariants.
     """
+    if now_ts is None:
+        now_ts = time.time()
+
     raw = str(token_str).strip()
     if not raw.startswith("SNIST-SES|"):
-        raise ValueError("Invalid projector token prefix: Expected SNIST-SES")
+        raise TokenValidationError(code="invalid", message="Invalid projector token prefix: Expected SNIST-SES", server_now=now_ts)
         
     parts = raw.split("|")
     if len(parts) != 5:
-        raise ValueError("Invalid projector token format: Expected 5 pipe-delimited fields")
+        raise TokenValidationError(code="invalid", message="Invalid projector token format: Expected 5 pipe-delimited fields", server_now=now_ts)
         
     _, sid_b36, period_count_str, step_b36, mac = parts
     
@@ -521,32 +556,47 @@ def validate_projector_session_token(
         period_count = int(period_count_str)
         token_step = _base36_to_int(step_b36)
     except Exception as parse_err:
-        raise ValueError(f"Malformed fields in projector token: {parse_err}")
+        raise TokenValidationError(code="invalid", message=f"Malformed fields in projector token: {parse_err}", server_now=now_ts)
 
     if period_count < 1 or period_count > 8:
-        raise ValueError("Invalid period count in projector token (must be between 1 and 8)")
-        
-    if now_ts is None:
-        now_ts = time.time()
+        raise TokenValidationError(code="invalid", message="Invalid period count in projector token (must be between 1 and 8)", server_now=now_ts)
 
-    # Determine effective grace in seconds
-    if grace_seconds is not None:
-        effective_grace = float(grace_seconds)
-    elif max_grace_steps is not None and max_grace_steps > 0:
-        effective_grace = float(max_grace_steps * step_window)
+    # Window check:
+    if is_offline_submission:
+        grace_mins = getattr(settings, "SUBMIT_GRACE_MINUTES", 10)
+        effective_grace = float(grace_mins * 60)
+        slot_start_ts = token_step * step_window
+        slot_end_ts = (token_step + 1) * step_window
+        max_valid_ts = slot_end_ts + effective_grace
+        min_valid_ts = slot_start_ts - 2.0
+        if now_ts > max_valid_ts:
+            raise TokenValidationError(
+                code="expired",
+                message=f"Projector QR token expired beyond offline submit grace window ({getattr(settings, 'SUBMIT_GRACE_MINUTES', 10)}m).",
+                server_now=now_ts
+            )
+        if now_ts < min_valid_ts:
+            raise TokenValidationError(
+                code="invalid",
+                message="Projector QR token timestamp is in the future. Check clock synchronization.",
+                server_now=now_ts
+            )
     else:
-        effective_grace = float(getattr(settings, "TOKEN_GRACE_SECONDS", 3.0))
-
-    slot_start_ts = token_step * step_window
-    slot_end_ts = (token_step + 1) * step_window
-    max_valid_ts = slot_end_ts + effective_grace
-    # Allow 2 seconds of clock skew for client clocks ahead of server
-    min_valid_ts = slot_start_ts - 2.0
-    
-    if now_ts > max_valid_ts:
-        raise ValueError("Projector QR token has expired. Please scan the newly refreshed QR on screen.")
-    if now_ts < min_valid_ts:
-        raise ValueError("Projector QR token timestamp is in the future. Check clock synchronization.")
+        # Strictly accept only the current window (current_step) and previous window (current_step - 1)
+        current_step = int(now_ts // step_window)
+        if token_step < current_step - 1:
+            raise TokenValidationError(
+                code="expired",
+                message="Projector QR token has expired. Please scan the newly refreshed QR on screen.",
+                server_now=now_ts
+            )
+        if token_step > current_step:
+            raise TokenValidationError(
+                code="invalid",
+                message="Projector QR token timestamp is in the future. Check clock synchronization.",
+                server_now=now_ts
+            )
+        slot_end_ts = (token_step + 1) * step_window
         
     # Verify HMAC for token_step
     base_str = f"SES|{sid_b36}|{period_count}|{step_b36}"
@@ -554,13 +604,13 @@ def validate_projector_session_token(
     expected_mac = hmac.new(key, base_str.encode('utf-8'), hashlib.sha256).hexdigest()[:12]
     
     if not hmac.compare_digest(mac, expected_mac):
-        raise ValueError("Invalid projector QR signature (Tampered token)")
+        raise TokenValidationError(code="invalid", message="Invalid projector QR signature (Tampered token)", server_now=now_ts)
         
     return {
         "session_id": session_id,
         "period_count": period_count,
         "step": token_step,
-        "is_grace_window": (now_ts > slot_end_ts)
+        "is_grace_window": (now_ts >= slot_end_ts)
     }
 
 

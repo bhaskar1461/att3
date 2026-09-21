@@ -2,11 +2,11 @@ import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { ArrowRight, Eye, EyeOff, Lock, Mail, Clock, AlertTriangle, Smartphone, Download, PlusSquare, X } from 'lucide-react';
 import { Toast } from '../components/Toast';
-import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/deviceCredential';
 import { SelfServiceDeviceResetModal } from '../components/SelfServiceDeviceResetModal';
 import { initPwaTelemetryListeners } from '../services/telemetryService';
 import { usePwaInstall } from '../hooks/usePwaInstall';
 import { IosInstallGuideModal } from '../components/IosInstallGuideModal';
+import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/deviceCredential';
 
 export const Login: React.FC = () => {
   const { login } = useAuth();
@@ -116,16 +116,19 @@ export const Login: React.FC = () => {
 
     setIsLoading(true);
     try {
-      const deviceCreds = getOrCreateDeviceCredentials();
+      const creds = getOrCreateDeviceCredentials();
       const res = await fetch('/api/v1/auth/magic-login', {
         method: 'POST',
         credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...getDeviceHeaders()
+        },
         body: JSON.stringify({
           token: magicToken,
           new_password: newPassword ? newPassword.trim() : undefined,
-          device_public_id: deviceCreds.device_public_id,
-          device_secret: deviceCreds.device_secret,
+          device_public_id: creds.device_public_id,
+          device_secret: creds.device_secret,
         }),
       });
 
@@ -171,24 +174,22 @@ export const Login: React.FC = () => {
     setIsLoading(true);
     setOnboardingWarning(false);
     try {
-      const deviceCreds = getOrCreateDeviceCredentials();
-      const deviceHeaders = getDeviceHeaders();
-
       const cleanUsername = username.trim();
       const cleanPassword = password.trim();
 
+      const creds = getOrCreateDeviceCredentials();
       const formData = new URLSearchParams();
       formData.append('username', cleanUsername);
       formData.append('password', cleanPassword);
-      formData.append('device_public_id', deviceCreds.device_public_id);
-      formData.append('device_secret', deviceCreds.device_secret);
+      formData.append('device_public_id', creds.device_public_id);
+      formData.append('device_secret', creds.device_secret);
 
       const res = await fetch('/api/v1/auth/login', {
         method: 'POST',
         credentials: 'include',
         headers: { 
           'Content-Type': 'application/x-www-form-urlencoded',
-          ...deviceHeaders
+          ...getDeviceHeaders()
         },
         body: formData,
       });

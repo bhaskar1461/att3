@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status, Backgrou
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session, joinedload
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
@@ -943,6 +943,7 @@ def login_via_magic_link(req: MagicLoginRequest, request: Request, db: Session =
 
     # Track device if student
     if user.role == UserRole.STUDENT:
+        clean_roll = user.username.upper()
         device_public_id = (req.device_public_id or "").strip()
         device_secret = (req.device_secret or "").strip()
         ip_address = request.client.host if request.client else None
@@ -950,7 +951,7 @@ def login_via_magic_link(req: MagicLoginRequest, request: Request, db: Session =
             import hashlib
             client_ua = request.headers.get("user-agent", "generic_student_browser")
             client_ip = ip_address or "127.0.0.1"
-            conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+            conn_sig = hashlib.sha256(f"{clean_roll}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
             device_public_id = f"DEV-CONN-{conn_sig.upper()}"
             device_secret = hashlib.sha256(f"{device_public_id}_SECRET_SALT_2026".encode()).hexdigest()
 
@@ -960,10 +961,28 @@ def login_via_magic_link(req: MagicLoginRequest, request: Request, db: Session =
             device_secret=device_secret,
             ip_address=ip_address
         )
+
+        # Magic link authentication is authoritative: expire any conflicting active bindings
+        # on this device so testing, shared devices, or NAT proxy never lock the student out.
+        try:
+            from app.models.models import DeviceAccountBinding, BindingStatus
+            conflicting = db.query(DeviceAccountBinding).filter(
+                DeviceAccountBinding.device_id == device.id,
+                DeviceAccountBinding.status == BindingStatus.ACTIVE,
+                DeviceAccountBinding.roll_number != clean_roll,
+                DeviceAccountBinding.expires_at > datetime.utcnow()
+            ).all()
+            for cb in conflicting:
+                cb.status = BindingStatus.EXPIRED
+            if conflicting:
+                db.commit()
+        except Exception as bind_clear_err:
+            logger.warning(f"Non-fatal error clearing conflicting bindings during magic-login: {bind_clear_err}")
+
         enforce_device_binding(
             db=db,
             device=device,
-            roll_number=user.username.upper(),
+            roll_number=clean_roll,
             ip_address=ip_address
         )
         # L2 Device Enrollment enforcement REMOVED from magic-link login flow.
