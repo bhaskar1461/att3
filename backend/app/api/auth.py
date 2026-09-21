@@ -344,8 +344,9 @@ async def login_for_access_token(request: Request, background_tasks: BackgroundT
         or_(
             func.upper(User.username) == clean_roll,
             func.upper(User.email) == clean_roll,
-            func.upper(User.email) == f"{clean_roll}@CSE.SREENIDHI.EDU.IN",
-            func.upper(User.email) == f"{clean_roll}@CS.SREENIDHI.EDU.IN",
+            User.email.ilike(f"{clean_roll}@%.sreenidhi.edu.in"),
+            User.email.ilike(f"{clean_roll}@sreenidhi.edu.in"),
+            User.email.ilike(f"{clean_roll}@snist.edu.in"),
             User.username == clean_username,
             User.email == clean_username,
             User.username.ilike(clean_username),
@@ -361,6 +362,8 @@ async def login_for_access_token(request: Request, background_tasks: BackgroundT
                 or_(
                     func.upper(StudentOnboarding.roll_number) == clean_roll,
                     func.upper(StudentOnboarding.email) == clean_roll,
+                    StudentOnboarding.email.ilike(f"{clean_roll}@%.sreenidhi.edu.in"),
+                    StudentOnboarding.email.ilike(f"{clean_roll}@sreenidhi.edu.in"),
                     StudentOnboarding.roll_number.ilike(clean_username),
                     StudentOnboarding.email.ilike(clean_username),
                     StudentOnboarding.email.ilike(f"{clean_username}@%")
@@ -369,7 +372,7 @@ async def login_for_access_token(request: Request, background_tasks: BackgroundT
             if onboard_candidate and onboard_candidate.pin_hash and verify_password(password, onboard_candidate.pin_hash):
                 user = User(
                     username=onboard_candidate.roll_number.upper(),
-                    email=onboard_candidate.email or f"{onboard_candidate.roll_number.lower()}@cs.sreenidhi.edu.in",
+                    email=onboard_candidate.email or f"{onboard_candidate.roll_number.lower()}@sreenidhi.edu.in",
                     password_hash=onboard_candidate.pin_hash,
                     role=UserRole.STUDENT,
                     is_active=True,
@@ -544,23 +547,10 @@ async def login_for_access_token(request: Request, background_tasks: BackgroundT
     elif user.role == UserRole.STUDENT and user.student_profile:
         full_name = user.student_profile.name
 
-    # 3. Enforce bi-directional student-to-device enrollment (Layer 2 Anti-Proxy)
-    if user.role == UserRole.STUDENT and user.student_profile and device_binding:
-        try:
-            target_device = device if (device and getattr(device, "device_public_id", None) == device_public_id.strip()) else db.query(DeviceRegistration).filter(
-                DeviceRegistration.device_public_id == device_public_id.strip()
-            ).first()
-            if target_device:
-                enforce_student_device_enrollment(
-                    db=db,
-                    student=user.student_profile,
-                    device=target_device,
-                    ip_address=ip_address
-                )
-        except HTTPException:
-            raise
-        except Exception as enrollment_err:
-            logger.warning(f"Non-fatal enrollment enforcement error for {user.username}: {enrollment_err}")
+    # 3. L2 Device Enrollment enforcement REMOVED from login flow.
+    # Anti-proxy device binding is now enforced ONLY during attendance scan (student.py)
+    # to prevent systemic lockouts when students switch phones/browsers/clear data.
+    # Students must be able to log in from any device; anti-proxy checks apply at scan time.
 
     # 4. Create access token (15 min for students) and sliding refresh token (12 hours)
     access_token = create_access_token(
@@ -976,13 +966,8 @@ def login_via_magic_link(req: MagicLoginRequest, request: Request, db: Session =
             roll_number=user.username.upper(),
             ip_address=ip_address
         )
-        if user.student_profile:
-            enforce_student_device_enrollment(
-                db=db,
-                student=user.student_profile,
-                device=device,
-                ip_address=ip_address
-            )
+        # L2 Device Enrollment enforcement REMOVED from magic-link login flow.
+        # Anti-proxy device binding is enforced ONLY during attendance scan (student.py).
 
     access_token = create_access_token(data={"sub": user.username, "role": user.role.value})
 
