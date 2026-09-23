@@ -1,8 +1,9 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import jsQR from 'jsqr';
 import { 
   X, Camera, CheckCircle, AlertTriangle, RefreshCw,
-  Clock, WifiOff, Flashlight, User, KeyRound, ShieldCheck
+  Clock, WifiOff, Flashlight, User, KeyRound, ShieldCheck,
+  Copy, ExternalLink, Globe
 } from 'lucide-react';
 import { apiRequest } from '../services/api';
 import { PwaInstallGuard } from './PwaInstallGuard';
@@ -51,6 +52,38 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
   // Dynamic Visual Guidance Text
   const [guideText, setGuideText] = useState<string>('Align the QR inside the frame');
   const [permissionState, setPermissionState] = useState<'prompt' | 'granted' | 'denied' | 'insecure_origin' | 'unknown'>('unknown');
+
+  // iOS & Specific Browser Detection for Context-Aware Permission Rescue
+  const browserInfo = useMemo(() => {
+    if (typeof navigator === 'undefined') return { isIOS: false, name: 'Browser', isBrave: false, isSafari: true };
+    const ua = navigator.userAgent || '';
+    const isIOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const isBrave = !!(navigator as any).brave?.isBrave || /Brave/i.test(ua);
+    const isChromeIOS = /CriOS/i.test(ua);
+    const isFirefoxIOS = /FxiOS/i.test(ua);
+    const isEdgeIOS = /EdgiOS/i.test(ua);
+    const isSafari = isIOS && !isBrave && !isChromeIOS && !isFirefoxIOS && !isEdgeIOS;
+
+    let name = 'Safari';
+    if (isBrave) name = 'Brave';
+    else if (isChromeIOS) name = 'Chrome';
+    else if (isFirefoxIOS) name = 'Firefox';
+    else if (isEdgeIOS) name = 'Edge';
+    else if (!isIOS) name = 'Browser';
+
+    return { isIOS, name, isBrave, isChromeIOS, isFirefoxIOS, isSafari };
+  }, []);
+
+  const [copiedSafariLink, setCopiedSafariLink] = useState<boolean>(false);
+  const handleCopySafariLink = () => {
+    try {
+      navigator.clipboard.writeText(window.location.href);
+      setCopiedSafariLink(true);
+      setTimeout(() => setCopiedSafariLink(false), 3000);
+    } catch {
+      // fallback
+    }
+  };
 
   // Authorized debug mode flag: only active if explicitly requested via ?debug=1 or localStorage
   const isDebugMode = typeof window !== 'undefined' && (
@@ -1558,7 +1591,15 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       triggerFeedback(false);
 
       if (isDenied) {
-        setCameraError('Camera access is required to scan the classroom QR. Enable camera access in Safari settings and try again.');
+        if (browserInfo.isBrave && browserInfo.isIOS) {
+          setCameraError('Camera blocked by Brave Shields. Lower Shields for this site (lion icon in address bar) and tap Reload Page, or open in Safari.');
+        } else if (browserInfo.isIOS && !browserInfo.isSafari) {
+          setCameraError(`Camera blocked in ${browserInfo.name}. Enable camera in iOS Settings → ${browserInfo.name} → Camera and tap Reload Page, or open in Safari.`);
+        } else if (browserInfo.isSafari) {
+          setCameraError('Camera access blocked. Enable camera access in iOS Settings → Safari → Camera and tap Reload Page.');
+        } else {
+          setCameraError('Camera access blocked. Please allow camera access in your browser settings and reload the page.');
+        }
       } else if (isReadable) {
         setCameraError('Camera is in use by another app. Please close other camera apps (WhatsApp, Camera, Instagram) and retry.');
       } else {
@@ -2011,28 +2052,58 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
                 {/* 7. Camera Blocked / Error In-Viewport State */}
                 {(cameraError || permissionState === 'denied') && (
-                  <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center space-y-3" style={{ zIndex: 25 }}>
+                  <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center space-y-3.5" style={{ zIndex: 25 }}>
                     <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center border border-rose-500/30">
                       <Camera className="w-6 h-6 text-rose-400" />
                     </div>
-                    <div className="space-y-1 max-w-xs">
+                    <div className="space-y-1.5 max-w-xs">
                       <h3 className="text-sm font-bold text-white">
-                        {permissionState === 'denied' ? 'Camera access blocked' : 'Camera unavailable'}
+                        {browserInfo.isBrave && browserInfo.isIOS 
+                          ? 'Camera blocked by Brave Shields' 
+                          : permissionState === 'denied' 
+                            ? `Camera blocked in ${browserInfo.name}` 
+                            : 'Camera unavailable'}
                       </h3>
                       <p className="text-xs text-slate-300 leading-relaxed">
-                        {permissionState === 'denied'
-                          ? 'Enable camera access in Safari settings and try again.'
-                          : 'Allow camera access to scan the classroom QR.'}
+                        {cameraError || (permissionState === 'denied'
+                          ? (browserInfo.isBrave && browserInfo.isIOS
+                              ? 'Turn OFF Brave Shields (lion icon in address bar) and tap Reload Page, or open in Safari.' 
+                              : `Enable camera access in ${browserInfo.name} settings and reload.`)
+                          : 'Allow camera access to scan the classroom QR.')}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => startCamera(1)}
-                      className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-lg transition flex items-center gap-2 cursor-pointer active:scale-95"
-                    >
-                      <RefreshCw className="w-3.5 h-3.5" />
-                      <span>Try Again</span>
-                    </button>
+
+                    <div className="flex flex-col gap-2 w-full max-w-xs pt-1">
+                      {/* Reload button breaks the iOS WebKit permission cache loop */}
+                      <button
+                        type="button"
+                        onClick={() => window.location.reload()}
+                        className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-lg transition flex items-center justify-center gap-2 cursor-pointer active:scale-95"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Reload Page (Reset Permission)</span>
+                      </button>
+
+                      {browserInfo.isIOS && !browserInfo.isSafari && (
+                        <button
+                          type="button"
+                          onClick={handleCopySafariLink}
+                          className="w-full py-2 bg-indigo-600/90 hover:bg-indigo-600 text-white font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>{copiedSafariLink ? 'Copied! Open Safari & Paste' : 'Open in Safari (Copy Link)'}</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => setShowRollCard(true)}
+                        className="w-full py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5 cursor-pointer"
+                      >
+                        <User className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Show Roll No. for Verification</span>
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -2042,41 +2113,56 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                 
                 {/* Camera Permission / Error Card */}
                 {(cameraError || permissionState === 'denied' || permissionState === 'insecure_origin' || isCameraInUse) ? (
-                  <div className="w-full p-3.5 bg-rose-50 border border-rose-200 rounded-2xl text-center space-y-2 animate-in fade-in">
+                  <div className="w-full p-3.5 bg-rose-50 border border-rose-200 rounded-2xl text-center space-y-2.5 animate-in fade-in">
                     <div className="w-8 h-8 bg-rose-100 text-rose-700 rounded-full flex items-center justify-center mx-auto">
                       <AlertTriangle className="w-4 h-4 text-rose-600" />
                     </div>
                     <div>
                       <h4 className="text-xs font-bold text-rose-950">
-                        {permissionState === 'denied' 
-                          ? 'Camera Permission Blocked' 
-                          : isCameraInUse 
-                            ? 'Camera In Use' 
-                            : 'Camera Unavailable'}
+                        {browserInfo.isBrave && browserInfo.isIOS 
+                          ? 'Brave Shields Blocking Camera' 
+                          : permissionState === 'denied' 
+                            ? `Camera Blocked in ${browserInfo.name}` 
+                            : isCameraInUse 
+                              ? 'Camera In Use' 
+                              : 'Camera Unavailable'}
                       </h4>
                       <p className="text-[11px] text-rose-800 mt-0.5 leading-relaxed">
-                        {permissionState === 'denied'
-                          ? 'Please enable camera access in your browser settings to scan attendance.'
-                          : isCameraInUse
-                            ? 'Another application is using your camera. Please close it and retry.'
-                            : cameraError || 'Could not connect to camera.'}
+                        {browserInfo.isBrave && browserInfo.isIOS
+                          ? 'Turn OFF Brave Shields (lion icon in address bar) and tap Reload Page, or switch to Safari.'
+                          : permissionState === 'denied'
+                            ? `Please enable camera in your ${browserInfo.name} settings and reload.`
+                            : isCameraInUse
+                              ? 'Another application is using your camera. Please close it and retry.'
+                              : cameraError || 'Could not connect to camera.'}
                       </p>
                     </div>
-                    <div className="flex gap-2 pt-1">
+                    <div className="flex flex-col sm:flex-row gap-2 pt-1">
                       <button
                         type="button"
-                        onClick={() => startCamera(1)}
+                        onClick={() => window.location.reload()}
                         className="flex-1 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
                       >
                         <RefreshCw className="w-3.5 h-3.5" />
-                        <span>Retry Camera</span>
+                        <span>Reload Page</span>
                       </button>
+                      {browserInfo.isIOS && !browserInfo.isSafari && (
+                        <button
+                          type="button"
+                          onClick={handleCopySafariLink}
+                          className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                          <span>{copiedSafariLink ? 'Copied Link!' : 'Use Safari'}</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => setShowRollCard(true)}
-                        className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition cursor-pointer"
+                        className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition cursor-pointer flex items-center justify-center gap-1"
                       >
-                        Show Roll No.
+                        <User className="w-3 h-3 text-slate-500" />
+                        <span>Show Roll No.</span>
                       </button>
                     </div>
                   </div>
