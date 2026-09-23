@@ -25,8 +25,8 @@ RUN mkdir -p /etc/nginx/certs && \
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
     -keyout /etc/nginx/certs/key.pem \
     -out /etc/nginx/certs/cert.pem \
-    -subj "/CN=SNIST-QR-Attendance/O=SNIST" \
-    -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
+    -subj "/CN=whiteleos.cc.cd/O=SNIST" \
+    -addext "subjectAltName=DNS:whiteleos.cc.cd,DNS:*.whiteleos.cc.cd,DNS:localhost,IP:127.0.0.1"
 
 EXPOSE 80 443
 CMD ["nginx", "-g", "daemon off;"]

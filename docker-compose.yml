@@ -54,7 +54,7 @@ services:
       - FRONTEND_URL=https://whiteleos.cc.cd
       - ATTENDANCE_BASE_URL=https://whiteleos.cc.cd
       - LAUNCH_TOKEN_GRACE_SECONDS=30
-      - ENVIRONMENT=development
+      - ENVIRONMENT=production
       - JNTUH_ELIGIBLE_THRESHOLD=75.0
       - JNTUH_CONDONABLE_THRESHOLD=65.0
       - JNTUH_INCLUDE_APPROVED_ABSENCES=True
