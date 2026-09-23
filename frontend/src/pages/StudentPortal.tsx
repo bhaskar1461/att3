@@ -8,7 +8,6 @@ import {
 const StudentClassScannerModal = React.lazy(() => 
   import('../components/StudentClassScannerModal').then(m => ({ default: m.StudentClassScannerModal }))
 );
-import { RawSessionAuditModal } from '../components/RawSessionAuditModal';
 import { Toast } from '../components/Toast';
 import { SmartInstallCard } from '../components/SmartInstallCard';
 
@@ -20,15 +19,16 @@ export const StudentPortal: React.FC = () => {
   const [schedule, setSchedule] = useState<any>(null);
   const [showSubjectModal, setShowSubjectModal] = useState<boolean>(false);
   const [showClassScannerModal, setShowClassScannerModal] = useState<boolean>(false);
-  const [isRawAuditOpen, setIsRawAuditOpen] = useState<boolean>(false);
-  const [auditCourseId, setAuditCourseId] = useState<number | null>(null);
   const [activeNavTab, setActiveNavTab] = useState<'home' | 'attendance' | 'timetable'>('home');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   useEffect(() => {
+    // Pre-warm WASM scanner runtime in background so scanning starts instantly on modal open
+    import('../services/wasmScanner').then(m => m.initWasmScanner()).catch(() => {});
+
     fetchStudentData();
     const params = new URLSearchParams(window.location.search);
-    if (params.get('scan') === 'true') {
+    if (params.get('scan') === 'true' || params.get('openScanner') === '1') {
       setShowClassScannerModal(true);
     }
   }, []);
@@ -79,17 +79,51 @@ export const StudentPortal: React.FC = () => {
   };
 
   const compAgg = compliance?.aggregate;
-  const isInsufficientData = compAgg?.band === 'INSUFFICIENT_DATA' || (compAgg && compAgg.total_effective_sessions < 3);
-  const hasConducted = compAgg ? (compAgg.total_effective_sessions > 0) : ((summary?.total_conducted ?? 0) > 0);
-  const overallPercent = compAgg?.aggregate_percentage ?? (hasConducted ? (summary?.overall_percentage ?? 0) : 0);
-  const displayOverall = isInsufficientData ? '—' : (compAgg?.aggregate_display ?? `${overallPercent}%`);
+  const rawTotalSessions = 
+    (typeof compAgg?.total_effective_sessions === 'number' && !Number.isNaN(compAgg.total_effective_sessions)) ? compAgg.total_effective_sessions :
+    (typeof compAgg?.total_conducted_sessions === 'number' && !Number.isNaN(compAgg.total_conducted_sessions)) ? compAgg.total_conducted_sessions :
+    (typeof summary?.total_conducted === 'number' && !Number.isNaN(summary.total_conducted)) ? summary.total_conducted :
+    null;
+
+  const presentCount = 
+    (typeof compAgg?.total_present_sessions === 'number' && !Number.isNaN(compAgg.total_present_sessions)) ? compAgg.total_present_sessions :
+    (typeof summary?.total_present === 'number' && !Number.isNaN(summary.total_present)) ? summary.total_present :
+    0;
+
+  const hasValidDenominator = rawTotalSessions !== null && rawTotalSessions >= 0;
+  
+  let absentCount: number | null = null;
+  let displayAbsent: string | number = '—';
+
+  if (hasValidDenominator) {
+    absentCount = Math.max(0, rawTotalSessions - presentCount);
+    displayAbsent = absentCount;
+  } else {
+    console.warn('[JNTUH R25 Attendance] Total enrolled/conducted sessions denominator is unset or missing. Displaying "—" instead of computing NaN.', {
+      compAgg,
+      summary,
+      rawTotalSessions,
+      presentCount
+    });
+    displayAbsent = '—';
+  }
+
+  const effectiveTotal = hasValidDenominator ? rawTotalSessions : presentCount;
+  const hasConducted = effectiveTotal > 0;
+
+  const computedPercent = hasConducted && effectiveTotal > 0 ? Math.round((presentCount / effectiveTotal) * 100) : 0;
+  const overallPercent = 
+    (typeof compAgg?.aggregate_percentage === 'number' && !Number.isNaN(compAgg.aggregate_percentage))
+      ? compAgg.aggregate_percentage
+      : (typeof summary?.overall_percentage === 'number' && !Number.isNaN(summary.overall_percentage)
+          ? summary.overall_percentage
+          : computedPercent);
+
+  const isInsufficientData = compAgg?.band === 'INSUFFICIENT_DATA' || (!hasConducted);
+  const displayOverall = compAgg?.aggregate_display || `${overallPercent}%`;
   const currentBand = isInsufficientData 
     ? 'INSUFFICIENT_DATA' 
     : (compAgg?.band || (overallPercent >= 75 ? 'ELIGIBLE' : (overallPercent >= 65 ? 'CONDONABLE' : 'DETAINED')));
-  const presentCount = compAgg?.total_present_sessions ?? (summary?.total_present ?? 0);
-  const absentCount = compAgg 
-    ? Math.max(0, compAgg.total_effective_sessions - compAgg.total_present_sessions) 
-    : (summary?.total_absent ?? 0);
   const myAttendance = schedule?.my_attendance;
   const isMarkedToday = Boolean(myAttendance?.is_marked);
 
@@ -101,7 +135,7 @@ export const StudentPortal: React.FC = () => {
   const isAggRecoverable = compliance?.aggregate_is_recoverable ?? true;
 
   // Circle SVG calculations (radius = 45, circumference = 2 * pi * 45 = 282.7)
-  const strokeDashoffset = isInsufficientData ? 0 : 282.7 - (282.7 * (overallPercent || 0)) / 100;
+  const strokeDashoffset = 282.7 - (282.7 * Math.min(100, Math.max(0, overallPercent || 0))) / 100;
 
   return (
     <div className="bg-[#FBFBFD] text-[#1b1b1d] min-h-screen flex flex-col font-sans">
@@ -395,7 +429,7 @@ export const StudentPortal: React.FC = () => {
                 </div>
                 <div className="bg-[#F5F5F7] rounded-xl p-3 text-center border border-[#D2D2D7]">
                   <span className="block text-[11px] font-bold text-[#5e5e63] mb-0.5">Absent</span>
-                  <span className="block text-lg font-bold text-[#E22126]">{absentCount}</span>
+                  <span className="block text-lg font-bold text-[#E22126]">{displayAbsent}</span>
                 </div>
               </div>
 
@@ -413,23 +447,20 @@ export const StudentPortal: React.FC = () => {
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-2 mt-4">
+            <div className="space-y-2 mt-4">
+              <button 
+                onClick={() => setShowClassScannerModal(true)}
+                className="w-full py-3 bg-gradient-to-r from-amber-500 via-[#FF9F0A] to-orange-500 hover:opacity-95 text-[#001e40] font-bold text-sm rounded-xl transition shadow-md flex items-center justify-center gap-2 active:scale-98"
+              >
+                <Camera className="w-5 h-5 text-[#001e40]" />
+                Scan Classroom QR
+              </button>
               <button 
                 onClick={() => setShowSubjectModal(true)}
-                className="py-2.5 bg-[#F5F5F7] hover:bg-[#e0dfe4] text-[#001e40] font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5"
+                className="w-full py-2 bg-[#F5F5F7] hover:bg-[#e0dfe4] text-[#001e40] font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5"
               >
                 <BookOpen className="w-3.5 h-3.5 text-[#3a5f94]" />
                 Subject Breakdown
-              </button>
-              <button 
-                onClick={() => {
-                  setAuditCourseId(null);
-                  setIsRawAuditOpen(true);
-                }}
-                className="py-2.5 bg-[#001e40] hover:bg-[#003366] text-white font-bold text-xs rounded-xl transition-colors flex items-center justify-center gap-1.5 shadow-sm"
-              >
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
-                Raw Audit Logs
               </button>
             </div>
           </div>
@@ -599,12 +630,7 @@ export const StudentPortal: React.FC = () => {
                   return (
                     <div 
                       key={idx} 
-                      onClick={() => {
-                        setAuditCourseId(course.course_id);
-                        setIsRawAuditOpen(true);
-                      }}
-                      className="p-3.5 bg-[#F5F5F7] hover:bg-blue-50/70 transition cursor-pointer rounded-2xl border border-[#D2D2D7] space-y-2 shadow-xs"
-                      title="Click to view full session-by-session audit trail"
+                      className="p-3.5 bg-[#F5F5F7] rounded-2xl border border-[#D2D2D7] space-y-2 shadow-xs"
                     >
                       <div className="flex justify-between items-start gap-2">
                         <div>
@@ -692,19 +718,10 @@ export const StudentPortal: React.FC = () => {
               )}
             </div>
 
-            <div className="pt-2 flex gap-2">
-              <button 
-                onClick={() => {
-                  setShowSubjectModal(false);
-                  setIsRawAuditOpen(true);
-                }}
-                className="flex-1 py-2.5 bg-[#001e40] text-white font-bold text-xs rounded-xl hover:bg-[#003366] transition-colors flex items-center justify-center gap-1.5"
-              >
-                <ShieldCheck className="w-4 h-4 text-emerald-300" /> Full Audit Register
-              </button>
+            <div className="pt-2 flex justify-end">
               <button 
                 onClick={() => setShowSubjectModal(false)}
-                className="px-4 py-2.5 bg-[#F5F5F7] text-slate-700 font-bold text-xs rounded-xl hover:bg-slate-200 transition-colors"
+                className="w-full py-2.5 bg-[#001e40] text-white font-bold text-xs rounded-xl hover:bg-[#003366] transition-colors"
               >
                 Close
               </button>
@@ -759,23 +776,57 @@ export const StudentPortal: React.FC = () => {
       {showClassScannerModal && (
         <React.Suspense fallback={null}>
           <StudentClassScannerModal
+            studentRoll={profile?.roll_number}
             onClose={() => setShowClassScannerModal(false)}
-            onScanComplete={() => {
+            onScanComplete={(scanResult?: any) => {
+              if (scanResult) {
+                setSchedule((prev: any) => ({
+                  ...prev,
+                  my_attendance: {
+                    ...prev?.my_attendance,
+                    is_marked: true,
+                    marked_at: scanResult.session_date || 'Today',
+                    subject_name: scanResult.subject_name || prev?.my_attendance?.subject_name || 'Career Enhancement Training (CET)',
+                    period_count: scanResult.period_count || prev?.my_attendance?.period_count || 4,
+                  }
+                }));
+                const addedCount = scanResult.status === 'SUCCESS' ? 1 : 0;
+                setSummary((prev: any) => {
+                  if (!prev) return prev;
+                  const newPresent = (prev.total_present ?? 0) + addedCount;
+                  const newConducted = Math.max(prev.total_conducted ?? 0, newPresent);
+                  return {
+                    ...prev,
+                    total_present: newPresent,
+                    total_conducted: newConducted,
+                    total_absent: Math.max(0, newConducted - newPresent),
+                    overall_percentage: newConducted > 0 ? Math.round((newPresent / newConducted) * 100) : 100
+                  };
+                });
+                setCompliance((prev: any) => {
+                  if (!prev?.aggregate) return prev;
+                  const newPresent = (prev.aggregate.total_present_sessions ?? 0) + addedCount;
+                  const newEffective = Math.max(prev.aggregate.total_effective_sessions ?? prev.aggregate.total_conducted_sessions ?? 0, newPresent);
+                  const newPct = newEffective > 0 ? Math.round((newPresent / newEffective) * 100) : 100;
+                  return {
+                    ...prev,
+                    aggregate: {
+                      ...prev.aggregate,
+                      total_present_sessions: newPresent,
+                      total_effective_sessions: newEffective,
+                      total_conducted_sessions: newEffective,
+                      aggregate_percentage: newPct,
+                      aggregate_display: `${newPct}%`,
+                      band: newPct >= 75 ? 'ELIGIBLE' : (newPct >= 65 ? 'CONDONABLE' : 'DETAINED')
+                    }
+                  };
+                });
+              }
               fetchStudentData();
               setToast({ message: 'Attendance recorded successfully!', type: 'success' });
             }}
           />
         </React.Suspense>
-      )}
-
-      {/* Raw Session Audit Trail Modal */}
-      {profile?.roll_number && (
-        <RawSessionAuditModal
-          isOpen={isRawAuditOpen}
-          onClose={() => setIsRawAuditOpen(false)}
-          rollNumber={profile.roll_number}
-          initialCourseId={auditCourseId}
-        />
       )}
 
     </div>

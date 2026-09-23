@@ -227,8 +227,8 @@ def generate_otp(
     if recent_otp_count >= settings.OTP_MAX_REQUESTS_PER_HOUR:
         return False, f"Maximum OTP requests ({settings.OTP_MAX_REQUESTS_PER_HOUR}) exceeded for this hour. Please wait."
 
-    # 2. Generate 6-digit OTP
-    otp_code = "".join(random.choices(string.digits, k=6))
+    # 2. Generate 6-digit OTP using CSPRNG
+    otp_code = "".join(secrets.choice(string.digits) for _ in range(6))
     otp_hash = hashlib.sha256(otp_code.encode("utf-8")).hexdigest()
 
     # 3. Store OTP hash

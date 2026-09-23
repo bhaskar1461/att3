@@ -308,7 +308,7 @@ class SecurityAlertService:
             logger.warning(f"Failed to record SECURITY_ALERT_SENT audit entry: {audit_err}")
 
     @staticmethod
-    def generate_and_send_hourly_digest(force_window: bool = False) -> Dict[str, Any]:
+    def generate_and_send_hourly_digest(force_window: bool = False, force_send: bool = False) -> Dict[str, Any]:
         """
         Executes Layer 2 hourly security digest rollup.
         Queries qr_audit_logs for events in the past 60 minutes.
@@ -339,10 +339,23 @@ class SecurityAlertService:
             from app.models.models import AuditLog, DeviceRegistration
             from app.services.email_service import render_email_template, send_single_email
 
-            cutoff_utc = datetime.utcnow() - timedelta(hours=1)
-            target_types = list(THRESHOLDS.keys()) + [EVENT_ALERT_SENT]
+            current_hour = now_ist.hour
+            date_str = now_ist.strftime("%Y%m%d")
+            digest_key = f"DIGEST_{date_str}_{current_hour:02d}"
 
             with SessionLocal() as db:
+                if not force_send:
+                    existing_digest = db.query(AuditLog).filter(
+                        AuditLog.roll_number == digest_key,
+                        AuditLog.action == "HOURLY_DIGEST_SENT"
+                    ).first()
+                    if existing_digest:
+                        logger.info(f"[DIGEST-DEDUP] Digest for window {digest_key} already dispatched. Skipping duplicate.")
+                        return {"status": "SKIPPED", "reason": "ALREADY_SENT_FOR_WINDOW", "digest_key": digest_key}
+
+                cutoff_utc = datetime.utcnow() - timedelta(hours=1)
+                target_types = list(THRESHOLDS.keys()) + [EVENT_ALERT_SENT]
+
                 records = db.query(AuditLog).filter(
                     AuditLog.event_type.in_(target_types),
                     AuditLog.created_at >= cutoff_utc
@@ -405,10 +418,10 @@ class SecurityAlertService:
                     channel="PROOFSY"
                 )
 
-                # Record digest audit log
+                # Record digest audit log with deduplication key in roll_number
                 digest_audit = AuditLog(
                     user_id=None,
-                    roll_number="HOURLY_DIGEST",
+                    roll_number=digest_key,
                     event_type=EVENT_ALERT_SENT,
                     action="HOURLY_DIGEST_SENT",
                     details=f"Hourly digest dispatched to {target_email}. Total events: {len(records)}, Suppressed: {total_suppressed}. Result: {res.get('status')}",
@@ -418,9 +431,108 @@ class SecurityAlertService:
                 db.add(digest_audit)
                 db.commit()
 
-                logger.info(f"[DIGEST-SENT] Successfully delivered hourly security digest to {target_email}")
-                return {"status": "SENT", "events_count": len(records), "suppressed_count": total_suppressed}
+                logger.info(f"[DIGEST-SENT] Successfully delivered hourly security digest to {target_email} for window {digest_key}")
+                return {"status": "SENT", "events_count": len(records), "suppressed_count": total_suppressed, "digest_key": digest_key}
 
         except Exception as digest_err:
             logger.error(f"Error executing generate_and_send_hourly_digest: {digest_err}", exc_info=True)
             return {"status": "ERROR", "error": str(digest_err)}
+
+    @staticmethod
+    def generate_and_send_hod_daily_digest(department_code: str, force_send: bool = False) -> Dict[str, Any]:
+        """
+        Layer 2 Daily digest for HODs summarizing department-specific attendance anomalies,
+        high-manual rate sessions, and security alerts.
+        Adheres to deduplication using HOD_DIGEST_{dept}_{date} in qr_audit_logs.
+        """
+        try:
+            now_ist = get_server_ist_datetime()
+            dept_clean = department_code.strip().upper()
+            date_str = now_ist.strftime("%Y%m%d")
+            hod_digest_key = f"HOD_DIGEST_{dept_clean}_{date_str}"
+
+            from app.core.database import SessionLocal
+            from app.models.models import AuditLog, Department, Student, AttendanceRecord
+            from app.services.email_service import send_single_email
+
+            with SessionLocal() as db:
+                if not force_send:
+                    existing_digest = db.query(AuditLog).filter(
+                        AuditLog.roll_number == hod_digest_key,
+                        AuditLog.action == "HOD_DAILY_DIGEST_SENT"
+                    ).first()
+                    if existing_digest:
+                        logger.info(f"[HOD-DIGEST-DEDUP] HOD Digest for {hod_digest_key} already dispatched. Skipping duplicate.")
+                        return {"status": "SKIPPED", "reason": "ALREADY_SENT_FOR_DAY", "digest_key": hod_digest_key}
+
+                dept = db.query(Department).filter(Department.code == dept_clean).first()
+                if not dept:
+                    return {"status": "SKIPPED", "reason": "DEPARTMENT_NOT_FOUND", "department": dept_clean}
+
+                today_date = now_ist.strftime("%Y-%m-%d")
+                dept_records = db.query(AttendanceRecord).join(
+                    Student, AttendanceRecord.student_id == Student.id
+                ).filter(
+                    Student.department_id == dept.id,
+                    AttendanceRecord.session_date == today_date
+                ).all()
+
+                total_scans = len(dept_records)
+                manual_marks = sum(1 for r in dept_records if getattr(r, "scan_mode", "") == "MANUAL")
+                manual_pct = round((manual_marks / total_scans * 100.0), 1) if total_scans > 0 else 0.0
+
+                dept_students = db.query(Student.roll_number).filter(Student.department_id == dept.id).all()
+                dept_roll_set = {s[0] for s in dept_students if s[0]}
+
+                cutoff_utc = datetime.utcnow() - timedelta(days=1)
+                sec_records = db.query(AuditLog).filter(
+                    AuditLog.roll_number.in_(list(dept_roll_set)),
+                    AuditLog.created_at >= cutoff_utc
+                ).all() if dept_roll_set else []
+
+                if total_scans == 0 and len(sec_records) == 0 and not force_send:
+                    logger.info(f"[HOD-DIGEST-SKIPPED] Zero activity for {dept_clean} today. No email dispatched.")
+                    return {"status": "SKIPPED", "reason": "ZERO_ACTIVITY", "department": dept_clean}
+
+                target_email = getattr(settings, f"HOD_EMAIL_{dept_clean}", getattr(settings, "SECURITY_ALERT_EMAIL", "23311a05y6@cse.sreenidhi.edu.in"))
+                subject = f"[SNIST HOD DIGEST] Daily Department Attendance & Security Digest — {dept_clean} ({today_date})"
+
+                html_body = f"""
+                <div style="font-family: Arial, sans-serif; padding: 20px; color: #1e293b;">
+                    <h2 style="color: #1e3a8a;">SNIST Department Daily Digest — {dept_clean}</h2>
+                    <p>Date: <strong>{today_date}</strong></p>
+                    <table style="border-collapse: collapse; width: 100%; max-width: 600px; margin-top: 15px;">
+                        <tr style="background-color: #f1f5f9;"><td style="padding: 8px; border: 1px solid #cbd5e1;">Total Attendance Scans</td><td style="padding: 8px; border: 1px solid #cbd5e1; font-weight: bold;">{total_scans}</td></tr>
+                        <tr><td style="padding: 8px; border: 1px solid #cbd5e1;">Manual Marks by Faculty</td><td style="padding: 8px; border: 1px solid #cbd5e1; font-weight: bold;">{manual_marks} ({manual_pct}%)</td></tr>
+                        <tr style="background-color: #f1f5f9;"><td style="padding: 8px; border: 1px solid #cbd5e1;">Security Incidents Flagged</td><td style="padding: 8px; border: 1px solid #cbd5e1; font-weight: bold;">{len(sec_records)}</td></tr>
+                    </table>
+                    <p style="margin-top: 20px; font-size: 12px; color: #64748b;">Automated report from SNIST Autonomous Attendance Infrastructure. All timestamps authoritative IST.</p>
+                </div>
+                """
+
+                res = send_single_email(
+                    to_email=target_email,
+                    subject=subject,
+                    html_body=html_body,
+                    channel="PROOFSY"
+                )
+
+                digest_audit = AuditLog(
+                    user_id=None,
+                    roll_number=hod_digest_key,
+                    event_type=EVENT_ALERT_SENT,
+                    action="HOD_DAILY_DIGEST_SENT",
+                    details=f"HOD Daily Digest dispatched for {dept_clean} to {target_email}. Records: {total_scans}, Manual: {manual_marks}, Sec: {len(sec_records)}. Result: {res.get('status')}",
+                    ip_address="127.0.0.1",
+                    created_at=datetime.utcnow()
+                )
+                db.add(digest_audit)
+                db.commit()
+
+                logger.info(f"[HOD-DIGEST-SENT] Successfully delivered HOD daily digest for {dept_clean} to {target_email}")
+                return {"status": "SENT", "department": dept_clean, "digest_key": hod_digest_key, "total_records": total_scans}
+
+        except Exception as err:
+            logger.error(f"Error executing generate_and_send_hod_daily_digest for {department_code}: {err}", exc_info=True)
+            return {"status": "ERROR", "error": str(err)}
+

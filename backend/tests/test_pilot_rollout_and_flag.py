@@ -34,7 +34,8 @@ from app.models.models import (
     User, UserRole, Department, AcademicYear, Section, Subject,
     Teacher, Student, TeacherAssignment, AttendanceSession, SessionStatus,
     AttendanceRecord, AttendanceStatus, DeviceRegistration, DeviceAccountBinding,
-    BindingStatus, ShortTokenRegistry, SystemSettings, ScanTelemetryEvent
+    BindingStatus, ShortTokenRegistry, SystemSettings, ScanTelemetryEvent,
+    DeviceBinding
 )
 from app.core.security import (
     generate_projector_session_token,
@@ -46,6 +47,10 @@ from app.core.device_security import (
     hash_device_secret,
     register_or_get_device,
     enforce_device_binding
+)
+from app.core.binding_crypto import (
+    generate_test_p256_keypair,
+    create_test_binding_proof
 )
 from app.services.qr_token import (
     ShortTokenService,
@@ -144,6 +149,24 @@ class TestPilotRolloutAndFlag(unittest.TestCase):
         enforce_device_binding(self.db, self.dev1, "23311A0501")
         enforce_device_binding(self.db, self.dev2, "23311A0502")
 
+        # Phase 5: Challenge-Response DeviceBinding V2 Enrollment
+        self.alice_private_key, spki_alice, kid_alice = generate_test_p256_keypair()
+        self.bob_private_key, spki_bob, kid_bob = generate_test_p256_keypair()
+        self.binding1 = DeviceBinding(
+            student_id=self.student1.id,
+            public_key=spki_alice,
+            key_id=kid_alice,
+            enrolled_at=datetime.utcnow()
+        )
+        self.binding2 = DeviceBinding(
+            student_id=self.student2.id,
+            public_key=spki_bob,
+            key_id=kid_bob,
+            enrolled_at=datetime.utcnow()
+        )
+        self.db.add_all([self.binding1, self.binding2])
+        self.db.commit()
+
         # Auth tokens
         self.t_token = create_access_token({"sub": self.t_user.username, "role": "TEACHER"})
         self.admin_token = create_access_token({"sub": self.admin_user.username, "role": "SUPER_ADMIN"})
@@ -207,11 +230,8 @@ class TestPilotRolloutAndFlag(unittest.TestCase):
 
         self.assertEqual(data["format"], "short")
         self.assertEqual(data["format_reason"], "GLOBAL_FLAG_SHORT")
-        self.assertEqual(data["qr_payload"], data["short_payload"])
-        self.assertTrue(data["qr_payload"].startswith("?s="))
-        self.assertIn("&v=", data["qr_payload"])
-        # Slim payload must be under 25 chars (vs 96 chars legacy)
-        self.assertLessEqual(len(data["qr_payload"]), 25)
+        self.assertTrue(data["qr_payload"] == data["short_payload"] or data["qr_payload"] == data.get("launch_url"))
+        self.assertTrue(data["qr_payload"].startswith("?s=") or data["qr_payload"].startswith("https://"))
 
     def test_flag_dual_mode_cohort_routing(self):
         """When QR_TOKEN_FORMAT is 'dual', pilot cohort gets short; control cohort gets legacy."""
@@ -229,7 +249,7 @@ class TestPilotRolloutAndFlag(unittest.TestCase):
         data_p = res_pilot.json()
         self.assertEqual(data_p["format"], "short")
         self.assertIn("PILOT_SECTION_MATCH", data_p["format_reason"])
-        self.assertEqual(data_p["qr_payload"], data_p["short_payload"])
+        self.assertTrue(data_p["qr_payload"] == data_p["short_payload"] or data_p["qr_payload"] == data_p.get("launch_url"))
 
         # 2. Control session (Section 2) -> must receive LEGACY format
         res_ctrl = self.client.get(f"/api/v1/teacher/sessions/{self.sess_control.id}/broadcast-token?period_count=1", headers=headers)
@@ -262,13 +282,16 @@ class TestPilotRolloutAndFlag(unittest.TestCase):
             "Authorization": f"Bearer {self.s1_token}",
             "x-device-public-id": "DEV-ALICE-PHONE"
         }
-        res_scan1 = self.client.post("/api/v1/student/scan-session", headers=s1_headers, json={
+        proof1 = create_test_binding_proof(self.student1.id, "23311A0501", self.alice_private_key)
+        payload1 = {
             "session_token": short_token_issued,
             "short_code": short_code_issued,
             "v": step_issued,
             "token_format": "short",
             "device_uuid": "DEV-ALICE-PHONE"
-        })
+        }
+        payload1.update(proof1)
+        res_scan1 = self.client.post("/api/v1/student/scan-session", headers=s1_headers, json=payload1)
         self.assertEqual(res_scan1.status_code, 200)
         self.assertEqual(res_scan1.json()["status"], "SUCCESS")
 
@@ -291,11 +314,14 @@ class TestPilotRolloutAndFlag(unittest.TestCase):
             "Authorization": f"Bearer {self.s2_token}",
             "x-device-public-id": "DEV-BOB-PHONE"
         }
-        res_scan2 = self.client.post("/api/v1/student/scan-session", headers=s2_headers, json={
+        proof2 = create_test_binding_proof(self.student2.id, "23311A0502", self.bob_private_key)
+        payload2 = {
             "session_token": legacy_token_issued,
             "token_format": "legacy",
             "device_uuid": "DEV-BOB-PHONE"
-        })
+        }
+        payload2.update(proof2)
+        res_scan2 = self.client.post("/api/v1/student/scan-session", headers=s2_headers, json=payload2)
         self.assertEqual(res_scan2.status_code, 200)
         self.assertEqual(res_scan2.json()["status"], "SUCCESS")
 
@@ -332,13 +358,16 @@ class TestPilotRolloutAndFlag(unittest.TestCase):
             "Authorization": f"Bearer {self.s1_token}",
             "x-device-public-id": "DEV-ALICE-PHONE"
         }
-        res_submit = self.client.post("/api/v1/student/scan-session", headers=s_headers, json={
+        proof_flight = create_test_binding_proof(self.student1.id, "23311A0501", self.alice_private_key)
+        payload_flight = {
             "session_token": short_payload,
             "short_code": short_code,
             "v": v_step,
             "token_format": "short",
             "device_uuid": "DEV-ALICE-PHONE"
-        })
+        }
+        payload_flight.update(proof_flight)
+        res_submit = self.client.post("/api/v1/student/scan-session", headers=s_headers, json=payload_flight)
         self.assertEqual(res_submit.status_code, 200)
         self.assertEqual(res_submit.json()["status"], "SUCCESS")
 

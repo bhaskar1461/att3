@@ -1,13 +1,20 @@
+import os
+import sys
 import pytest
+from datetime import datetime
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
 from app.main import app
 from app.core.database import Base, get_db
 from app.models.models import (
-    User, UserRole, Department, AcademicYear, Section, Student, AttendanceRecord, AttendanceSession, AttendanceStatus
+    User, UserRole, Department, AcademicYear, Section, Student, AttendanceRecord, AttendanceSession, AttendanceStatus, DeviceBinding
 )
 from app.core.security import get_password_hash, create_access_token
 
@@ -100,6 +107,15 @@ def setup_database():
     s_unassigned = Student(roll_number="23311A9999", name="Unassigned Student", department_id=999, academic_year_id=year1.id, section_id=sec1.id)
     
     db.add_all([s1, s2, s3, s_unassigned])
+    db.commit()
+
+    # Active device binding for Alice under Phase 5 Cutover
+    db.add(DeviceBinding(
+        student_id=s1.id,
+        public_key="KEY_ALICE",
+        key_id="KID_ALICE",
+        enrolled_at=datetime.utcnow()
+    ))
     db.commit()
 
     # Attendance record for Alice today

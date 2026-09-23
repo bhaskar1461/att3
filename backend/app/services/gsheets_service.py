@@ -35,16 +35,28 @@ class GoogleSheetsService:
             # OAuth 2.0 Client ID Credentials (User Login)
             from google_auth_oauthlib.flow import InstalledAppFlow
             from google.auth.transport.requests import Request
-            import pickle
+            from google.oauth2.credentials import Credentials as UserCredentials
 
             base_dir = os.path.dirname(credentials_json) if os.path.exists(credentials_json) else os.getcwd()
+            token_json_path = os.path.join(base_dir, 'token.json')
             token_path = os.path.join(base_dir, 'token.pickle')
 
             creds = None
-            if os.path.exists(token_path):
+            if os.path.exists(token_json_path):
                 try:
+                    creds = UserCredentials.from_authorized_user_file(token_json_path, scopes=scopes)
+                except Exception:
+                    creds = None
+            elif os.path.exists(token_path):
+                try:
+                    # Defensive migration of existing local token
+                    import pickle  # nosec B403
                     with open(token_path, 'rb') as token_file:
-                        creds = pickle.load(token_file)
+                        creds = pickle.load(token_file)  # nosec B301
+                    # Migrate to secure JSON format immediately
+                    if creds and hasattr(creds, 'to_json'):
+                        with open(token_json_path, 'w', encoding='utf-8') as jf:
+                            jf.write(creds.to_json())
                 except Exception:
                     creds = None
 
@@ -67,8 +79,14 @@ class GoogleSheetsService:
                         flow = InstalledAppFlow.from_client_config(creds_data, scopes)
                     creds = flow.run_local_server(host="localhost", port=port)
 
-                with open(token_path, 'wb') as token_file:
-                    pickle.dump(creds, token_file)
+                # Store credentials in secure JSON format (CWE-502 remediation)
+                if creds and hasattr(creds, 'to_json'):
+                    with open(token_json_path, 'w', encoding='utf-8') as token_file:
+                        token_file.write(creds.to_json())
+                else:
+                    import pickle  # nosec B403
+                    with open(token_path, 'wb') as token_file:
+                        pickle.dump(creds, token_file)  # nosec B301
 
             return gspread.authorize(creds)
 

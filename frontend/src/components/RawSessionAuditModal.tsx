@@ -291,7 +291,7 @@ export const RawSessionAuditModal: React.FC<RawSessionAuditModalProps> = ({
 
                     {currentCourse.sessions.length === 0 ? (
                       <div className="py-8 text-center text-xs text-slate-400 border border-dashed border-slate-200 rounded-xl">
-                        Zero sessions conducted for this course yet (JNTUH Band: &mdash;).
+                        Zero sessions conducted for this course yet (JNTUH Band: —).
                       </div>
                     ) : (
                       <div className="overflow-x-auto rounded-xl border border-slate-200 max-h-72">
@@ -337,7 +337,7 @@ export const RawSessionAuditModal: React.FC<RawSessionAuditModalProps> = ({
                                     {sess.scan_mode || 'QR'}
                                   </td>
                                   <td className="px-3.5 py-2.5 font-mono text-[11px] text-slate-500">
-                                    {sess.marked_at ? sess.marked_at.slice(11, 19) : (isPres ? 'Recorded' : '&mdash;')}
+                                    {sess.marked_at ? sess.marked_at.slice(11, 19) : (isPres ? 'Recorded' : '—')}
                                   </td>
                                   <td className="px-3.5 py-2.5 text-slate-600">
                                     {sess.approved_absence_reason ? (

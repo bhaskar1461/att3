@@ -3,13 +3,14 @@ import time
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response, UploadFile, File, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.api.auth import get_current_user, require_teacher, require_admin
 from app.core.config import settings
+from app.core.security import get_server_ist_datetime
 import threading
 from collections import OrderedDict
 from sqlalchemy import or_, func
@@ -112,12 +113,18 @@ def get_cached_session_meta(db: Session, session_id: int) -> Optional[Dict[str, 
         "period": session.period,
         "session_date": session.session_date,
         "status": session.status,
+        "locked_at": session.locked_at,
+        "created_at": session.created_at,
         "teacher_gsheet_id": teacher_gsheet,
         "section_name": session.section.name if session.section else "",
         "subject_name": session.subject.name if session.subject else "",
         "teacher_name": session.teacher.name if session.teacher else "",
         "dept_code": session.section.department.code if (session.section and session.section.department) else "",
         "year_name": session.section.academic_year.name if (session.section and session.section.academic_year) else "",
+        "faculty_latitude": session.faculty_latitude,
+        "faculty_longitude": session.faculty_longitude,
+        "faculty_accuracy_m": session.faculty_accuracy_m,
+        "geofence_radius_m": session.geofence_radius_m or 100.0,
         "cached_at": time.time()
     }
     if not is_test_sqlite:
@@ -143,16 +150,24 @@ class SingleScanItem(BaseModel):
 class BatchScanRequest(BaseModel):
     scans: List[SingleScanItem]
 
+VALID_MANUAL_REASONS = {"scanner_failed", "device_lost", "late_join", "other"}
+
 class ManualMarkRequest(BaseModel):
     session_id: int
     roll_number: str
     status: str # PRESENT or ABSENT
+    reason: str # REQUIRED enum: scanner_failed | device_lost | late_join | other
+    reason_detail: Optional[str] = None
     period_count: Optional[int] = None
+    confirm_high_volume: Optional[bool] = False
 
 class SessionBatchMarkRequest(BaseModel):
     status: str # PRESENT or ABSENT
     period_count: Optional[int] = 4
     roll_numbers: Optional[List[str]] = None
+    reason: Optional[str] = "scanner_failed"
+    reason_detail: Optional[str] = None
+    confirm_high_volume: Optional[bool] = False
 
 class AdminDailyMarkRequest(BaseModel):
     date: str  # YYYY-MM-DD
@@ -374,7 +389,7 @@ def process_qr_scan(
     ).first()
 
     now = datetime.utcnow()
-    date_formatted = datetime.now().strftime("%d/%m/%Y")
+    date_formatted = get_server_ist_datetime().strftime("%d/%m/%Y")
 
     if existing and existing.status == AttendanceStatus.PRESENT:
         prev_periods = existing.period_count or 4
@@ -732,9 +747,39 @@ def manual_mark_attendance(
         if not current_user.teacher_profile or session.teacher_id != current_user.teacher_profile.id:
             raise HTTPException(status_code=403, detail="Not authorized to edit attendance for this session")
 
+    # Part C.1: Required Reason Enum validation
+    clean_reason = (req.reason or "").strip().lower()
+    if not clean_reason or clean_reason not in VALID_MANUAL_REASONS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid manual mark reason '{req.reason}'. Must be one of: {', '.join(sorted(VALID_MANUAL_REASONS))}."
+        )
+
+    # Part C.4: Session manual volume cap check (default 25 marks/session, configurable)
+    from app.core.config import settings
+    session_manual_recs = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == req.session_id,
+        AttendanceRecord.scan_mode == "MANUAL",
+        AttendanceRecord.status == AttendanceStatus.PRESENT
+    ).count()
+
+    max_session_cap = getattr(settings, "MANUAL_MARK_MAX_PER_SESSION_CAP", 25)
+    if session_manual_recs >= max_session_cap and not req.confirm_high_volume:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail=f"Session manual mark limit of {max_session_cap} reached ({session_manual_recs} already marked). Confirmation modal required to proceed."
+        )
+
     student = db.query(Student).filter(Student.roll_number == req.roll_number.strip().upper()).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
+
+    # Rule 25 & 26: Cross-section validation - student must belong to session's section
+    if student.section_id != session.section_id and current_user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Student {student.roll_number} does not belong to this session's class section."
+        )
 
     existing_recs = db.query(AttendanceRecord).filter(
         AttendanceRecord.session_id == req.session_id,
@@ -758,9 +803,15 @@ def manual_mark_attendance(
 
     old_status_str = existing.status.value if existing else "NONE"
 
+    now_utc = datetime.utcnow()
     if existing:
         existing.status = status_enum
         existing.period_count = record_period_count
+        existing.scan_mode = "MANUAL"
+        existing.manual_reason = clean_reason
+        existing.manual_reason_detail = req.reason_detail.strip() if req.reason_detail else None
+        existing.manual_marked_by_id = current_user.id
+        existing.scanned_at = now_utc
         for dup in existing_recs[1:]:
             db.delete(dup)
     else:
@@ -771,21 +822,53 @@ def manual_mark_attendance(
             session_date=session.session_date,
             status=status_enum,
             period_count=record_period_count,
-            scan_mode="MANUAL"
+            scan_mode="MANUAL",
+            manual_reason=clean_reason,
+            manual_reason_detail=req.reason_detail.strip() if req.reason_detail else None,
+            manual_marked_by_id=current_user.id,
+            scanned_at=now_utc
         )
         db.add(new_record)
 
+    # Part C.2: Explicit SECURITY-level Audit Log with (M) Flag
     from app.core.device_security import log_security_audit_event, SecurityEventType
+    audit_detail = (
+        f"MANUAL_MARK [M]: Marker={current_user.username} (ID {current_user.id}), "
+        f"Target={student.roll_number}, Session={session.id} ({session.session_date}), "
+        f"Status={status_enum.value} ({status_code} periods), Reason={clean_reason}"
+        + (f" [Detail: {req.reason_detail.strip()}]" if req.reason_detail else "")
+    )
     log_security_audit_event(
         db=db,
         event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
-        action="HISTORICAL_EDIT",
-        details=f"User {current_user.username} edited {student.roll_number} status from {old_status_str} to {status_enum.value} ({status_code} periods) for session {session.id} ({session.session_date})",
+        action="MANUAL_MARK_VERIFIED",
+        details=audit_detail,
         user_id=current_user.id,
         roll_number=student.roll_number
     )
 
     db.commit()
+
+    # Part C.3: Calculate Session Anomaly Thresholds
+    total_marked_recs = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == req.session_id,
+        AttendanceRecord.status == AttendanceStatus.PRESENT
+    ).count()
+    updated_manual_recs = db.query(AttendanceRecord).filter(
+        AttendanceRecord.session_id == req.session_id,
+        AttendanceRecord.scan_mode == "MANUAL",
+        AttendanceRecord.status == AttendanceStatus.PRESENT
+    ).count()
+
+    manual_pct = round((updated_manual_recs / max(1, total_marked_recs)) * 100.0, 1)
+    amber_thresh = getattr(settings, "MANUAL_MARK_AMBER_THRESHOLD_PCT", 15.0)
+    red_thresh = getattr(settings, "MANUAL_MARK_RED_THRESHOLD_PCT", 30.0)
+
+    anomaly_status = "NORMAL"
+    if manual_pct >= red_thresh:
+        anomaly_status = "RED"
+    elif manual_pct >= amber_thresh:
+        anomaly_status = "AMBER"
 
     # Queue Google Sheets & Master Excel background updates
     try:
@@ -812,7 +895,18 @@ def manual_mark_attendance(
         period_count=status_code
     )
 
-    return {"status": "SUCCESS", "message": f"Updated {student.name} ({student.roll_number}) to {status_code}"}
+    return {
+        "status": "SUCCESS",
+        "message": f"Updated {student.name} ({student.roll_number}) to {status_code} [M]",
+        "roll_number": student.roll_number,
+        "scan_mode": "MANUAL",
+        "manual_reason": clean_reason,
+        "is_manual": True,
+        "session_manual_count": updated_manual_recs,
+        "session_total_count": total_marked_recs,
+        "session_manual_pct": manual_pct,
+        "anomaly_status": anomaly_status
+    }
 
 @router.post("/session/{session_id}/batch-mark")
 def batch_mark_session_attendance(
@@ -851,6 +945,15 @@ def batch_mark_session_attendance(
     target_rolls = [r.strip().upper() for r in req.roll_numbers] if req.roll_numbers else list(student_map.keys())
 
     is_present = req.status.strip().upper() in ["PRESENT", "1", "2", "3", "4", "5", "6", "7", "8"]
+
+    from app.core.config import settings
+    max_session_cap = getattr(settings, "MANUAL_MARK_MAX_PER_SESSION_CAP", 25)
+    if is_present and len(target_rolls) >= max_session_cap and not req.confirm_high_volume:
+        raise HTTPException(
+            status_code=status.HTTP_428_PRECONDITION_REQUIRED,
+            detail=f"Batch marking {len(target_rolls)} students exceeds the session cap of {max_session_cap}. Deliberate confirmation modal required to proceed."
+        )
+
     from app.api.teacher import _extract_period_count
     session_periods = _extract_period_count(session.period)
     effective_periods = req.period_count if req.period_count is not None else session_periods
@@ -867,6 +970,7 @@ def batch_mark_session_attendance(
         records_by_roll[r.roll_number.strip().upper()].append(r)
 
     now = datetime.utcnow()
+    batch_reason = (req.reason or "scanner_failed").strip().lower()
     for roll in target_rolls:
         st = student_map.get(roll)
         if not st:
@@ -876,6 +980,10 @@ def batch_mark_session_attendance(
             primary = recs[0]
             primary.status = status_enum
             primary.period_count = p_count
+            primary.scan_mode = "MANUAL"
+            primary.manual_reason = batch_reason
+            primary.manual_reason_detail = req.reason_detail.strip() if req.reason_detail else None
+            primary.manual_marked_by_id = current_user.id
             primary.scanned_at = now
             for dup in recs[1:]:
                 db.delete(dup)
@@ -888,6 +996,9 @@ def batch_mark_session_attendance(
                 status=status_enum,
                 period_count=p_count,
                 scan_mode="MANUAL",
+                manual_reason=batch_reason,
+                manual_reason_detail=req.reason_detail.strip() if req.reason_detail else None,
+                manual_marked_by_id=current_user.id,
                 scanned_at=now
             )
             db.add(new_rec)
@@ -1380,4 +1491,81 @@ def batch_mark_admin_daily_attendance(
         "present_count": present_count,
         "absent_count": absent_count
     }
+
+
+class SelfieSkipRequest(BaseModel):
+    reason: Optional[str] = "USER_SKIPPED"
+
+
+def _require_student(current_user: User = Depends(get_current_user)) -> Student:
+    if current_user.role != UserRole.STUDENT or not current_user.student_profile:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Student profile required"
+        )
+    return current_user.student_profile
+
+
+@router.post("/records/{attendance_id}/selfie")
+async def upload_attendance_selfie(
+    attendance_id: int,
+    file: UploadFile = File(...),
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_student: Student = Depends(_require_student)
+):
+    """
+    Post-attendance selfie upload endpoint.
+    Saves image into private object storage and persists metadata in selfie_records.
+    Decoupled from core attendance validity: selfie status never reverts AttendanceStatus.PRESENT.
+    """
+    from app.services.selfie_service import store_attendance_selfie
+    contents = await file.read()
+    ip_addr = request.client.host if request and request.client else None
+    try:
+        res = store_attendance_selfie(
+            db=db,
+            attendance_id=attendance_id,
+            student_id=current_student.id,
+            image_bytes=contents,
+            ip_address=ip_addr
+        )
+        return res
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as ex:
+        logger.error(f"Error saving attendance selfie: {ex}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to store selfie.")
+
+
+@router.post("/records/{attendance_id}/selfie-skip")
+def skip_attendance_selfie_endpoint(
+    attendance_id: int,
+    req: Optional[SelfieSkipRequest] = None,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_student: Student = Depends(_require_student)
+):
+    """
+    Explicit skip endpoint when selfie cannot be taken (e.g. camera issue or student opted out).
+    CRITICAL RULE: Never reverts or invalidates the accepted attendance record.
+    """
+    from app.services.selfie_service import skip_attendance_selfie
+    ip_addr = request.client.host if request and request.client else None
+    reason = req.reason if req and req.reason else "USER_SKIPPED"
+    try:
+        res = skip_attendance_selfie(
+            db=db,
+            attendance_id=attendance_id,
+            student_id=current_student.id,
+            reason=reason,
+            ip_address=ip_addr
+        )
+        return res
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as ex:
+        logger.error(f"Error skipping attendance selfie: {ex}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update selfie status.")
+
 

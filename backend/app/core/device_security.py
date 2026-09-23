@@ -510,6 +510,17 @@ def reset_student_device_enrollment(
         old_device_pub_id = old_device.device_public_id if old_device else f"ID:{old_device_id}"
 
     student.registered_device_id = None
+
+    # Phase 5: Revoke active cryptographic DeviceBinding keypairs
+    from app.models.models import DeviceBinding
+    bindings_to_revoke = db.query(DeviceBinding).filter(
+        DeviceBinding.student_id == student.id,
+        DeviceBinding.revoked_at.is_(None)
+    ).all()
+    for b in bindings_to_revoke:
+        b.revoked_at = datetime.utcnow()
+        b.revocation_reason = f"ADMIN_RESET_BY_{admin_user_id or 'OPERATOR'}"
+
     db.commit()
 
     log_security_audit_event(

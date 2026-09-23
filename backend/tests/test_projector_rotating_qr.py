@@ -22,6 +22,7 @@ from app.models.models import (
     Teacher, Student, TeacherAssignment, AttendanceSession, SessionStatus, AttendanceRecord,
     AttendanceStatus
 )
+from app.core.config import settings
 from app.core.security import (
     generate_projector_session_token,
     validate_projector_session_token,
@@ -31,6 +32,15 @@ from app.core.security import (
 )
 
 class TestProjectorRotatingQR(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._orig_binding_v2 = getattr(settings, 'BINDING_V2', False)
+        settings.BINDING_V2 = False
+
+    @classmethod
+    def tearDownClass(cls):
+        settings.BINDING_V2 = cls._orig_binding_v2
+
     def setUp(self):
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(bind=self.engine)

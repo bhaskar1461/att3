@@ -39,13 +39,18 @@ def fetch_filtered_records(
     records = query.order_by(AttendanceRecord.session_date.desc(), AttendanceRecord.id.desc()).limit(2000).all()
     res = []
     for r in records:
+        status_val = r.status.value
+        if getattr(r, "scan_mode", "") == "MANUAL":
+            status_val = f"{status_val} (M)"
         res.append({
             "roll_number": r.roll_number,
             "student_name": r.student.name if r.student else "",
             "department": r.student.department.code if r.student and r.student.department else "",
             "section": r.student.section.name if r.student and r.student.section else "",
             "subject": r.session.subject.name if r.session and r.session.subject else "",
-            "status": r.status.value,
+            "status": status_val,
+            "scan_mode": getattr(r, "scan_mode", "QR"),
+            "manual_reason": getattr(r, "manual_reason", None),
             "date": r.session_date
         })
     return res
@@ -110,6 +115,48 @@ def export_excel_report(
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
+from fastapi.responses import StreamingResponse
+
+def stream_filtered_records(
+    db: Session,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    department_id: Optional[int] = None,
+    section_id: Optional[int] = None
+):
+    from sqlalchemy.orm import joinedload
+    query = db.query(AttendanceRecord).options(
+        joinedload(AttendanceRecord.student).joinedload(Student.department),
+        joinedload(AttendanceRecord.student).joinedload(Student.section),
+        joinedload(AttendanceRecord.session).joinedload(AttendanceSession.subject)
+    )
+
+    if start_date:
+        query = query.filter(AttendanceRecord.session_date >= start_date)
+    if end_date:
+        query = query.filter(AttendanceRecord.session_date <= end_date)
+    if department_id:
+        query = query.join(Student).filter(Student.department_id == department_id)
+    if section_id:
+        query = query.join(Student).filter(Student.section_id == section_id)
+
+    # yield_per(200) prevents batch loading of unbounded rows into RAM, guaranteeing O(1) memory
+    for r in query.order_by(AttendanceRecord.session_date.desc(), AttendanceRecord.id.desc()).yield_per(200):
+        status_val = r.status.value
+        if getattr(r, "scan_mode", "") == "MANUAL":
+            status_val = f"{status_val} (M)"
+        yield {
+            "roll_number": r.roll_number,
+            "student_name": r.student.name if r.student else "",
+            "department": r.student.department.code if r.student and r.student.department else "",
+            "section": r.student.section.name if r.student and r.student.section else "",
+            "subject": r.session.subject.name if r.session and r.session.subject else "",
+            "status": status_val,
+            "scan_mode": getattr(r, "scan_mode", "QR"),
+            "manual_reason": getattr(r, "manual_reason", None),
+            "date": r.session_date
+        }
+
 @router.get("/export/csv")
 def export_csv_report(
     start_date: Optional[str] = None,
@@ -120,14 +167,14 @@ def export_csv_report(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_report_user)
 ):
-    records = fetch_filtered_records(db, start_date, end_date, department_id, section_id)
-    csv_str = ReportService.generate_csv_report(records)
+    records_iter = stream_filtered_records(db, start_date, end_date, department_id, section_id)
     filename = f"Attendance_Export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    return Response(
-        content=csv_str,
+    return StreamingResponse(
+        ReportService.stream_csv_report(records_iter),
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
 
 @router.get("/export/pdf")
 def export_pdf_report(
@@ -255,3 +302,50 @@ def get_class_sheet_matrix(
         "total_students": len(students),
         "total_dates": len(distinct_dates)
     }
+
+@router.get("/session/{session_id}")
+def get_session_attendance_report(
+    session_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_report_user)
+):
+    """
+    Returns verified attendance records for a specific session, tagging manual entries with (M).
+    """
+    session = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if current_user.role == UserRole.TEACHER:
+        if not current_user.teacher_profile or session.teacher_id != current_user.teacher_profile.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not authorized to view this session report"
+            )
+
+    records = db.query(AttendanceRecord).filter(AttendanceRecord.session_id == session_id).order_by(AttendanceRecord.id.asc()).all()
+    res = []
+    for r in records:
+        status_val = r.status.value
+        is_manual = (getattr(r, "scan_mode", "") == "MANUAL" or getattr(r, "manual_reason", None) is not None)
+        if is_manual:
+            status_val = f"{status_val} (M)"
+        res.append({
+            "record_id": r.id,
+            "roll_number": r.roll_number,
+            "status": status_val,
+            "is_manual": is_manual,
+            "manual_reason": getattr(r, "manual_reason", None),
+            "manual_reason_detail": getattr(r, "manual_reason_detail", None),
+            "scan_mode": getattr(r, "scan_mode", "QR"),
+            "session_date": r.session_date
+        })
+
+    return {
+        "session_id": session_id,
+        "session_date": session.session_date,
+        "period": session.period,
+        "total_records": len(res),
+        "attendance_records": res
+    }
+

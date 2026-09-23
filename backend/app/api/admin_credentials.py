@@ -58,15 +58,14 @@ class TestSendRequest(BaseModel):
 # --- Helpers ---
 
 def _generate_temp_password(length: int = 8) -> str:
-    """Generates a random temp password: 2 uppercase + 2 digits + 4 lowercase."""
-    upper = random.choices(string.ascii_uppercase, k=2)
-    digits = random.choices(string.digits, k=2)
-    lower = random.choices(string.ascii_lowercase, k=length - 4)
+    """Generates a cryptographically secure random temp password: 2 uppercase + 2 digits + 4 lowercase."""
+    import secrets
+    upper = [secrets.choice(string.ascii_uppercase) for _ in range(2)]
+    digits = [secrets.choice(string.digits) for _ in range(2)]
+    lower = [secrets.choice(string.ascii_lowercase) for _ in range(length - 4)]
     chars = upper + digits + lower
-    random.shuffle(chars)
+    secrets.SystemRandom().shuffle(chars)
     return "".join(chars)
-
-import random  # Used by _generate_temp_password
 
 
 # --- Endpoints ---
@@ -146,7 +145,7 @@ def dispatch_credentials(
             temp_hash = get_password_hash(temp_password)
 
             from app.core.security import create_magic_login_token
-            frontend_url = settings.FRONTEND_URL or "https://ather-os.de5.net"
+            frontend_url = settings.public_frontend_url
             magic_token = create_magic_login_token(username=sap_id, role=req.target_role.upper(), expires_days=7)
             magic_link = f"{frontend_url}/login?magic_token={magic_token}"
 
@@ -583,6 +582,16 @@ def quick_reset_student_credentials(
 
     # 3. Clear/Reset active device lockouts and reset registered device for this roll number
     student.registered_device_id = None
+    if getattr(settings, 'BINDING_V2', False):
+        from app.models.models import DeviceBinding
+        active_bindings_v2 = db.query(DeviceBinding).filter(
+            DeviceBinding.student_id == student.id,
+            DeviceBinding.revoked_at.is_(None)
+        ).all()
+        for b in active_bindings_v2:
+            b.revoked_at = datetime.utcnow()
+            b.revocation_reason = "ADMIN_CREDENTIAL_RESET"
+
     active_bindings = db.query(DeviceAccountBinding).filter(
         DeviceAccountBinding.roll_number == clean_roll,
         DeviceAccountBinding.status == BindingStatus.ACTIVE

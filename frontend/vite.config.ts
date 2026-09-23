@@ -61,14 +61,21 @@ export default defineConfig({
         ]
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,webp}'],
+        globPatterns: ['**/*.{js,css,html,ico,png,svg,webp,wasm}'],
         globIgnores: ['**/vendor-scanner*.js'],
+        maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
         clientsClaim: true,
         skipWaiting: true,
+        navigateFallbackDenylist: [/^\/api\//, /^\/a\//, /.*\.wasm$/],
         runtimeCaching: [
           {
             // API endpoints, auth, and attendance must NEVER be cached (private data & live rotating tokens)
             urlPattern: /^\/api\/.*$/,
+            handler: 'NetworkOnly',
+          },
+          {
+            // Launch links /a/:token must NEVER be cached by service worker
+            urlPattern: /^\/a\/.*$/,
             handler: 'NetworkOnly',
           },
           {
@@ -81,11 +88,27 @@ export default defineConfig({
             },
           },
           {
-            // Cache scanner chunk on demand via StaleWhileRevalidate so students don't precache it
+            // WebAssembly binary: CacheFirst so it downloads once and is always instant & offline-available
+            urlPattern: /.*\.wasm$/,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'wasm-cache',
+              expiration: {
+                maxEntries: 5,
+                maxAgeSeconds: 365 * 24 * 60 * 60,
+              },
+              cacheableResponse: {
+                statuses: [0, 200],
+              },
+            },
+          },
+          {
+            // Cache scanner chunk on demand via NetworkFirst to prevent stale hash 404s after redeploy
             urlPattern: /.*vendor-scanner.*\.js$/,
-            handler: 'StaleWhileRevalidate',
+            handler: 'NetworkFirst',
             options: {
               cacheName: 'scanner-cache',
+              networkTimeoutSeconds: 3,
               expiration: {
                 maxEntries: 5,
                 maxAgeSeconds: 30 * 24 * 60 * 60,

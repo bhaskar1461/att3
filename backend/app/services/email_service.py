@@ -492,7 +492,11 @@ def send_teacher_class_allotment_notification(
                 student_count = 51
 
         # 6. Portal URL & Magic Login Link resolution
-        base_portal = (frontend_url or settings.FRONTEND_URL or "https://ather-os.de5.net").rstrip("/")
+        candidate_url = (frontend_url or settings.public_frontend_url).strip().rstrip("/")
+        if not candidate_url or "whiteleos" in candidate_url.lower() or "localhost" in candidate_url.lower() or "127.0.0.1" in candidate_url:
+            base_portal = "https://ather-os.de5.net"
+        else:
+            base_portal = candidate_url
         teacher_portal_url = f"{base_portal}/teacher"
 
         from app.core.security import create_magic_login_token

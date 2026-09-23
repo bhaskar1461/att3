@@ -570,6 +570,15 @@ export const AttendanceLanding: React.FC = () => {
                     )}
                   </button>
                 </form>
+
+                <div className="text-center pt-2">
+                  <Link
+                    to={`/login?next=${encodeURIComponent(`/a/${launchToken || ''}`)}`}
+                    className="text-xs text-blue-400 hover:text-blue-300 underline transition"
+                  >
+                    Or sign in with full student login portal
+                  </Link>
+                </div>
               </div>
             )}
 

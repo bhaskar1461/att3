@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, BackgroundTasks
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session, joinedload
@@ -14,6 +14,7 @@ from app.core.security import (
     get_password_hash,
     create_access_token,
     decode_access_token,
+    decode_access_token_with_status,
     create_refresh_token,
     decode_refresh_token,
     get_server_ist_datetime,
@@ -58,16 +59,22 @@ _AUTH_USER_CACHE_LOCK = threading.Lock()
 _AUTH_USER_CACHE_TTL = 300.0  # 5 minutes
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)) -> User:
-    payload = decode_access_token(token)
+    payload, error_code = decode_access_token_with_status(token)
     if not payload:
+        code = error_code or "invalid_token"
+        detail_msg = "Your session expired after inactivity. Please sign in again." if code == "token_expired" else "Invalid authentication credentials."
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail={"code": code, "message": detail_msg},
+            headers={"WWW-Authenticate": "Bearer", "Cache-Control": "no-store, no-cache, must-revalidate"},
         )
     username: str = payload.get("sub")
     if username is None:
-        raise HTTPException(status_code=401, detail="Invalid token payload")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "invalid_token", "message": "Invalid token payload."},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"}
+        )
 
     # In test environments with in-memory SQLite, bypass cache
     is_sqlite = False
@@ -99,7 +106,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         joinedload(User.teacher_profile)
     ).filter(User.username == username).first()
     if user is None or not user.is_active:
-        raise HTTPException(status_code=401, detail="User inactive or not found")
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "invalid_token", "message": "User inactive or not found."},
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate"}
+        )
 
     if not is_sqlite:
         with _AUTH_USER_CACHE_LOCK:
@@ -128,7 +139,7 @@ def require_teacher(request: Request, current_user: User = Depends(get_current_u
                 logger.warning(f"Failed to log PRIVESC_ATTEMPT: {e}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Faculty or Administrative privileges required"
+            detail={"code": "role_not_allowed", "message": "Faculty or Administrative privileges required."}
         )
     return current_user
 
@@ -145,14 +156,14 @@ def require_admin(request: Request, current_user: User = Depends(get_current_use
                 roll_number=current_user.username,
                 event_type="PRIVESC_ATTEMPT",
                 action="UNAUTHORIZED_ADMIN_ENDPOINT_ACCESS",
-                details=f"User {current_user.username} (Role: {current_user.role}) attempted unauthorized access to {request.method} {request.url.path}",
+                details=f"User {current_user.username} attempted unauthorized access to {request.method} {request.url.path}",
                 ip_address=ip_addr
             )
         except Exception as e:
             logger.warning(f"Failed to log PRIVESC_ATTEMPT: {e}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Super Admin privileges required"
+            detail={"code": "role_not_allowed", "message": "Super Admin privileges required."}
         )
     return current_user
 
@@ -392,12 +403,12 @@ async def login_for_access_token(request: Request, background_tasks: BackgroundT
     # 1. Enforce Student Device Binding Security LOCKOUT BEFORE/DURING login
     if user and user.role == UserRole.STUDENT:
         if not device_public_id or not device_secret:
-            # Deterministic fallback tied to client connection/browser characteristics,
-            # NEVER tied to the student username (which would allow multi-account bypass!)
+            # Deterministic fallback tied to client connection + roll number to prevent
+            # Shared NAT IP collisions on campus Wi-Fi (where hundreds of students share 1 IP)
             import hashlib
             client_ua = request.headers.get("user-agent", "generic_student_browser")
             client_ip = ip_address or "127.0.0.1"
-            conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+            conn_sig = hashlib.sha256(f"{clean_roll}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
             device_public_id = f"DEV-CONN-{conn_sig.upper()}"
             device_secret = hashlib.sha256(f"{device_public_id}_SECRET_SALT_2026".encode()).hexdigest()
 
@@ -653,6 +664,10 @@ async def refresh_student_token(
 
     # 3. Enforce device binding on refresh (touches timestamp without incrementing login attempts)
     if user.role == UserRole.STUDENT:
+        roll_number = user.username.upper()
+        if user.student_profile and user.student_profile.roll_number:
+            roll_number = user.student_profile.roll_number.upper()
+
         device_public_id = request.headers.get("x-device-public-id", "").strip()
         device_secret = request.headers.get("x-device-secret", "").strip()
         if req and not device_public_id:
@@ -663,15 +678,11 @@ async def refresh_student_token(
             import hashlib
             client_ua = request.headers.get("user-agent", "generic_student_browser")
             client_ip = ip_address or "127.0.0.1"
-            conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+            conn_sig = hashlib.sha256(f"{roll_number}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
             device_public_id = f"DEV-CONN-{conn_sig.upper()}"
             device_secret = hashlib.sha256(f"{device_public_id}_SECRET_SALT_2026".encode()).hexdigest()
 
         device = register_or_get_device(db, device_public_id, device_secret, ip_address)
-        roll_number = user.username.upper()
-        if user.student_profile:
-            roll_number = user.student_profile.roll_number.upper()
-
         enforce_device_binding(db, device, roll_number, ip_address, is_refresh=True)
 
     full_name = user.username
@@ -752,11 +763,13 @@ def logout_user(
         "status": "SUCCESS",
         "message": "User session invalidated successfully. Note: 30-minute device lock remains active."
     })
-    resp.delete_cookie(key="snist_refresh_token", path="/")
+    resp.delete_cookie(key="snist_refresh_token", path="/", httponly=True, samesite="lax")
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     return resp
 
 @router.get("/me", response_model=UserResponse)
-def read_users_me(current_user: User = Depends(get_current_user)):
+def read_users_me(response: Response, current_user: User = Depends(get_current_user)):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     full_name = current_user.username
     if current_user.role == UserRole.TEACHER and current_user.teacher_profile:
         full_name = current_user.teacher_profile.name
@@ -1030,11 +1043,7 @@ def generate_magic_link_endpoint(
 
     token = create_magic_login_token(username=user.username, role=user.role.value, expires_days=req.expires_days)
 
-    frontend_url = settings.FRONTEND_URL
-    if not frontend_url:
-        host = request.headers.get("host", "localhost:8000")
-        scheme = request.headers.get("x-forwarded-proto", "https")
-        frontend_url = f"{scheme}://{host}"
+    frontend_url = settings.public_frontend_url
 
     magic_link = f"{frontend_url.rstrip('/')}/login?magic_token={token}"
     return {

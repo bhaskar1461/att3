@@ -488,22 +488,41 @@ class QRService:
     @staticmethod
     def generate_projector_qr_code(
         payload: str,
-        as_base64: bool = True
+        as_base64: bool = True,
+        render_version: str = "v2",
+        ecc_level: Optional[str] = None,
+        dark_mode: bool = False
     ) -> str:
         """
         Generates an extra-large, ultra-high-contrast QR matrix specifically designed for
         lecture hall projectors and long-distance smartphone camera scanning.
+        - render_version='v2': Pure optical instrument with ECC Level L (~7% error correction)
+          and strict >=4 module quiet zone. With short tokens post-W3, this minimizes module count
+          (typically Version 2: 25x25 or Version 3: 29x29) for huge individual module pixel sizes.
+        - render_version='v1': Legacy projector render with ECC Level M.
+        - dark_mode=True: High-contrast inverted white modules on pitch black for darkened rooms.
         """
+        # Resolve ECC level
+        target_ecc = (ecc_level or ("L" if render_version == "v2" else "M")).upper().strip()
+        ecc_constant = qrcode.constants.ERROR_CORRECT_L if target_ecc == "L" else qrcode.constants.ERROR_CORRECT_M
+
         qr = qrcode.QRCode(
             version=None,
-            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            error_correction=ecc_constant,
             box_size=28,
-            border=4
+            border=4  # Spec-mandated 4-module quiet zone (never cropped)
         )
         qr.add_data(payload)
         qr.make(fit=True)
 
-        img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+        if dark_mode:
+            fill_col = "white"
+            back_col = "black"
+        else:
+            fill_col = "black"
+            back_col = "white"
+
+        img = qr.make_image(fill_color=fill_col, back_color=back_col).convert("RGB")
         
         buffer = io.BytesIO()
         img.save(buffer, format="PNG", quality=100)
@@ -514,6 +533,7 @@ class QRService:
             b64_str = base64.b64encode(img_bytes).decode('utf-8')
             return f"data:image/png;base64,{b64_str}"
         return img_bytes
+
 
 
 

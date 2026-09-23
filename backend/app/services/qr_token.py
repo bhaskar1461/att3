@@ -29,7 +29,8 @@ from app.core.security import (
     get_aes_key, 
     _int_to_base36, 
     _base36_to_int, 
-    validate_projector_session_token
+    validate_projector_session_token,
+    TokenValidationError
 )
 from app.models.models import ShortTokenRegistry, AttendanceSession, SessionStatus
 
@@ -180,7 +181,7 @@ class ShortTokenService:
         """
         Discovers payload format:
         Returns (code_or_token, v, format_type)
-        format_type is 'legacy' | 'short' | 'unknown'
+        format_type is 'legacy' | 'short' | 'launch' | 'unknown'
         """
         raw = str(raw_input).strip()
 
@@ -197,21 +198,41 @@ class ShortTokenService:
             if token_val.startswith("SNIST-SES|"):
                 return (token_val, None, "legacy")
 
-        # 3. Query string short format: ?s=8XK2Q7MD&v=483921 or /scan?s=...
+        # 3. Universal Launch Token URL: https://whiteleos.cc.cd/a/<token> or /a/<token>
+        try:
+            from app.services.launch_token import extract_launch_token_from_url
+            launch_from_url = extract_launch_token_from_url(raw)
+            if launch_from_url:
+                return (launch_from_url, None, "launch")
+        except Exception:
+            pass
+
+        # 4. Raw Launch Token string: URL-safe base64 encoding 6 colon-separated segments
+        if len(raw) >= 30 and not any(c in raw for c in [" ", "\t", "\n", "|", "&", "?", "/"]):
+            try:
+                from app.services.launch_token import _url_safe_b64_decode
+                decoded_str = _url_safe_b64_decode(raw).decode("utf-8")
+                parts = decoded_str.split(":")
+                if len(parts) == 6 and parts[0].isdigit() and parts[2].isdigit() and parts[4].isdigit():
+                    return (raw, None, "launch")
+            except Exception:
+                pass
+
+        # 5. Query string short format: ?s=8XK2Q7MD&v=483921 or /scan?s=...
         query_match = RE_SHORT_QUERY.search(raw)
         if query_match:
             code = normalize_crockford(query_match.group(1))
             slot_v = int(query_match.group(2))
             return (code, slot_v, "short")
 
-        # 4. Delimited short format: 8XK2Q7MD:483921 or 8XK2Q7MD|483921
+        # 6. Delimited short format: 8XK2Q7MD:483921 or 8XK2Q7MD|483921
         colon_match = RE_SHORT_COLON.match(raw)
         if colon_match:
             code = normalize_crockford(colon_match.group(1))
             slot_v = int(colon_match.group(2))
             return (code, slot_v, "short")
 
-        # 5. Raw short code passed with explicit v_param
+        # 7. Raw short code passed with explicit v_param
         if v_param is not None and RE_CLEAN_CODE.match(raw):
             code = normalize_crockford(raw)
             return (code, int(v_param), "short")
@@ -227,13 +248,15 @@ class ShortTokenService:
         step_window: int = 10,
         grace_seconds: Optional[float] = None,
         max_grace_steps: Optional[int] = 1,
-        now_ts: Optional[float] = None
+        now_ts: Optional[float] = None,
+        is_offline_submission: bool = False
     ) -> Dict[str, Any]:
         """
         Dual-format validation wrapper:
         Accepts BOTH legacy full-token and new {short_code, v} formats.
         Delegates cryptographic verification to existing validate_projector_session_token.
         Error taxonomy and status codes remain byte-for-byte identical.
+        Supports bounded SUBMIT_GRACE_MINUTES window for queued offline submissions.
         """
         code_or_token, slot_v, format_type = cls.parse_token_payload(payload_or_code, v)
 
@@ -243,38 +266,68 @@ class ShortTokenService:
                 step_window=step_window,
                 max_grace_steps=max_grace_steps,
                 grace_seconds=grace_seconds,
-                now_ts=now_ts
+                now_ts=now_ts,
+                is_offline_submission=is_offline_submission
             )
             validated["token_format"] = "legacy"
             return validated
 
         if format_type == "short":
-            if slot_v is None or slot_v <= 0:
-                raise ValueError("Invalid rotation counter in short token: counter must be positive integer")
-
-            if len(code_or_token) != SHORT_CODE_LENGTH or not set(code_or_token).issubset(CROCKFORD_SET):
-                raise ValueError("Invalid short code alphabet: Expected 8-character Crockford Base32")
-
             if now_ts is None:
                 now_ts = time.time()
 
+            if slot_v is None or slot_v <= 0:
+                raise TokenValidationError(code="invalid", message="Invalid rotation counter in short token: counter must be positive integer", server_now=now_ts)
+
+            if len(code_or_token) != SHORT_CODE_LENGTH or not set(code_or_token).issubset(CROCKFORD_SET):
+                raise TokenValidationError(code="invalid", message="Invalid short code alphabet: Expected 8-character Crockford Base32", server_now=now_ts)
+
             # Determine effective grace in seconds
-            if grace_seconds is not None:
-                effective_grace = float(grace_seconds)
-            elif max_grace_steps is not None and max_grace_steps > 0:
-                effective_grace = float(max_grace_steps * step_window)
+            if is_offline_submission:
+                grace_mins = getattr(settings, "SUBMIT_GRACE_MINUTES", 10)
+                effective_grace = float(grace_mins * 60)
+                slot_start_ts = slot_v * step_window
+                slot_end_ts = (slot_v + 1) * step_window
+                max_valid_ts = slot_end_ts + effective_grace
+                min_valid_ts = slot_start_ts - 2.0  # 2s clock skew allowance
+                if now_ts > max_valid_ts:
+                    raise TokenValidationError(
+                        code="expired",
+                        message=f"Projector QR token expired beyond offline submit grace window ({getattr(settings, 'SUBMIT_GRACE_MINUTES', 10)}m).",
+                        server_now=now_ts
+                    )
+                if now_ts < min_valid_ts:
+                    raise TokenValidationError(
+                        code="invalid",
+                        message="Projector QR token timestamp is in the future. Check clock synchronization.",
+                        server_now=now_ts
+                    )
             else:
-                effective_grace = float(getattr(settings, "TOKEN_GRACE_SECONDS", 3.0))
+                # Live online submission: Strictly accept only current window and previous window (default max 1 window grace)
+                if grace_seconds is not None:
+                    effective_grace = float(grace_seconds)
+                elif max_grace_steps is not None and max_grace_steps > 0:
+                    effective_grace = float(max_grace_steps * step_window)
+                else:
+                    effective_grace = float(step_window)
 
-            slot_start_ts = slot_v * step_window
-            slot_end_ts = (slot_v + 1) * step_window
-            max_valid_ts = slot_end_ts + effective_grace
-            min_valid_ts = slot_start_ts - 2.0  # 2s clock skew allowance
+                slot_start_ts = slot_v * step_window
+                slot_end_ts = (slot_v + 1) * step_window
+                max_valid_ts = slot_end_ts + effective_grace
+                min_valid_ts = slot_start_ts - 2.0  # 2s clock skew allowance
 
-            if now_ts > max_valid_ts:
-                raise ValueError("Projector QR token has expired. Please scan the newly refreshed QR on screen.")
-            if now_ts < min_valid_ts:
-                raise ValueError("Projector QR token timestamp is in the future. Check clock synchronization.")
+                if now_ts > max_valid_ts:
+                    raise TokenValidationError(
+                        code="expired",
+                        message="Projector QR token has expired. Please scan the newly refreshed QR on screen.",
+                        server_now=now_ts
+                    )
+                if now_ts < min_valid_ts:
+                    raise TokenValidationError(
+                        code="invalid",
+                        message="Projector QR token timestamp is in the future. Check clock synchronization.",
+                        server_now=now_ts
+                    )
 
             # Resolve session_id: Step 1 O(1) in-memory cache
             session_id = None
@@ -331,8 +384,41 @@ class ShortTokenService:
             validated["token_format"] = "short"
             return validated
 
+        if format_type == "launch":
+            from app.services.launch_token import validate_launch_token
+            launch_data = validate_launch_token(code_or_token, now_ts=now_ts)
+            session_id = launch_data["session_id"]
+            code = launch_data["short_code"]
+            slot_v = launch_data["v"]
+            exp_ts = launch_data["exp_ts"]
+
+            if now_ts is None:
+                now_ts = time.time()
+
+            period_count = 1
+            with _CACHE_LOCK:
+                cached = _SHORT_CODE_CACHE.get(code)
+                if cached and cached.get("is_active"):
+                    period_count = cached.get("period_count", 1)
+
+            if period_count == 1:
+                sess = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+                if sess:
+                    from app.api.teacher import _extract_period_count
+                    period_count = _extract_period_count(sess.period)
+
+            return {
+                "session_id": session_id,
+                "period_count": period_count,
+                "step": slot_v,
+                "token_format": "launch",
+                "is_active": True,
+                "short_code": code,
+                "seconds_remaining": max(0, int(exp_ts - now_ts))
+            }
+
         # Unknown / malformed input
-        raise ValueError("Invalid projector token prefix: Expected SNIST-SES or ?s=...")
+        raise ValueError("Invalid projector token prefix: Expected HTTPS attendance URL, SNIST-SES, or ?s=...")
 
     @classmethod
     def purge_session_tokens(cls, db: Session, session_id: int):
@@ -422,4 +508,47 @@ def get_effective_qr_format(
         return "short", f"PILOT_DEPT_MATCH_{dept_code}"
 
     return "legacy", "CONTROL_COHORT_LEGACY"
+
+
+def get_effective_render_version(
+    db: Session,
+    session_id: Optional[int] = None,
+    section_id: Optional[int] = None,
+    dept_code: Optional[str] = None
+) -> Tuple[str, str]:
+    """
+    Determines the active QR visual rendering pipeline ('v1' | 'v2') and decision reason.
+    Supports instant <1s runtime flips via SystemSettings in DB or settings.QR_RENDER_VERSION fallback.
+    - 'v1': Legacy standard rendering (ECC M, default quiet zone).
+    - 'v2': Pure optical instrument (ECC L, guaranteed 4-module quiet zone, crisp device-pixel-ratio render).
+    """
+    from app.models.models import SystemSettings, AttendanceSession
+
+    # 1. Resolve master render mode (v1 | v2 | pilot)
+    setting_row = db.query(SystemSettings).filter(SystemSettings.key == "QR_RENDER_VERSION").first()
+    mode = (setting_row.value if setting_row and setting_row.value else getattr(settings, "QR_RENDER_VERSION", "v2")).strip().lower()
+
+    if mode == "v1":
+        return "v1", "GLOBAL_FLAG_V1"
+    if mode == "v2":
+        return "v2", "GLOBAL_FLAG_V2"
+
+    # Mode is "pilot" -> determine if session is in render pilot cohort
+    if session_id and (section_id is None or dept_code is None):
+        sess = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+        if sess:
+            if section_id is None:
+                section_id = sess.section_id
+            if dept_code is None and sess.section and sess.section.department:
+                dept_code = sess.section.department.code
+
+    sec_setting = db.query(SystemSettings).filter(SystemSettings.key == "QR_RENDER_PILOT_SECTIONS").first()
+    raw_secs = (sec_setting.value if sec_setting and sec_setting.value else getattr(settings, "QR_RENDER_PILOT_SECTIONS", "1,2")).strip()
+    pilot_section_ids = {s.strip() for s in raw_secs.split(",") if s.strip()}
+
+    if section_id is not None and str(section_id) in pilot_section_ids:
+        return "v2", f"PILOT_RENDER_SECTION_MATCH_{section_id}"
+
+    return "v1", "CONTROL_RENDER_V1"
+
 

@@ -3,10 +3,27 @@ import { useAuth } from '../context/AuthContext';
 import { ArrowRight, Eye, EyeOff, Lock, Mail, Clock, AlertTriangle, Smartphone, Download, PlusSquare, X } from 'lucide-react';
 import { Toast } from '../components/Toast';
 import { SelfServiceDeviceResetModal } from '../components/SelfServiceDeviceResetModal';
+import { IosInstallGuideModal } from '../components/IosInstallGuideModal';
 import { initPwaTelemetryListeners } from '../services/telemetryService';
 import { usePwaInstall } from '../hooks/usePwaInstall';
-import { IosInstallGuideModal } from '../components/IosInstallGuideModal';
 import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/deviceCredential';
+import { performAuthRedirect } from '../services/api';
+import { isLoopBreakerTripped, resetLoopBreaker, emergencyWipeAuthState } from '../services/loopBreaker';
+
+export function getSafeNextDestination(search: string): string | null {
+  try {
+    const params = new URLSearchParams(search);
+    const next = params.get('next');
+    if (!next) return null;
+    // Must start with '/' and not '//' or '/\' to prevent open redirects, and no protocol
+    if (next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\') && !next.includes('://')) {
+      return next;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 export const Login: React.FC = () => {
   const { login } = useAuth();
@@ -48,13 +65,57 @@ export const Login: React.FC = () => {
   React.useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const reason = params.get('reason');
-    if (reason === 'session_expired' || reason === 'idle_timeout') {
+    const loopTripped = isLoopBreakerTripped() || reason === 'loop_breaker_tripped';
+
+    if (loopTripped) {
+      emergencyWipeAuthState();
+      setToast({ message: 'Redirect loop detected. Your session was reset for security. Please sign in.', type: 'error' });
+    } else if (reason === 'token_expired' || reason === 'session_expired' || reason === 'idle_timeout') {
       setToast({ message: 'Your session expired after inactivity. Please sign in again.', type: 'warning' });
+    } else if (reason === 'invalid_token') {
+      setToast({ message: 'Authentication failed or session is invalid. Please sign in again.', type: 'error' });
+    } else if (reason === 'role_not_allowed') {
+      setToast({ message: 'You do not have permission to access that section. Please sign in with an authorized account.', type: 'warning' });
     } else if (reason === 'user_logout') {
       setToast({ message: 'You have been safely signed out.', type: 'success' });
-    } else if (reason === 'binding_403' || reason === 'device_mismatch') {
+    } else if (reason === 'binding_403' || reason === 'device_mismatch' || reason === 'no_active_binding') {
       setDeviceMismatchError(true);
       setToast({ message: 'Your account is bound to another device. Please reset device binding or sign in on your registered device.', type: 'error' });
+    }
+
+    // Single source of truth: /login redirects ONLY if GET /api/v1/auth/me returns 200
+    const storedToken = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    if (storedToken && !loopTripped) {
+      fetch('/api/v1/auth/me', {
+        headers: {
+          'Authorization': `Bearer ${storedToken}`,
+          'Cache-Control': 'no-store, no-cache, must-revalidate'
+        },
+        credentials: 'include'
+      })
+        .then(async (res) => {
+          if (res.ok) {
+            const userData = await res.json();
+            const safeNext = getSafeNextDestination(window.location.search);
+            resetLoopBreaker();
+            if (safeNext) {
+              performAuthRedirect(safeNext);
+            } else if (userData.role === 'SUPER_ADMIN') {
+              performAuthRedirect('/admin');
+            } else if (userData.role === 'TEACHER') {
+              performAuthRedirect('/teacher');
+            } else {
+              performAuthRedirect('/student?scan=true');
+            }
+          } else {
+            // Server rejected session -> wipe local storage and stay on /login
+            emergencyWipeAuthState();
+          }
+        })
+        .catch(() => {
+          // Network error -> wipe local state and stay on /login
+          emergencyWipeAuthState();
+        });
     }
 
     const token = params.get('magic_token') || params.get('token');
@@ -148,10 +209,18 @@ export const Login: React.FC = () => {
         setToast({ message: "Password set successfully! Entering portal...", type: 'success' });
       }
 
+      resetLoopBreaker();
+      const safeNext = getSafeNextDestination(window.location.search);
       setTimeout(() => {
-        if (data.role === 'SUPER_ADMIN') window.location.href = '/admin';
-        else if (data.role === 'TEACHER') window.location.href = '/teacher';
-        else window.location.href = '/student?scan=true';
+        if (safeNext) {
+          performAuthRedirect(safeNext);
+        } else if (data.role === 'SUPER_ADMIN') {
+          performAuthRedirect('/admin');
+        } else if (data.role === 'TEACHER') {
+          performAuthRedirect('/teacher');
+        } else {
+          performAuthRedirect('/student?scan=true');
+        }
       }, 400);
 
     } catch (err: any) {
@@ -262,9 +331,17 @@ export const Login: React.FC = () => {
         full_name: response.full_name
       }, response.refresh_token);
 
-      if (response.role === 'SUPER_ADMIN') window.location.href = '/admin';
-      else if (response.role === 'TEACHER') window.location.href = '/teacher';
-      else window.location.href = '/student?scan=true';
+      resetLoopBreaker();
+      const safeNext = getSafeNextDestination(window.location.search);
+      if (safeNext) {
+        performAuthRedirect(safeNext);
+      } else if (response.role === 'SUPER_ADMIN') {
+        performAuthRedirect('/admin');
+      } else if (response.role === 'TEACHER') {
+        performAuthRedirect('/teacher');
+      } else {
+        performAuthRedirect('/student?scan=true');
+      }
 
     } catch (err: any) {
       let message = err?.message || 'Login failed';

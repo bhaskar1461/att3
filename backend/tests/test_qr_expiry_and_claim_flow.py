@@ -54,6 +54,8 @@ class TestQRExpiryAndClaimFlow:
     def setup_method(self):
         self.client = TestClient(app)
         self.db: Session = SessionLocal()
+        orig_geofence = getattr(settings, 'GEOFENCE_ENABLED', False)
+        settings.GEOFENCE_ENABLED = True
 
         # Clear rate limiters for clean test isolation
         try:
@@ -200,6 +202,7 @@ class TestQRExpiryAndClaimFlow:
         except Exception:
             self.db.rollback()
         finally:
+            settings.GEOFENCE_ENABLED = orig_geofence
             self.db.close()
 
     def test_rotation_cadence_and_metadata(self):

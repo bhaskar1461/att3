@@ -17,10 +17,12 @@ import {
   DeviceBucket,
   DisplayType,
   TokenFormat,
+  ScannerEngine,
   ScanTelemetryEvent,
   TelemetryBatchPayload
 } from '../types/telemetry';
 import { getRuntimeDeviceBucket } from '../utils/deviceClassifier';
+import { getActiveScannerEngine } from './qrEngine';
 
 const DB_NAME = 'snist_scanner_telemetry';
 const DB_VERSION = 1;
@@ -200,6 +202,7 @@ class ScannerTelemetryManager {
 
       const event: ScanTelemetryEvent = {
         ...rawEvent,
+        engine: rawEvent.engine || getActiveScannerEngine(),
         device_bucket: getRuntimeDeviceBucket(),
         ts: Date.now(),
         app_version: APP_VERSION
@@ -228,7 +231,8 @@ class ScannerTelemetryManager {
     details?: Record<string, any>,
     displayType?: DisplayType,
     decodeDurationMs?: number,
-    tokenFormat?: TokenFormat
+    tokenFormat?: TokenFormat,
+    engine?: ScannerEngine
   ) {
     this.recordEvent({
       event_type: stage,
@@ -237,6 +241,7 @@ class ScannerTelemetryManager {
       decode_duration_ms: decodeDurationMs,
       display_type: displayType,
       token_format: tokenFormat,
+      engine: engine || getActiveScannerEngine(),
       session_id: sessionId,
       details
     });
@@ -248,7 +253,8 @@ class ScannerTelemetryManager {
     sessionId?: string,
     details?: Record<string, any>,
     displayType?: DisplayType,
-    tokenFormat?: TokenFormat
+    tokenFormat?: TokenFormat,
+    engine?: ScannerEngine
   ) {
     this.recordEvent({
       event_type: 'scan_failed',
@@ -256,9 +262,37 @@ class ScannerTelemetryManager {
       error_type: errorType,
       display_type: displayType,
       token_format: tokenFormat,
+      engine: engine || getActiveScannerEngine(),
       session_id: sessionId,
       details
     });
+  }
+
+  public recordLadderTransition(fromRung: number, toRung: number, reason?: string, sessionId?: string) {
+    this.recordEvent({
+      event_type: 'ladder_rung_transition',
+      session_id: sessionId,
+      ladder_rung: toRung,
+      from_rung: fromRung,
+      details: {
+        from_state: `rung_${fromRung}`,
+        to_state: `rung_${toRung}`,
+        reason: reason || 'degradation_ladder_progression'
+      }
+    });
+  }
+
+  public recordCameraOpenTimeout(ladderRung: number, sessionId?: string) {
+    this.recordFailure(
+      'camera_open_timeout',
+      'camera_permission_result',
+      sessionId,
+      {
+        constraint_ladder_rung: ladderRung,
+        action: 'WATCHDOG_TIMEOUT_RETRY_NEXT_RUNG',
+        timeout_ms: 8000
+      }
+    );
   }
 
   public recordRetry(attemptNo: number, sessionId?: string) {

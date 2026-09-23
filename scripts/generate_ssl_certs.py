@@ -33,10 +33,12 @@ def generate_cert_with_cryptography(certs_dir, local_ip):
 
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.ORGANIZATION_NAME, "SNIST QR Attendance System"),
-        x509.NameAttribute(NameOID.COMMON_NAME, local_ip),
+        x509.NameAttribute(NameOID.COMMON_NAME, "whiteleos.cc.cd"),
     ])
 
     alt_names = [
+        x509.DNSName("whiteleos.cc.cd"),
+        x509.DNSName("*.whiteleos.cc.cd"),
         x509.DNSName("localhost"),
         x509.DNSName("snist-attendance.isroot.in"),
         x509.DNSName("*.isroot.in"),
@@ -126,7 +128,7 @@ C = IN
 ST = TS
 L = Hyderabad
 O = SNIST
-CN = {local_ip}
+CN = whiteleos.cc.cd
 
 [v3_req]
 keyUsage = keyEncipherment, dataEncipherment
@@ -134,8 +136,10 @@ extendedKeyUsage = serverAuth
 subjectAltName = @alt_names
 
 [alt_names]
-DNS.1 = localhost
-DNS.2 = snist-attendance.isroot.in
+DNS.1 = whiteleos.cc.cd
+DNS.2 = *.whiteleos.cc.cd
+DNS.3 = localhost
+DNS.4 = snist-attendance.isroot.in
 IP.1 = 127.0.0.1
 IP.2 = {local_ip}
 """

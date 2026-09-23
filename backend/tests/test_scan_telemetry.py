@@ -412,7 +412,7 @@ class TestScanTelemetrySuite(unittest.TestCase):
         )
         self.assertEqual(res.status_code, 200)
         self.assertIn("text/csv", res.headers.get("content-type", ""))
-        self.assertIn("id,session_id,event_type,stage,error_type,device_bucket", res.text)
+        self.assertIn("id,session_id,event_type,stage,error_type,ladder_rung,from_rung,device_bucket", res.text)
         self.assertIn("sess_csv", res.text)
 
     # =========================================================================
@@ -436,6 +436,7 @@ class TestScanTelemetrySuite(unittest.TestCase):
 
         total_elapsed_ms = (time.perf_counter() - start) * 1000.0
         avg_overhead_ms = total_elapsed_ms / iterations
+        self.assertLess(avg_overhead_ms, 2.0, f"Instrumentation overhead {avg_overhead_ms:.4f}ms exceeded 2.0ms limit")
 
     # =========================================================================
     # 7. Week 2 Real-Data Tests: Token Grace Window (Quick Win C.2)
@@ -529,7 +530,7 @@ class TestScanTelemetrySuite(unittest.TestCase):
         """
         db = self.TestingSessionLocal()
         test_session_id = f"sess_dec_{uuid.uuid4().hex[:8]}"
-        today_val = date.today()
+        today_val = datetime.utcnow().date()
         try:
             # Ingest successful decode events with durations across brackets:
             # 500ms (<1s), 1500ms (1-3s), 3500ms (3-5s), 6000ms (5-8s), 10000ms (8-15s)

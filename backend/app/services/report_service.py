@@ -110,6 +110,34 @@ class ReportService:
         return output.getvalue()
 
     @staticmethod
+    def stream_csv_report(data_iter):
+        """
+        Streams CSV format attendance report row-by-row with O(1) constant memory.
+        """
+        output = io.StringIO()
+        fieldnames = ["S.No", "Roll Number", "Student Name", "Department", "Section", "Subject", "Status", "Date"]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        yield output.getvalue()
+        output.seek(0)
+        output.truncate(0)
+
+        for i, item in enumerate(data_iter, 1):
+            writer.writerow({
+                "S.No": i,
+                "Roll Number": item.get("roll_number", ""),
+                "Student Name": item.get("student_name", ""),
+                "Department": item.get("department", ""),
+                "Section": item.get("section", ""),
+                "Subject": item.get("subject", ""),
+                "Status": item.get("status", ""),
+                "Date": item.get("date", "")
+            })
+            yield output.getvalue()
+            output.seek(0)
+            output.truncate(0)
+
+    @staticmethod
     def generate_csv_report(data: List[Dict[str, Any]]) -> str:
         """
         Generates CSV format attendance report.

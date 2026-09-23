@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.exc import IntegrityError
 from typing import Dict, Any, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
 from pydantic import BaseModel
@@ -40,7 +41,10 @@ router = APIRouter(prefix="/student", tags=["Student Portal"])
 
 def require_student(current_user: User = Depends(get_current_user)) -> Student:
     if current_user.role != UserRole.STUDENT or not current_user.student_profile:
-        raise HTTPException(status_code=403, detail="Student permission required")
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "role_not_allowed", "message": "Student permission required."}
+        )
     return current_user.student_profile
 
 @router.get("/profile")
@@ -164,11 +168,17 @@ def get_student_attendance_summary(db: Session = Depends(get_db), current_studen
     total_present = sum(r.period_count or 1 for r in present_records)
     
     server_today = get_server_ist_date()
-    
-    # Query all sessions conducted for this student's section up to today
+    # Query all sessions conducted for this student's section up to today,
+    # plus any sessions where this student has a recorded attendance mark
+    from sqlalchemy import or_
+    recorded_sids = [r.session_id for r in records if r.session_id]
+    section_cond = (AttendanceSession.section_id == current_student.section_id) if current_student.section_id else False
     section_sessions = db.query(AttendanceSession).filter(
-        AttendanceSession.section_id == current_student.section_id,
-        AttendanceSession.session_date <= server_today
+        AttendanceSession.session_date <= server_today,
+        or_(
+            section_cond,
+            AttendanceSession.id.in_(recorded_sids) if recorded_sids else False
+        )
     ).all()
     
     # Total conducted periods across all section sessions up to today
@@ -591,11 +601,11 @@ failed_token_tracker = FailedTokenTracker(max_failures=15, window_seconds=60, co
 
 class StudentScanRateLimiter:
     """
-    In-memory rate limiter enforcing max 6 scan attempts per minute per ROLL NUMBER (AM-200).
+    In-memory rate limiter enforcing max 15 scan attempts per minute per ROLL NUMBER (AM-200).
     Prevents rogue client loops or scraping scripts while allowing all legitimate students
     on a shared classroom NAT IP to submit without interference.
     """
-    def __init__(self, max_attempts: int = 6, window_seconds: int = 60):
+    def __init__(self, max_attempts: int = 15, window_seconds: int = 60):
         self.max_attempts = max_attempts
         self.window_seconds = window_seconds
         self._attempts: Dict[str, List[float]] = defaultdict(list)
@@ -612,7 +622,12 @@ class StudentScanRateLimiter:
                 retry_after = int(self.window_seconds - (now - valid_attempts[0]))
                 raise HTTPException(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail=f"Too many scan attempts for roll {clean_roll}. Maximum {self.max_attempts} attempts per minute allowed.",
+                    detail={
+                        "code": "rate_limited",
+                        "message": f"Too many scan attempts for roll {clean_roll}. Maximum {self.max_attempts} attempts per minute allowed. Please wait {max(1, retry_after)} seconds.",
+                        "retry_after": max(1, retry_after),
+                        "serverNow": now
+                    },
                     headers={
                         "Retry-After": str(max(1, retry_after)),
                         "X-Retry-After-Seconds": str(max(1, retry_after))
@@ -621,8 +636,16 @@ class StudentScanRateLimiter:
             valid_attempts.append(now)
             self._attempts[clean_roll] = valid_attempts
 
+    def reset_limit(self, roll_number: str) -> None:
+        """Resets attempt history immediately for legitimate/successful scans."""
+        if not roll_number:
+            return
+        clean_roll = roll_number.strip().upper()
+        with self._lock:
+            self._attempts.pop(clean_roll, None)
 
-student_scan_limiter = StudentScanRateLimiter(max_attempts=6, window_seconds=60)
+
+student_scan_limiter = StudentScanRateLimiter(max_attempts=15, window_seconds=60)
 
 # Bounded concurrency token limiter: ensures at most 25 database scan workers run concurrently (AM-200)
 _scan_concurrency_tokens = threading.BoundedSemaphore(25)
@@ -815,9 +838,34 @@ class AsyncAttendanceWriter:
                                 )
                             except Exception:
                                 pass
+                except IntegrityError:
+                    # Concurrent duplicate race: another worker thread committed the exact same (session_id, student_id)
+                    try:
+                        db.rollback()
+                        existing = db.query(AttendanceRecord).filter(
+                            AttendanceRecord.session_id == payload["session_id"],
+                            AttendanceRecord.student_id == payload["student_id"]
+                        ).first()
+                        with self._fast_cache_lock:
+                            self._fast_cache.add((payload["session_id"], payload["roll_number"]))
+                        with self._lock:
+                            self._results[job_id] = {
+                                "status": "ALREADY_MARKED",
+                                "attendance_id": existing.id if existing else None,
+                                "message": "Already marked present."
+                            }
+                        try:
+                            from app.services.attendance_engine import invalidate_attendance_cache
+                            invalidate_attendance_cache(student_id=payload["student_id"], roll_number=payload["roll_number"])
+                        except Exception:
+                            pass
+                    except Exception as rollback_err:
+                        logging.getLogger("snist_erp.student").warning(f"Error resolving race condition for {payload.get('roll_number')}: {rollback_err}")
                 except Exception as ex:
                     import logging
                     logging.getLogger("snist_erp.student").error(f"Async attendance writer error for {payload.get('roll_number')}: {ex}")
+                    with self._fast_cache_lock:
+                        self._fast_cache.discard((payload.get("session_id"), payload.get("roll_number")))
                     with self._lock:
                         self._results[job_id] = {"status": "ERROR", "message": str(ex)}
                 finally:
@@ -1002,24 +1050,47 @@ async def student_scan_session(
         if not session_meta:
             raise HTTPException(status_code=404, detail="Attendance session not found.")
 
+        # Authoritative multi-period inheritance: Never downgrade multi-period sessions to single period
+        sess_period_label = session_meta.get("period", "")
+        if sess_period_label:
+            from app.api.teacher import _extract_period_count
+            sess_p = _extract_period_count(sess_period_label)
+            if sess_p > period_count:
+                period_count = sess_p
+
+        resolved_subject_name = (session_meta.get("subject_name") or "").strip() or "Career Enhancement Training (CET)"
+        session_meta["subject_name"] = resolved_subject_name
+
         status_str = getattr(session_meta["status"], "value", str(session_meta["status"]))
         if status_str != "OPEN":
             locked_at = session_meta.get("locked_at")
             grace_minutes = getattr(settings, "SUBMIT_GRACE_MINUTES", 10)
 
             # Offline submissions are only accepted if queued BEFORE the session lock time!
-            queued_at_str = getattr(req, "queued_at", None)
+            queued_at_val = getattr(req, "queued_at", None)
             is_valid_prelock_offline = False
-            if getattr(req, "is_offline_submission", False) and queued_at_str:
+            if getattr(req, "is_offline_submission", False) and queued_at_val is not None:
                 try:
-                    if isinstance(queued_at_str, str):
-                        q_dt = datetime.fromisoformat(queued_at_str.replace("Z", "+00:00")).replace(tzinfo=None)
-                    else:
-                        q_dt = queued_at_str
-                    if locked_at and q_dt <= locked_at:
+                    q_dt = None
+                    if isinstance(queued_at_val, (int, float)):
+                        # If epoch milliseconds (> 1e11), convert to seconds
+                        epoch_sec = queued_at_val / 1000.0 if queued_at_val > 1e11 else float(queued_at_val)
+                        q_dt = datetime.utcfromtimestamp(epoch_sec)
+                    elif isinstance(queued_at_val, str):
+                        cleaned = queued_at_val.strip().replace("Z", "+00:00")
+                        if cleaned.isdigit() or (cleaned.replace(".", "", 1).isdigit()):
+                            num_val = float(cleaned)
+                            epoch_sec = num_val / 1000.0 if num_val > 1e11 else num_val
+                            q_dt = datetime.utcfromtimestamp(epoch_sec)
+                        else:
+                            q_dt = datetime.fromisoformat(cleaned).replace(tzinfo=None)
+                    elif isinstance(queued_at_val, datetime):
+                        q_dt = queued_at_val.replace(tzinfo=None)
+
+                    if q_dt and locked_at and q_dt <= locked_at:
                         is_valid_prelock_offline = True
-                except Exception:
-                    pass
+                except Exception as parse_err:
+                    logger.warning(f"[Offline Sync] Failed to parse queued_at ({queued_at_val}): {parse_err}")
 
             if is_valid_prelock_offline and locked_at:
                 time_since_lock_sec = (now_utc - locked_at).total_seconds()
@@ -1096,12 +1167,21 @@ async def student_scan_session(
         if not is_sqlite:
             # AM-200 Mandatory Async Fast-Path for Production MySQL (Decoupled from 230ms DB latency)
             if async_attendance_writer.is_already_marked(session_id, clean_roll):
+                student_scan_limiter.reset_limit(clean_roll)
+                failed_token_tracker.record_success(tracker_key)
+                with _STUDENT_SUMMARY_CACHE_LOCK:
+                    _STUDENT_SUMMARY_CACHE.pop(current_student.id, None)
+                try:
+                    from app.services.attendance_engine import invalidate_attendance_cache
+                    invalidate_attendance_cache(student_id=current_student.id, roll_number=clean_roll)
+                except Exception:
+                    pass
                 return {
                     "status": "ALREADY_MARKED",
                     "message": "You have already been marked present for this session.",
                     "session_id": session_id,
                     "token_format": token_data.get("token_format", "legacy"),
-                    "subject_name": session_meta["subject_name"],
+                    "subject_name": resolved_subject_name,
                     "period_name": session_meta["period"],
                     "period_count": period_count,
                     "session_date": session_meta["session_date"],
@@ -1114,7 +1194,7 @@ async def student_scan_session(
                 import hashlib
                 client_ua = request.headers.get("user-agent", "generic_student_browser")
                 client_ip = ip_addr or "127.0.0.1"
-                conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+                conn_sig = hashlib.sha256(f"{clean_roll}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
                 device_id = f"DEV-CONN-{conn_sig.upper()}"
 
             device_secret = request.headers.get("x-device-secret", "").strip() or f"{device_id}_SECRET_SALT_2026"
@@ -1148,8 +1228,15 @@ async def student_scan_session(
             }
 
             async_attendance_writer.enqueue(job_id, payload)
+            student_scan_limiter.reset_limit(clean_roll)
+            failed_token_tracker.record_success(tracker_key)
             with _STUDENT_SUMMARY_CACHE_LOCK:
                 _STUDENT_SUMMARY_CACHE.pop(current_student.id, None)
+            try:
+                from app.services.attendance_engine import invalidate_attendance_cache
+                invalidate_attendance_cache(student_id=current_student.id, roll_number=clean_roll)
+            except Exception:
+                pass
 
             t_total_ms = (time.perf_counter() - t_scan_start) * 1000
             logger.info(
@@ -1162,9 +1249,10 @@ async def student_scan_session(
                 "job_id": job_id,
                 "message": f"Successfully marked present for {period_count} period{'s' if period_count > 1 else ''}!",
                 "session_id": session_id,
+                "token_format": token_data.get("token_format", "legacy"),
                 "distance_m": dist_calc,
                 "scan_mode": scan_mode_val,
-                "subject_name": session_meta["subject_name"],
+                "subject_name": resolved_subject_name,
                 "period_name": session_meta["period"],
                 "period_count": period_count,
                 "session_date": session_meta["session_date"],
@@ -1181,7 +1269,7 @@ async def student_scan_session(
                 import hashlib
                 client_ua = request.headers.get("user-agent", "generic_student_browser")
                 client_ip = ip_addr or "127.0.0.1"
-                conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+                conn_sig = hashlib.sha256(f"{clean_roll}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
                 device_id = f"DEV-CONN-{conn_sig.upper()}"
 
             device_secret = request.headers.get("x-device-secret", "").strip() or f"{device_id}_SECRET_SALT_2026"
@@ -1230,6 +1318,13 @@ async def student_scan_session(
             ).first()
 
             if existing_record and existing_record.status == AttendanceStatus.PRESENT:
+                with _STUDENT_SUMMARY_CACHE_LOCK:
+                    _STUDENT_SUMMARY_CACHE.pop(current_student.id, None)
+                try:
+                    from app.services.attendance_engine import invalidate_attendance_cache
+                    invalidate_attendance_cache(student_id=current_student.id, roll_number=clean_roll)
+                except Exception:
+                    pass
                 return {
                     "status": "ALREADY_MARKED",
                     "message": "You have already been marked present for this session.",
@@ -1237,7 +1332,7 @@ async def student_scan_session(
                     "attendance_id": existing_record.id,
                     "distance_m": existing_record.distance_m,
                     "scan_mode": existing_record.scan_mode,
-                    "subject_name": session_meta["subject_name"],
+                    "subject_name": resolved_subject_name,
                     "period_name": session_meta["period"],
                     "period_count": existing_record.period_count or period_count,
                     "session_date": session_meta["session_date"],
@@ -1276,12 +1371,41 @@ async def student_scan_session(
                 db.flush()
                 rec_id = new_record.id
 
-            db.commit()
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                existing_record = db.query(AttendanceRecord).filter(
+                    AttendanceRecord.session_id == session_id,
+                    AttendanceRecord.student_id == current_student.id
+                ).first()
+                with _STUDENT_SUMMARY_CACHE_LOCK:
+                    _STUDENT_SUMMARY_CACHE.pop(current_student.id, None)
+                try:
+                    from app.services.attendance_engine import invalidate_attendance_cache
+                    invalidate_attendance_cache(student_id=current_student.id, roll_number=clean_roll)
+                except Exception:
+                    pass
+                return {
+                    "status": "ALREADY_MARKED",
+                    "message": "You have already been marked present for this session.",
+                    "session_id": session_id,
+                    "attendance_id": existing_record.id if existing_record else None,
+                    "distance_m": existing_record.distance_m if existing_record else dist_calc,
+                    "scan_mode": existing_record.scan_mode if existing_record else scan_mode_val,
+                    "subject_name": resolved_subject_name,
+                    "period_name": session_meta["period"],
+                    "period_count": existing_record.period_count if existing_record else period_count,
+                    "session_date": session_meta["session_date"],
+                    "roll_number": current_student.roll_number,
+                    "student_name": current_student.name
+                }
+
             with _STUDENT_SUMMARY_CACHE_LOCK:
                 _STUDENT_SUMMARY_CACHE.pop(current_student.id, None)
             try:
                 from app.services.attendance_engine import invalidate_attendance_cache
-                invalidate_attendance_cache(student_id=current_student.id)
+                invalidate_attendance_cache(student_id=current_student.id, roll_number=clean_roll)
             except Exception:
                 pass
 
@@ -1327,7 +1451,7 @@ async def student_scan_session(
             "message": f"Successfully marked present for {period_count} period{'s' if period_count > 1 else ''}!",
             "session_id": session_id,
             "token_format": token_data.get("token_format", "legacy"),
-            "subject_name": session_meta["subject_name"],
+            "subject_name": resolved_subject_name,
             "period_name": session_meta["period"],
             "period_count": period_count,
             "session_date": session_meta["session_date"],

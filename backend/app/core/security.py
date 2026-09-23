@@ -70,28 +70,37 @@ try:
         to_encode.update({"exp": expire, "token_type": "refresh"})
         return jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
-    def decode_access_token(token: str) -> Optional[dict]:
+    def decode_access_token_with_status(token: str) -> tuple[Optional[dict], Optional[str]]:
+        if not token:
+            return None, "invalid_token"
         try:
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
-            return payload
-        except Exception:
+            return payload, None
+        except Exception as e:
+            err_str = str(e).lower()
+            if "expired" in err_str or type(e).__name__ in ["ExpiredSignatureError", "ExpiredSignature"]:
+                return None, "token_expired"
             # Defensive fallback: support HMAC signature if token was generated in fallback environment
             try:
                 parts = token.split(".")
                 if len(parts) != 3:
-                    return None
+                    return None, "invalid_token"
                 header_b64, payload_b64, signature = parts
                 signature_raw = f"{header_b64}.{payload_b64}"
                 expected_sig = hmac.new(settings.SECRET_KEY.encode(), signature_raw.encode(), hashlib.sha256).hexdigest()
                 if not hmac.compare_digest(signature, expected_sig):
-                    return None
+                    return None, "invalid_token"
                 padded_payload = payload_b64 + "=" * ((4 - len(payload_b64) % 4) % 4)
                 payload = json.loads(base64.b64decode(padded_payload.encode()).decode())
                 if payload.get("exp", 0) < time.time():
-                    return None
-                return payload
+                    return None, "token_expired"
+                return payload, None
             except Exception:
-                return None
+                return None, "invalid_token"
+
+    def decode_access_token(token: str) -> Optional[dict]:
+        payload, _ = decode_access_token_with_status(token)
+        return payload
 
     def decode_refresh_token(token: str) -> Optional[dict]:
         try:
@@ -148,23 +157,29 @@ except ImportError:
         signature = hmac.new(settings.SECRET_KEY.encode(), signature_raw.encode(), hashlib.sha256).hexdigest()
         return f"{header}.{payload_b64}.{signature}"
 
-    def decode_access_token(token: str) -> Optional[dict]:
+    def decode_access_token_with_status(token: str) -> tuple[Optional[dict], Optional[str]]:
+        if not token:
+            return None, "invalid_token"
         try:
             parts = token.split(".")
             if len(parts) != 3:
-                return None
+                return None, "invalid_token"
             header_b64, payload_b64, signature = parts
             signature_raw = f"{header_b64}.{payload_b64}"
             expected_sig = hmac.new(settings.SECRET_KEY.encode(), signature_raw.encode(), hashlib.sha256).hexdigest()
             if not hmac.compare_digest(signature, expected_sig):
-                return None
+                return None, "invalid_token"
             padded_payload = payload_b64 + "=" * ((4 - len(payload_b64) % 4) % 4)
             payload = json.loads(base64.b64decode(padded_payload.encode()).decode())
             if payload.get("exp", 0) < time.time():
-                return None
-            return payload
+                return None, "token_expired"
+            return payload, None
         except Exception:
-            return None
+            return None, "invalid_token"
+
+    def decode_access_token(token: str) -> Optional[dict]:
+        payload, _ = decode_access_token_with_status(token)
+        return payload
 
     def decode_refresh_token(token: str) -> Optional[dict]:
         try:
@@ -313,7 +328,7 @@ def generate_encrypted_qr_payload(
         "date": attendance_date,
         "timestamp": timestamp,
         "expiresAt": expires_at,
-        "salt": hashlib.md5(f"{student_id}-{timestamp}".encode()).hexdigest()
+        "salt": hashlib.md5(f"{student_id}-{timestamp}".encode(), usedforsecurity=False).hexdigest()
     }
     
     json_bytes = json.dumps(inner_data).encode('utf-8')
@@ -582,21 +597,36 @@ def validate_projector_session_token(
                 server_now=now_ts
             )
     else:
-        # Strictly accept only the current window (current_step) and previous window (current_step - 1)
-        current_step = int(now_ts // step_window)
-        if token_step < current_step - 1:
-            raise TokenValidationError(
-                code="expired",
-                message="Projector QR token has expired. Please scan the newly refreshed QR on screen.",
-                server_now=now_ts
-            )
-        if token_step > current_step:
-            raise TokenValidationError(
-                code="invalid",
-                message="Projector QR token timestamp is in the future. Check clock synchronization.",
-                server_now=now_ts
-            )
         slot_end_ts = (token_step + 1) * step_window
+        slot_start_ts = token_step * step_window
+        if grace_seconds is not None:
+            if now_ts > slot_end_ts + grace_seconds:
+                raise TokenValidationError(
+                    code="expired",
+                    message="Projector QR token has expired beyond grace period. Please scan the newly refreshed QR on screen.",
+                    server_now=now_ts
+                )
+            if now_ts < slot_start_ts - 2.0:
+                raise TokenValidationError(
+                    code="invalid",
+                    message="Projector QR token timestamp is in the future. Check clock synchronization.",
+                    server_now=now_ts
+                )
+        else:
+            allowed_grace_steps = max_grace_steps if max_grace_steps is not None else 1
+            current_step = int(now_ts // step_window)
+            if token_step < current_step - allowed_grace_steps:
+                raise TokenValidationError(
+                    code="expired",
+                    message="Projector QR token has expired. Please scan the newly refreshed QR on screen.",
+                    server_now=now_ts
+                )
+            if token_step > current_step:
+                raise TokenValidationError(
+                    code="invalid",
+                    message="Projector QR token timestamp is in the future. Check clock synchronization.",
+                    server_now=now_ts
+                )
         
     # Verify HMAC for token_step
     base_str = f"SES|{sid_b36}|{period_count}|{step_b36}"

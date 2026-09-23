@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 import random
+import secrets
 import string
 import hashlib
 
@@ -11,9 +12,10 @@ from app.core.database import get_db
 from app.api.auth import get_current_user
 from app.models.models import (
     User, UserRole, Student, DeviceRegistration, DeviceAccountBinding, 
-    BindingStatus, DeviceResetOTP, AuditLog, SecurityEventType, StudentOnboarding
+    BindingStatus, DeviceResetOTP, AuditLog, SecurityEventType, StudentOnboarding,
+    DeviceBinding, RevokedReason
 )
-from app.core.security import verify_password
+from app.core.security import verify_password, create_access_token, create_refresh_token
 from app.core.device_security import (
     register_or_get_device,
     revoke_device_by_admin,
@@ -22,6 +24,7 @@ from app.core.device_security import (
     is_demo_account
 )
 from app.services.email_service import send_single_email, render_email_template
+from app.core.config import settings
 
 router = APIRouter(prefix="/devices", tags=["Device Binding Security"])
 
@@ -42,8 +45,8 @@ class DeviceResetRequest(BaseModel):
 class DeviceVerifyResetRequest(BaseModel):
     roll_number: str
     otp: str
-    new_device_public_id: str
-    new_device_secret: str
+    new_device_public_id: Optional[str] = None
+    new_device_secret: Optional[str] = None
 
 class DeviceBulkResetRequest(BaseModel):
     roll_numbers: List[str]
@@ -316,10 +319,12 @@ def request_device_reset(
             detail="You have reached the maximum limit of 5 self-service device resets for this semester. Please contact your faculty mentor or class administrator to reset your device binding."
         )
 
-    # 5. Invalidate previous unconsumed OTPs for this student
+    # 5. Invalidate stale OTPs older than 10 minutes for this student
+    ten_mins_ago = datetime.utcnow() - timedelta(minutes=10)
     db.query(DeviceResetOTP).filter(
         DeviceResetOTP.roll_number == clean_roll,
-        DeviceResetOTP.is_consumed == False
+        DeviceResetOTP.is_consumed == False,
+        DeviceResetOTP.created_at < ten_mins_ago
     ).update({"is_consumed": True})
     db.commit()
 
@@ -332,7 +337,7 @@ def request_device_reset(
     if is_demo_account(clean_roll):
         otp_code = "123456"
     else:
-        otp_code = "".join(random.choices(string.digits, k=6))
+        otp_code = "".join(secrets.choice(string.digits) for _ in range(6))
     otp_hash = hashlib.sha256(otp_code.encode("utf-8")).hexdigest()
     expires_at = datetime.utcnow() + timedelta(minutes=10)
 
@@ -419,70 +424,112 @@ def verify_device_reset(
             detail="Student account not found."
         )
 
-    # 1. Fetch latest active unconsumed OTP
-    otp_record = db.query(DeviceResetOTP).filter(
+    # 1. Fetch active unconsumed, unexpired OTP records for this student
+    now = datetime.utcnow()
+    active_otps = db.query(DeviceResetOTP).filter(
         DeviceResetOTP.roll_number == clean_roll,
-        DeviceResetOTP.is_consumed == False
-    ).order_by(DeviceResetOTP.id.desc()).first()
+        DeviceResetOTP.is_consumed == False,
+        DeviceResetOTP.expires_at > now,
+        DeviceResetOTP.attempts < 5
+    ).order_by(DeviceResetOTP.id.desc()).all()
 
-    if not otp_record:
+    if not active_otps:
+        # Check if there is a recent expired OTP
+        expired_otp = db.query(DeviceResetOTP).filter(
+            DeviceResetOTP.roll_number == clean_roll,
+            DeviceResetOTP.expires_at <= now
+        ).order_by(DeviceResetOTP.id.desc()).first()
+        if expired_otp and not expired_otp.is_consumed:
+            expired_otp.is_consumed = True
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Verification code has expired. Please request a new code."
+            )
+
+        # Check if max attempts exhausted
+        exhausted_otp = db.query(DeviceResetOTP).filter(
+            DeviceResetOTP.roll_number == clean_roll,
+            DeviceResetOTP.attempts >= 5
+        ).order_by(DeviceResetOTP.id.desc()).first()
+        if exhausted_otp:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Too many failed attempts. Please request a new code."
+            )
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No active reset request found. Please request a new verification code."
         )
 
-    if datetime.utcnow() > otp_record.expires_at:
-        otp_record.is_consumed = True
-        db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Verification code has expired. Please request a new code."
-        )
-
-    if otp_record.attempts >= 5:
-        otp_record.is_consumed = True
-        db.commit()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Too many failed attempts. Please request a new code."
-        )
-
-    # 2. Check OTP hash
+    # 2. Check OTP hash against active unconsumed OTPs
     submitted_hash = hashlib.sha256(req.otp.strip().encode("utf-8")).hexdigest()
     is_demo = is_demo_account(clean_roll)
-    if submitted_hash != otp_record.otp_hash and not (is_demo and req.otp.strip() == "123456"):
-        otp_record.attempts += 1
+    matched_otp = None
+    for rec in active_otps:
+        if submitted_hash == rec.otp_hash or (is_demo and req.otp.strip() == "123456"):
+            matched_otp = rec
+            break
+
+    if not matched_otp:
+        latest_otp = active_otps[0]
+        latest_otp.attempts += 1
         db.commit()
-        remaining = max(0, 5 - otp_record.attempts)
+        remaining = max(0, 5 - latest_otp.attempts)
+        if remaining == 0:
+            latest_otp.is_consumed = True
+            db.commit()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid verification code. {remaining} attempt(s) remaining."
         )
 
-    # 3. Atomic consumption
-    otp_record.is_consumed = True
+    # 3. Mark all active OTPs for this student as consumed (prevents any replay)
+    for rec in active_otps:
+        rec.is_consumed = True
+    db.commit()
 
-    # 4. Register or get the new device
-    new_device_public_id = req.new_device_public_id.strip()
-    new_device_secret = req.new_device_secret.strip()
-    if not new_device_public_id or not new_device_secret:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Device credentials are required to complete re-binding."
-        )
+    # 4. Determine device registration & binding action
+    dummy_placeholders = {"DEV-RESET-V2", "DEV-RETIRED-PHASE5", "LEGACY-RETIRED", "V2_RESET_CREDENTIAL", ""}
+    raw_pub_id = (req.new_device_public_id or "").strip()
+    raw_secret = (req.new_device_secret or "").strip()
+    is_placeholder = (not raw_pub_id) or (raw_pub_id in dummy_placeholders) or raw_pub_id.startswith("DEV-RESET")
 
-    new_device = register_or_get_device(
-        db=db,
-        device_public_id=new_device_public_id,
-        device_secret=new_device_secret,
-        ip_address=ip_address
-    )
-
-    # 5. Clear previous student device binding and bind new device
     old_device_id = student.registered_device_id
-    student.registered_device_id = new_device.id
+    bound_device_pub_id = None
+    bound_device_id = None
 
-    # Expire previous session bindings for this student
+    if not is_placeholder and raw_secret and raw_secret not in dummy_placeholders:
+        new_device = register_or_get_device(
+            db=db,
+            device_public_id=raw_pub_id,
+            device_secret=raw_secret,
+            ip_address=ip_address
+        )
+        student.registered_device_id = new_device.id
+        bound_device_pub_id = new_device.device_public_id
+        bound_device_id = new_device.id
+    else:
+        # Caller passed a placeholder or empty credentials:
+        # Clear registered_device_id so student auto-enrolls on their very next login!
+        student.registered_device_id = None
+        # Also register the incoming connection device signature as fallback reference
+        client_ua = request.headers.get("user-agent", "generic_student_browser")
+        client_ip = ip_address or "127.0.0.1"
+        conn_sig = hashlib.sha256(f"{clean_roll}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+        actual_conn_pub_id = f"DEV-CONN-{conn_sig.upper()}"
+        actual_conn_secret = hashlib.sha256(f"{actual_conn_pub_id}_SECRET_SALT_2026".encode()).hexdigest()
+        new_device = register_or_get_device(
+            db=db,
+            device_public_id=actual_conn_pub_id,
+            device_secret=actual_conn_secret,
+            ip_address=ip_address
+        )
+        bound_device_pub_id = new_device.device_public_id
+        bound_device_id = new_device.id
+
+    # 5. Expire previous session bindings for this student
     active_bindings = db.query(DeviceAccountBinding).filter(
         DeviceAccountBinding.roll_number == clean_roll,
         DeviceAccountBinding.status == BindingStatus.ACTIVE
@@ -490,25 +537,53 @@ def verify_device_reset(
     for b in active_bindings:
         b.status = BindingStatus.EXPIRED
 
+    # 6. Revoke modern active DeviceBinding rows upon self-service reset
+    active_v2_bindings = db.query(DeviceBinding).filter(
+        DeviceBinding.student_id == student.id,
+        DeviceBinding.revoked_at.is_(None)
+    ).all()
+    for b in active_v2_bindings:
+        b.revoked_at = datetime.utcnow()
+        b.revocation_reason = RevokedReason.STUDENT_REQUEST.value if hasattr(RevokedReason, 'STUDENT_REQUEST') else "STUDENT_REQUEST"
+        logger.info(f"[DEVICE RESET] Revoked active Binding V2 key {b.key_id[:8]}... for student {clean_roll}")
+
     db.commit()
 
-    # 6. Log DEVICE_SELF_RESET audit event
+    # 7. Log DEVICE_SELF_RESET audit event
     record_audit_log(
         db=db,
         user_id=user.id,
         roll_number=clean_roll,
         event_type="DEVICE_SELF_RESET",
         action="DEVICE_SELF_RESET",
-        details=f"Student {clean_roll} completed self-service device reset via email OTP. Previous device: ID {old_device_id} -> New device: {new_device.device_public_id} (ID {new_device.id})",
-        device_id=new_device.id,
+        details=f"Student {clean_roll} completed self-service device reset via email OTP. Previous device: ID {old_device_id} -> Cleared/rebound for authorized access.",
+        device_id=bound_device_id,
         ip_address=ip_address
     )
 
+    # 8. Generate session tokens so caller can log in directly if desired
+    access_token = create_access_token(
+        data={"sub": user.username, "role": user.role.value if hasattr(user.role, 'value') else str(user.role), "user_id": user.id}
+    )
+    refresh_token = create_refresh_token(
+        data={"sub": user.username, "role": user.role.value if hasattr(user.role, 'value') else str(user.role), "user_id": user.id}
+    )
+
+    full_name = student.name or user.username
     return {
         "status": "SUCCESS",
         "message": "Device successfully re-bound to your account. You can now log in.",
         "roll_number": clean_roll,
-        "device_public_id": new_device.device_public_id
+        "device_public_id": bound_device_pub_id or "DEV-AUTO-ENROLLED",
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "role": user.role.value if hasattr(user.role, "value") else str(user.role),
+            "full_name": full_name
+        }
     }
 
 @router.post("/bulk-reset")
@@ -589,9 +664,28 @@ def get_student_device_info(
         )
 
     device_info = None
-    if student.registered_device_id:
+    has_registered_device = False
+
+    if getattr(settings, 'BINDING_V2', False):
+        from app.models.models import DeviceBinding
+        active_binding = db.query(DeviceBinding).filter(
+            DeviceBinding.student_id == student.id,
+            DeviceBinding.revoked_at.is_(None)
+        ).first()
+        if active_binding:
+            has_registered_device = True
+            device_info = {
+                "device_public_id": f"KEY-{active_binding.key_id[:12]}",
+                "key_id": active_binding.key_id,
+                "is_active": True,
+                "first_registered_at": active_binding.enrolled_at.isoformat() if active_binding.enrolled_at else None,
+                "last_seen_at": active_binding.enrolled_at.isoformat() if active_binding.enrolled_at else None,
+                "enrolled_via": active_binding.enrolled_via
+            }
+    elif student.registered_device_id:
         device = db.query(DeviceRegistration).filter(DeviceRegistration.id == student.registered_device_id).first()
         if device:
+            has_registered_device = True
             device_info = {
                 "device_public_id": device.device_public_id,
                 "is_active": device.is_active,
@@ -611,7 +705,7 @@ def get_student_device_info(
         "roll_number": student.roll_number,
         "name": student.name,
         "email": student.email,
-        "has_registered_device": bool(student.registered_device_id),
+        "has_registered_device": has_registered_device,
         "registered_device": device_info,
         "self_resets_this_semester": self_reset_count,
         "max_self_resets": 5

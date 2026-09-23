@@ -3,9 +3,10 @@ try:
     from dotenv import load_dotenv
     _backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     _root_dir = os.path.dirname(_backend_dir)
-    load_dotenv(os.path.join(_root_dir, ".env"))
-    load_dotenv(os.path.join(_backend_dir, ".env"), override=True)
-    load_dotenv(override=True)
+    # Load environment files without overwriting process environment variables passed by Docker/shell
+    load_dotenv(os.path.join(_root_dir, ".env"), override=False)
+    load_dotenv(os.path.join(_backend_dir, ".env"), override=False)
+    load_dotenv(override=False)
 except ImportError:
     pass
 
@@ -47,6 +48,7 @@ class Settings:
     MASTER_TEMPLATE_DIR: str = os.path.join(DATA_DIR, "master_templates")
     OUTPUT_EXCEL_DIR: str = os.path.join(DATA_DIR, "outputs")
     QR_OUTPUT_DIR: str = os.path.join(DATA_DIR, "qr_codes")
+    SELFIE_STORAGE_DIR: str = os.path.join(DATA_DIR, "selfies")
     
     # Google Sheets Settings (Optional)
     GOOGLE_CREDENTIALS_FILE: str = os.getenv("GOOGLE_CREDENTIALS_FILE", "")
@@ -73,6 +75,18 @@ class Settings:
 
     # --- Onboarding Configuration ---
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "")  # Azure/Cloudflare tunnel URL; fallback to request Host
+
+    @property
+    def public_frontend_url(self) -> str:
+        """
+        Sanitized public frontend portal URL.
+        Guarantees that local dev/hosts URLs (e.g. whiteleos, localhost, 127.0.0.1)
+        or empty configurations never leak into student or faculty emails.
+        """
+        raw = (self.FRONTEND_URL or "").strip().rstrip("/")
+        if not raw or "whiteleos" in raw.lower() or "localhost" in raw.lower() or "127.0.0.1" in raw:
+            return "https://ather-os.de5.net"
+        return raw
     MAGIC_LINK_EXPIRY_HOURS: int = int(os.getenv("MAGIC_LINK_EXPIRY_HOURS", "48"))
     OTP_EXPIRY_MINUTES: int = int(os.getenv("OTP_EXPIRY_MINUTES", "10"))
     OTP_MAX_ATTEMPTS: int = int(os.getenv("OTP_MAX_ATTEMPTS", "5"))
@@ -110,6 +124,46 @@ class Settings:
     QR_TOKEN_FORMAT: str = os.getenv("QR_TOKEN_FORMAT", "dual").lower().strip()
     QR_PILOT_SECTIONS: str = os.getenv("QR_PILOT_SECTIONS", "1,2")
     QR_PILOT_DEPARTMENTS: str = os.getenv("QR_PILOT_DEPARTMENTS", "CSE,ECE")
+
+    # --- Week 5 QR Display Tuning: Rendering Pipeline Configuration ---
+    # Allowed values: "v1" (legacy standard) | "v2" (pure high-contrast, edge-to-edge, ECC L, zero-chrome)
+    QR_RENDER_VERSION: str = os.getenv("QR_RENDER_VERSION", "v2").lower().strip()
+    QR_ECC_LEVEL: str = os.getenv("QR_ECC_LEVEL", "L").upper().strip()  # "L" | "M"
+    QR_RENDER_PILOT_SECTIONS: str = os.getenv("QR_RENDER_PILOT_SECTIONS", "1,2")
+
+    # --- Week 8 Scanner Engine Feature Flag Configuration ---
+    # Allowed values: "wasm" (default per W7 pre-registered GO verdict) | "jsqr" (instant rollback)
+    SCANNER_ENGINE: str = os.getenv("SCANNER_ENGINE", "wasm").lower().strip()
+
+    # --- Week 8 Manual Mark Guardrail & Anomaly Threshold Configurations ---
+    MANUAL_MARK_AMBER_THRESHOLD_PCT: float = float(os.getenv("MANUAL_MARK_AMBER_THRESHOLD_PCT", "15.0"))
+    MANUAL_MARK_RED_THRESHOLD_PCT: float = float(os.getenv("MANUAL_MARK_RED_THRESHOLD_PCT", "30.0"))
+    MANUAL_MARK_MAX_PER_SESSION_CAP: int = int(os.getenv("MANUAL_MARK_MAX_PER_SESSION_CAP", "25"))
+
+    # --- Week 9 Scale & Offline Resilience Configuration ---
+    # Bounded window (minutes) post-session-end where queued offline submissions are accepted (anti-proxy boundary)
+    SUBMIT_GRACE_MINUTES: int = int(os.getenv("SUBMIT_GRACE_MINUTES", "10"))
+    # Cohort rollout active departments (comma-separated, e.g. "CSE,ECE,IT,MECH,CIVIL,EEE,AIML")
+    ACTIVE_ROLLOUT_DEPARTMENTS: str = os.getenv("ACTIVE_ROLLOUT_DEPARTMENTS", "CSE,ECE,IT,MECH,CIVIL,EEE,AIML")
+
+    # --- Device Binding V2 Configuration (Phase 5 Cutover: Default ON in Dev) ---
+    # When True: Single cryptographic truth active; legacy device ID checks bypassed.
+    # When False: Dev-only legacy test mode; scan rejects legacy IDs with legacy_binding_retired error.
+    BINDING_V2: bool = os.getenv("BINDING_V2", "true").lower() == "true"
+    ENROLL_LIMIT_30_DAYS: int = int(os.getenv("ENROLL_LIMIT_30_DAYS", "2"))
+    MAX_ACTIVE_DEVICES_PER_STUDENT: int = int(os.getenv("MAX_ACTIVE_DEVICES_PER_STUDENT", "1"))
+    CHALLENGE_TTL_SECONDS: int = int(os.getenv("CHALLENGE_TTL_SECONDS", "60"))
+    MAX_VERIFY_FAILURES_BEFORE_LOCKOUT: int = int(os.getenv("MAX_VERIFY_FAILURES_BEFORE_LOCKOUT", "5"))
+    BINDING_VERIFY_LOCKOUT_MINUTES: int = int(os.getenv("BINDING_VERIFY_LOCKOUT_MINUTES", "15"))
+
+    # --- Phase 12A: Universal Projector Entry Configuration ---
+    # Canonical HTTPS base URL for launch token URLs (empty = auto-detect from request origin)
+    ATTENDANCE_BASE_URL: str = os.getenv("ATTENDANCE_BASE_URL", "")
+    # Extended grace window (seconds) for URL-based flow (student needs time to tap URL, load page, auth)
+    LAUNCH_TOKEN_GRACE_SECONDS: int = int(os.getenv("LAUNCH_TOKEN_GRACE_SECONDS", "30"))
+
+    # --- Geofence Configuration (Disabled for indoor classroom scanning) ---
+    GEOFENCE_ENABLED: bool = os.getenv("GEOFENCE_ENABLED", "False").lower() == "true"
 
 class R25Config:
     """

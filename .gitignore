@@ -32,6 +32,10 @@ env/
 venv/
 *.db
 *.sqlite3
+backend/data/selfies/
+backend/data/outputs/
+backend/data/qr_codes/
+frontend/qr_rgba.bin
 
 # Node & Build
 node_modules/
@@ -59,3 +63,6 @@ Thumbs.db
 scratch/
 *.bak
 scratch_prompt.txt
+graphify/
+graphify-out/cache/
+

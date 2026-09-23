@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Text, Float, Enum as SQLEnum, Index, UniqueConstraint, ForeignKey
+from sqlalchemy import Column, Integer, BigInteger, String, Boolean, DateTime, Text, Float, Enum as SQLEnum, Index, UniqueConstraint, ForeignKey, text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 import enum
@@ -23,6 +23,17 @@ class BindingStatus(str, enum.Enum):
     EXPIRED = "EXPIRED"
     REVOKED = "REVOKED"
     LOCKED = "LOCKED"
+
+class RevokedReason(str, enum.Enum):
+    REBIND = "rebind"
+    ADMIN_RESET = "admin_reset"
+    CHURN_LIMIT = "churn_limit"
+    STUDENT_REQUEST = "student_request"
+
+class EnrolledVia(str, enum.Enum):
+    SELF = "self"
+    FACULTY_RESET = "faculty_reset"
+    RECOVERY = "recovery"
 
 # --- Onboarding & Credential Dispatch Enums ---
 
@@ -64,6 +75,14 @@ class SecurityEventType(str, enum.Enum):
     DEVICE_SELF_RESET = "DEVICE_SELF_RESET"
     DEVICE_SELF_RESET_CAP_EXCEEDED = "DEVICE_SELF_RESET_CAP_EXCEEDED"
     DEVICE_ADMIN_RESET = "DEVICE_ADMIN_RESET"
+    DEVICE_VERIFIED = "DEVICE_VERIFIED"
+    DEVICE_VERIFICATION_FAILED = "DEVICE_VERIFICATION_FAILED"
+    DEVICE_RE_REGISTERED = "DEVICE_RE_REGISTERED"
+    DEVICE_LIMIT_REACHED = "DEVICE_LIMIT_REACHED"
+    DEVICE_CHALLENGE_EXPIRED = "DEVICE_CHALLENGE_EXPIRED"
+    DEVICE_CHALLENGE_REPLAYED = "DEVICE_CHALLENGE_REPLAYED"
+    DEVICE_KEY_MISSING = "DEVICE_KEY_MISSING"
+    DEVICE_KEY_REUSE_REJECTED = "DEVICE_KEY_REUSE_REJECTED"
     PWA_TELEMETRY = "PWA_TELEMETRY"
 
 class User(Base):
@@ -173,6 +192,7 @@ class Student(Base):
     section = relationship("Section", primaryjoin="Student.section_id==Section.id", foreign_keys="[Student.section_id]", back_populates="students")
     records = relationship("AttendanceRecord", primaryjoin="Student.id==AttendanceRecord.student_id", foreign_keys="[AttendanceRecord.student_id]", back_populates="student")
     qr_tokens = relationship("QRToken", primaryjoin="Student.id==QRToken.student_id", foreign_keys="[QRToken.student_id]", back_populates="student")
+    device_bindings = relationship("DeviceBinding", primaryjoin="Student.id==DeviceBinding.student_id", foreign_keys="[DeviceBinding.student_id]", back_populates="student")
 
 class TeacherAssignment(Base):
     __tablename__ = "qr_teacher_assignments"
@@ -192,6 +212,7 @@ class AttendanceSession(Base):
         Index("idx_att_sess_teacher_date", "teacher_id", "session_date"),
         Index("idx_att_sess_subject_date", "subject_id", "session_date"),
         Index("idx_att_sess_section_date", "section_id", "session_date"),
+        Index("idx_att_sess_teacher_created", "teacher_id", "created_at"),
     )
 
     id = Column(Integer, primary_key=True)
@@ -202,6 +223,10 @@ class AttendanceSession(Base):
     session_date = Column(String(20), nullable=False) # YYYY-MM-DD
     status = Column(SQLEnum(SessionStatus), default=SessionStatus.OPEN, nullable=False)
     display_type = Column(String(30), default="projector", nullable=True) # 'projector' | 'phone_screen' | 'laptop'
+    faculty_latitude = Column(Float, nullable=True)
+    faculty_longitude = Column(Float, nullable=True)
+    faculty_accuracy_m = Column(Float, nullable=True)
+    geofence_radius_m = Column(Float, default=100.0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     locked_at = Column(DateTime, nullable=True)
 
@@ -228,11 +253,56 @@ class AttendanceRecord(Base):
     status = Column(SQLEnum(AttendanceStatus), default=AttendanceStatus.PRESENT, nullable=False)
     is_approved_absence = Column(Boolean, default=False, nullable=False, index=True)
     approved_absence_reason = Column(String(100), nullable=True) # e.g. MEDICAL, SPORTS, DUTY
-    scan_mode = Column(String(50), default="QR") # QR or MANUAL or PROJECTOR_SCAN
+    scan_mode = Column(String(50), default="QR") # QR or MANUAL or PROJECTOR_SCAN or QR_CAMERA_FALLBACK
+    manual_reason = Column(String(50), nullable=True) # scanner_failed | device_lost | late_join | other
+    manual_reason_detail = Column(String(255), nullable=True)
+    manual_marked_by_id = Column(Integer, nullable=True) # Faculty user_id
+    student_latitude = Column(Float, nullable=True)
+    student_longitude = Column(Float, nullable=True)
+    gps_accuracy_m = Column(Float, nullable=True)
+    distance_m = Column(Float, nullable=True)
+    device_binding_id = Column(Integer, nullable=True)
+    selfie_status = Column(String(30), nullable=True) # PENDING | ACCEPTED | FAILED | SKIPPED
+    selfie_storage_key = Column(String(255), nullable=True)
+    entry_method = Column(String(30), nullable=True)  # WEB_CAMERA | WEB_URL | WEB_PASTE | ANDROID_APP | WEB_FALLBACK | None (legacy)
     scanned_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("AttendanceSession", primaryjoin="AttendanceRecord.session_id==AttendanceSession.id", foreign_keys="[AttendanceRecord.session_id]", back_populates="records")
     student = relationship("Student", primaryjoin="AttendanceRecord.student_id==Student.id", foreign_keys="[AttendanceRecord.student_id]", back_populates="records")
+    selfie = relationship("SelfieRecord", primaryjoin="AttendanceRecord.id==SelfieRecord.attendance_id", foreign_keys="[SelfieRecord.attendance_id]", uselist=False, back_populates="attendance_record", cascade="all, delete-orphan")
+
+class SelfieRecord(Base):
+    """
+    Selfie metadata and private storage pointer collected post-attendance for future face-verification preparation.
+    Attendance validity is NEVER conditional on selfie success.
+    """
+    __tablename__ = "selfie_records"
+    __table_args__ = (
+        Index("idx_selfie_att", "attendance_id"),
+        Index("idx_selfie_student", "student_id"),
+        Index("idx_selfie_session", "session_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    attendance_id = Column(Integer, nullable=False)
+    student_id = Column(Integer, nullable=False)
+    session_id = Column(Integer, nullable=False)
+    object_storage_key = Column(String(255), unique=True, nullable=False)
+    mime_type = Column(String(50), default="image/jpeg", nullable=False)
+    file_size = Column(Integer, default=0, nullable=False)
+    width = Column(Integer, nullable=True)
+    height = Column(Integer, nullable=True)
+    quality_status = Column(String(30), default="PASSED", nullable=False)
+    face_count = Column(Integer, default=1, nullable=False)
+    captured_at = Column(DateTime, nullable=True)
+    uploaded_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    status = Column(String(30), default="UPLOADED", nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    attendance_record = relationship("AttendanceRecord", primaryjoin="SelfieRecord.attendance_id==AttendanceRecord.id", foreign_keys="[SelfieRecord.attendance_id]", back_populates="selfie")
+    student = relationship("Student", primaryjoin="SelfieRecord.student_id==Student.id", foreign_keys="[SelfieRecord.student_id]")
+    session = relationship("AttendanceSession", primaryjoin="SelfieRecord.session_id==AttendanceSession.id", foreign_keys="[SelfieRecord.session_id]")
 
 class QRToken(Base):
     __tablename__ = "qr_tokens"
@@ -330,6 +400,78 @@ class AuditLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", primaryjoin="AuditLog.user_id==User.id", foreign_keys="[AuditLog.user_id]", back_populates="audit_logs")
+
+
+# ============================================================
+# DEVICE BINDING V2 MODELS (NON-EXTRACTABLE CLIENT KEYPAIRS)
+# ============================================================
+
+class DeviceBinding(Base):
+    """
+    Binding V2: Non-extractable asymmetric client keypair binding & Cryptographic Device Identity.
+    Enforces device authorization strictly via private key possession proof.
+    Physical hardware metadata is purely informational telemetry and never participates in authorization.
+    """
+    __tablename__ = "device_bindings"
+    __table_args__ = (
+        Index("idx_dev_bind_key_id", "key_id"),
+        Index("idx_dev_bind_device_id", "device_id"),
+        Index("idx_dev_bind_student", "student_id"),
+        Index("idx_dev_bind_status", "status"),
+        Index("idx_dev_bind_revoked", "revoked_at"),
+        Index("uq_student_active_binding", "student_id", unique=True, sqlite_where=text("revoked_at IS NULL")),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    student_id = Column(Integer, nullable=False)
+    device_id = Column(String(64), nullable=True, index=True)  # Client-generated random UUID v4 identifier
+    public_key = Column(Text, nullable=False)  # SPKI DER Base64 (91 bytes raw / 124 chars Base64)
+    key_id = Column(String(64), nullable=False)  # SHA-256 hex digest of SPKI
+    key_algorithm = Column(String(32), default="ECDSA_P256", nullable=False)
+    key_version = Column(Integer, default=1, nullable=False)
+    client_type = Column(String(20), default="WEB", nullable=False)  # WEB | PWA | ANDROID
+    status = Column(String(20), default="ACTIVE", nullable=False)  # ACTIVE | REVOKED | PENDING
+    enrolled_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    enrolled_via = Column(String(30), default="self", nullable=False)  # self | faculty_reset | recovery
+    storage_persist_granted = Column(Boolean, default=False, nullable=False)
+    browser_profile_tag = Column(String(64), nullable=True)  # Telemetry-only corroboration tag
+    last_seen_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_verified_at = Column(DateTime, nullable=True)
+    revoked_at = Column(DateTime, nullable=True)
+    revoked_reason = Column(String(30), nullable=True)  # rebind | admin_reset | churn_limit | student_request
+
+    # Informational audit metadata (strictly telemetry only; NEVER for authorization/identity)
+    device_label = Column(String(100), nullable=True)
+    platform = Column(String(50), nullable=True)
+    browser_family = Column(String(50), nullable=True)
+    app_version = Column(String(30), nullable=True)
+    registered_user_agent_metadata = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    student = relationship("Student", primaryjoin="DeviceBinding.student_id==Student.id", foreign_keys="[DeviceBinding.student_id]")
+
+
+class DeviceRebindOTP(Base):
+    """
+    Stores single-use 6-digit email OTPs for high-friction device re-enrollment / rebind.
+    """
+    __tablename__ = "qr_device_rebind_otps"
+    __table_args__ = (
+        Index("idx_rebind_otp_student", "student_id"),
+        Index("idx_rebind_otp_created", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    student_id = Column(Integer, nullable=False)
+    otp_hash = Column(String(64), nullable=False)  # SHA-256 of 6-digit code
+    expires_at = Column(DateTime, nullable=False)
+    attempts = Column(Integer, default=0, nullable=False)
+    is_verified = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    student = relationship("Student", primaryjoin="DeviceRebindOTP.student_id==Student.id", foreign_keys="[DeviceRebindOTP.student_id]")
 
 
 # ============================================================
@@ -641,6 +783,10 @@ class ScanTelemetryEvent(Base):
     Strictly NO PII: stores pipeline stages, device tiers, timings, and error types.
     """
     __tablename__ = "qr_scan_telemetry_events"
+    __table_args__ = (
+        Index("idx_scan_tel_created_at", "created_at"),
+        Index("idx_scan_tel_session_id", "session_id"),
+    )
 
     id = Column(Integer, primary_key=True)
     session_id = Column(String(100), nullable=True)
@@ -652,6 +798,12 @@ class ScanTelemetryEvent(Base):
     decode_duration_ms = Column(Float, nullable=True)  # delta from first_frame_captured to frame_decoded
     display_type = Column(String(30), default="projector", nullable=True)  # 'projector' | 'phone_screen' | 'laptop'
     token_format = Column(String(20), nullable=True)  # 'legacy' | 'short'
+    render_version = Column(String(20), default="v1", nullable=True)  # 'v1' | 'v2'
+    engine = Column(String(20), default="jsqr", nullable=True)  # 'jsqr' | 'wasm'
+    distance_bucket = Column(String(20), nullable=True)  # '<=5m' | '5-10m' | '10-15m'
+    decode_scale = Column(Integer, nullable=True)  # 640 | 960 | 1080
+    ladder_rung = Column(Integer, nullable=True)  # 1 to 5 (Part B Degradation Ladder)
+    from_rung = Column(Integer, nullable=True)  # Previous ladder rung
     app_version = Column(String(30), nullable=True)
     payload_json = Column(Text, nullable=True)  # sanitized JSON metadata (strictly no PII)
     client_timestamp = Column(BigInteger, nullable=True)

@@ -48,26 +48,25 @@ sequenceDiagram
 
 ---
 
-## 3. Hardware Device Binding & Account Switching Lockout
+## 3. Cryptographic Device Identity & Account Switching Lockout
 
 ```mermaid
 flowchart TD
-    A[Student Login Request] --> B[Extract x-device-public-id & Client IP]
-    B --> C{Device Registered in device_registrations?}
-    C -- No --> D[Register New Device Hardware Signature]
-    C -- Yes --> E[Query Active Binding: device_account_bindings]
-    D --> E
-    E --> F{Active Binding Exists within 30 Minutes?}
-    F -- No --> G[Create Binding: Device -> Student SAP ID]
-    G --> H[Return JWT Access Token]
-    F -- Yes --> I{Binding SAP ID == Login SAP ID?}
-    I -- Yes --> J[Extend Binding Last Auth Timestamp]
-    J --> H
-    I -- No --> K["ACCOUNT SWITCHING DETECTED!"]
-    K --> L["Enforce 30-Minute Lockout on Device"]
-    K --> M["Write ACCOUNT_SWITCH_ATTEMPT to qr_audit_logs"]
-    K --> N["Invoke SecurityAlertService.hook_audit_event()"]
-    K --> O["Reject Request with HTTP 403 Forbidden"]
+    A[Student Scan Session Request] --> B[Extract device_id, device_signature, client_type]
+    B --> C{Device Registered in device_bindings?}
+    C -- No --> D["Reject HTTP 403 (BINDING_REQUIRED)"]
+    C -- Yes --> E{Device Status == ACTIVE?}
+    E -- No --> F["Reject HTTP 401 (DEVICE_REVOKED)"]
+    E -- Yes --> G[Verify Canonical Challenge Signature using Stored Public Key]
+    G -- Invalid/Replayed/Expired --> H["Reject HTTP 401 (Proof Failed)"]
+    G -- Valid --> I{Active Binding SAP ID == Student SAP ID?}
+    I -- No --> J["ACCOUNT SWITCHING DETECTED!"]
+    J --> K["Enforce 30-Minute Lockout on Device"]
+    J --> L["Write ACCOUNT_SWITCH_ATTEMPT to qr_audit_logs"]
+    J --> M["Invoke SecurityAlertService.hook_audit_event()"]
+    J --> N["Reject Request with HTTP 403 Forbidden"]
+    I -- Yes --> O[Update last_verified_at & Mark Challenge Consumed]
+    O --> P[Proceed to Session, QR HMAC, GPS & Geofence Verification]
 ```
 
 ---
@@ -191,7 +190,7 @@ A critical design principle of the SNIST platform is that **Cloudflare protects 
 | **DDoS & Volumetric Attacks** | Absorbs multi-gigabit L3/L4/L7 volumetric floods via global Anycast edge. Origin never sees traffic spikes. | Does not attempt packet scrubbing. Protects internal threadpool with `BoundedSemaphore(25)`. |
 | **Bot & Scraper Defense** | Free Bot Fight Mode challenges headless bots and automated scrapers at the DNS edge. | Endpoint-level signature verification; rejects requests missing cryptographic device headers. |
 | **IP Rate Limiting & NAT** | Buffers high-volume bursts from shared campus Wi-Fi (`rate=10r/s burst=220`). | Strictly relies on **Roll Number / SAP ID** for brute force locking; never locks out an entire classroom sharing an IP. |
-| **Hardware Device Binding** | Completely agnostic to device identity (cannot access browser hardware entropy or storage). | **Authoritative**: Enforces Rule 6 (30-minute device-to-student lock). Prevents proxy attendance and account switching. |
+| **Cryptographic Device Identity** | Completely agnostic to device identity (cannot access browser hardware entropy or client key storage). | **Authoritative**: Enforces Rule 6 (30-minute device-to-student lock & ECDSA P-256 proof of possession). Prevents proxy attendance and account switching without hardware fingerprinting. |
 | **Rotating QR Verification** | Passthrough proxy. | **Authoritative**: Validates server-generated HMAC-SHA256 tokens within a 10s sliding window without database reads. |
 | **Security Auditing** | Cloudflare Security Analytics & WAF activity log. | Comprehensive, append-only `qr_audit_logs` + real-time 2-layer email alert engine with IST operating windows. |
 

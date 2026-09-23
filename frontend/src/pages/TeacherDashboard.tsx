@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { apiRequest } from '../services/api';
 import { TeacherAssignment, AttendanceSession, HistoricalAttendanceSession } from '../types';
 import { 
   Camera, Lock, Unlock, RefreshCw, Search, Calendar, History, 
   FileSpreadsheet, ExternalLink, Users, Zap, CheckCircle, X,
-  UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Maximize2, Smartphone, ShieldAlert
+  UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Maximize2, Smartphone, ShieldAlert, AlertTriangle,
+  Clock, Tv, Trash2
 } from 'lucide-react';
 // Lazy-load heavy camera scanner and excel register modals
 const QRScannerModal = React.lazy(() => import('../components/QRScannerModal').then(m => ({ default: m.QRScannerModal })));
@@ -13,6 +15,10 @@ import { ManualSearchModal } from '../components/ManualSearchModal';
 import { ProjectorBroadcastModal } from '../components/ProjectorBroadcastModal';
 import { Toast } from '../components/Toast';
 import { FacultyDefaultersTab } from '../components/FacultyDefaultersTab';
+import { TeacherCalendarContainer } from '../components/teacher/TeacherCalendarContainer.tsx';
+import { adaptSessionsToCalendarEvents, groupEventsByDate } from '../services/calendarAdapter.ts';
+import { getTodayIST } from '../utils/dateUtils.ts';
+import type { TeacherClassEvent } from '../types/calendar.ts';
 
 const PERIOD_LIST = [
   { num: 1, label: 'Period 1', time: '09:10 - 10:00' },
@@ -54,11 +60,34 @@ const extractPeriodCount = (periodStr?: string): number => {
   return 1;
 };
 
+const getInstitutionalErrorMessage = (err: any, fallback: string): string => {
+  if (!err) return fallback;
+  const msg = typeof err === 'string' ? err : err.message || '';
+  if (/failed to fetch|network|load failed/i.test(msg)) {
+    return 'Network connection issue. Please check your connection and retry.';
+  }
+  if (/401|unauthorized|token|session expired/i.test(msg)) {
+    return 'Your login session has expired. Please refresh and log in again.';
+  }
+  if (/403|forbidden|not authorized|permission/i.test(msg)) {
+    return 'You are not authorized to modify attendance for this class section.';
+  }
+  if (/locked/i.test(msg)) {
+    return 'This attendance session has been locked and cannot be edited without unlocking.';
+  }
+  if (/500|internal server|sql|traceback|syntaxerror/i.test(msg)) {
+    return 'An unexpected institutional server error occurred. Please retry in a moment.';
+  }
+  return msg || fallback;
+};
+
 export const TeacherDashboard: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'today' | 'historical' | 'defaulters' | 'settings'>('today');
+  const [activeTab, setActiveTab] = useState<'calendar' | 'today' | 'historical' | 'defaulters' | 'settings'>('calendar');
+  const [academicYear, setAcademicYear] = useState<string>('2025-26');
+  const [globalSearch, setGlobalSearch] = useState<string>('');
   const [assignments, setAssignments] = useState<TeacherAssignment[]>([]);
   const [selectedAssignment, setSelectedAssignment] = useState<TeacherAssignment | null>(null);
-  const [selectedPeriods, setSelectedPeriods] = useState<number[]>([1, 2, 3, 4]); // Defaults to 4-period CET/Lab block
+  const [selectedPeriods, setSelectedPeriods] = useState<number[]>([1]); // Defaults to single period [1]
   const [displayType, setDisplayType] = useState<'projector' | 'phone_screen' | 'laptop'>('projector');
   
   const todayStr = new Date().toISOString().split('T')[0];
@@ -89,6 +118,8 @@ export const TeacherDashboard: React.FC = () => {
   const [isStartingSession, setIsStartingSession] = useState(false);
   const [resetConfirmStudent, setResetConfirmStudent] = useState<any | null>(null);
   const [isResettingDevice, setIsResettingDevice] = useState(false);
+  const [confirmDeleteSession, setConfirmDeleteSession] = useState<HistoricalAttendanceSession | null>(null);
+  const [isDeletingSession, setIsDeletingSession] = useState(false);
 
   const handleConfirmResetDevice = async () => {
     if (!resetConfirmStudent) return;
@@ -129,6 +160,40 @@ export const TeacherDashboard: React.FC = () => {
     };
     init();
   }, []);
+
+  // Phase 5: Period transitions, background sync & tab visibility synchronization
+  useEffect(() => {
+    // 1. Period transition detector: Every 60 seconds check server-authoritative current period
+    const periodCheckTimer = setInterval(() => {
+      fetchCurrentClass();
+    }, 60000);
+
+    // 2. Tab visibility listener: Re-sync current class and historical sessions upon refocus
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetchCurrentClass();
+        fetchHistoricalSessions();
+        if (activeSession?.session_id && activeSession.status === 'OPEN') {
+          fetchSessionDetails(activeSession.session_id);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // 3. Lightweight attendance headcount sync: Every 15 seconds if an open session exists and modal is not open
+    const liveCountTimer = setInterval(() => {
+      if (activeSession?.session_id && activeSession.status === 'OPEN' && !isProjectorOpen) {
+        fetchSessionDetails(activeSession.session_id);
+        fetchHistoricalSessions();
+      }
+    }, 15000);
+
+    return () => {
+      clearInterval(periodCheckTimer);
+      clearInterval(liveCountTimer);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [activeSession?.session_id, activeSession?.status, isProjectorOpen]);
 
   const fetchTeacherProfile = async () => {
     try {
@@ -196,6 +261,28 @@ export const TeacherDashboard: React.FC = () => {
     });
   };
 
+  const getFacultyGeolocation = async (): Promise<{ latitude?: number; longitude?: number; accuracy_m?: number }> => {
+    if (typeof window === 'undefined' || !navigator.geolocation) {
+      return {};
+    }
+    return new Promise((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          resolve({
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+            accuracy_m: pos.coords.accuracy
+          });
+        },
+        (err) => {
+          console.warn('[Geolocation] Faculty GPS unavailable:', err.message);
+          resolve({});
+        },
+        { enableHighAccuracy: true, timeout: 5000, maximumAge: 15000 }
+      );
+    });
+  };
+
   const setPeriodPreset = (nums: number[]) => {
     setSelectedPeriods([...nums].sort((a, b) => a - b));
   };
@@ -211,6 +298,7 @@ export const TeacherDashboard: React.FC = () => {
 
     setIsStartingSession(true);
     try {
+      const geo = await getFacultyGeolocation();
       const response: any = await apiRequest('/teacher/sessions/start', {
         method: 'POST',
         body: JSON.stringify({
@@ -219,7 +307,11 @@ export const TeacherDashboard: React.FC = () => {
           period: periodStr,
           period_count: periodCount,
           date: sessionDate,
-          display_type: displayType
+          display_type: displayType,
+          latitude: geo.latitude,
+          longitude: geo.longitude,
+          accuracy_m: geo.accuracy_m,
+          geofence_radius_m: 100.0
         })
       });
       await fetchSessionDetails(response.session_id);
@@ -231,9 +323,30 @@ export const TeacherDashboard: React.FC = () => {
         type: 'success' 
       });
     } catch (err: any) {
-      setToast({ message: err.message || 'Failed to start session', type: 'error' });
+      setToast({ message: getInstitutionalErrorMessage(err, 'Failed to start session'), type: 'error' });
     } finally {
       setIsStartingSession(false);
+    }
+  };
+
+  const handleOpenProjector = async (sessionId: number) => {
+    await fetchSessionDetails(sessionId);
+    setIsProjectorOpen(true);
+  };
+
+  const handleLockSessionFromPanel = async (sessionId: number) => {
+    try {
+      const res: any = await apiRequest(`/teacher/sessions/${sessionId}/lock`, { method: 'POST' });
+      if (res?.warning) {
+        setToast({ message: res.warning, type: 'warning' });
+      } else {
+        setToast({ message: 'Attendance session locked successfully and records committed.', type: 'success' });
+      }
+      await fetchSessionDetails(sessionId);
+      await fetchHistoricalSessions();
+      await fetchCurrentClass();
+    } catch (err: any) {
+      setToast({ message: getInstitutionalErrorMessage(err, 'Lock failed'), type: 'error' });
     }
   };
 
@@ -241,7 +354,12 @@ export const TeacherDashboard: React.FC = () => {
     if (!currentClassInfo) return;
     if (currentClassInfo.existing_session_id) {
       await fetchSessionDetails(currentClassInfo.existing_session_id);
-      setIsProjectorOpen(true);
+      if (currentClassInfo.session_status === 'OPEN') {
+        setIsProjectorOpen(true);
+      } else {
+        setActiveTab('today');
+        setToast({ message: `Session #${currentClassInfo.existing_session_id} is locked. Unlock it to edit.`, type: 'warning' });
+      }
       return;
     }
 
@@ -252,23 +370,29 @@ export const TeacherDashboard: React.FC = () => {
 
     setIsStartingSession(true);
     try {
+      const geo = await getFacultyGeolocation();
+      const periodLabel = currentClassInfo.detected_period || 'Period 1';
       const response: any = await apiRequest('/teacher/sessions/start', {
         method: 'POST',
         body: JSON.stringify({
           subject_id: currentClassInfo.assignment.subject_id,
           section_id: currentClassInfo.assignment.section_id,
-          period: currentClassInfo.detected_period,
+          period: periodLabel,
           date: currentClassInfo.current_date,
-          display_type: displayType
+          display_type: displayType,
+          latitude: geo.latitude,
+          longitude: geo.longitude,
+          accuracy_m: geo.accuracy_m,
+          geofence_radius_m: 100.0
         })
       });
       await fetchSessionDetails(response.session_id);
       fetchHistoricalSessions();
       fetchCurrentClass();
       setIsProjectorOpen(true);
-      setToast({ message: `Session started for ${currentClassInfo.detected_period}!`, type: 'success' });
+      setToast({ message: `Session started for ${periodLabel}!`, type: 'success' });
     } catch (err: any) {
-      setToast({ message: err.message || 'Failed to start session', type: 'error' });
+      setToast({ message: getInstitutionalErrorMessage(err, 'Failed to start session'), type: 'error' });
     } finally {
       setIsStartingSession(false);
     }
@@ -283,10 +407,11 @@ export const TeacherDashboard: React.FC = () => {
       } else {
         setToast({ message: 'Attendance session locked successfully!', type: 'success' });
       }
-      fetchSessionDetails(activeSession.session_id);
-      fetchHistoricalSessions();
+      await fetchSessionDetails(activeSession.session_id);
+      await fetchHistoricalSessions();
+      await fetchCurrentClass();
     } catch (err: any) {
-      setToast({ message: err.message || 'Lock failed', type: 'error' });
+      setToast({ message: getInstitutionalErrorMessage(err, 'Lock failed'), type: 'error' });
     }
   };
 
@@ -297,7 +422,7 @@ export const TeacherDashboard: React.FC = () => {
       fetchSessionDetails(sessionId);
       fetchHistoricalSessions();
     } catch (err: any) {
-      setToast({ message: err.message || 'Unlock failed', type: 'error' });
+      setToast({ message: getInstitutionalErrorMessage(err, 'Unlock failed'), type: 'error' });
     }
   };
 
@@ -308,7 +433,7 @@ export const TeacherDashboard: React.FC = () => {
       setUnmarkedData(data);
       setShowUnmarkedModal(true);
     } catch (err: any) {
-      setToast({ message: err.message || 'Failed to fetch unmarked students', type: 'error' });
+      setToast({ message: getInstitutionalErrorMessage(err, 'Failed to fetch unmarked students'), type: 'error' });
     }
   };
 
@@ -322,7 +447,9 @@ export const TeacherDashboard: React.FC = () => {
           session_id: activeSession.session_id,
           roll_number: rollNumber,
           status: 'PRESENT',
-          period_count: sessionPeriodCount
+          period_count: sessionPeriodCount,
+          reason: 'scanner_failed',
+          confirm_high_volume: true
         })
       });
       setUnmarkedData((prev: any) => {
@@ -337,32 +464,105 @@ export const TeacherDashboard: React.FC = () => {
       fetchSessionDetails(activeSession.session_id);
       setToast({ message: `Roll ${rollNumber} marked Present (${sessionPeriodCount} Period${sessionPeriodCount > 1 ? 's' : ''})!`, type: 'success' });
     } catch (err: any) {
-      setToast({ message: err.message || 'Failed to mark present', type: 'error' });
+      setToast({ message: getInstitutionalErrorMessage(err, 'Failed to mark present'), type: 'error' });
     }
   };
 
-  const handleToggleStudentAttendance = async (rollNumber: string, currentStatus: string) => {
-    if (!activeSession) return;
+  const handleToggleStudentAttendance = async (rollNumber: string, currentStatus: string, targetSessionId?: number) => {
+    const sessionToUse = targetSessionId 
+      ? (activeSession?.session_id === targetSessionId ? activeSession : null) 
+      : activeSession;
+    const effectiveSessionId = targetSessionId || activeSession?.session_id;
+    if (!effectiveSessionId) return;
+
     const isPresent = ['PRESENT', '1', '2', '3', '4', '5', '6', '7', '8'].includes(currentStatus);
     const nextStatus = isPresent ? 'ABSENT' : 'PRESENT';
-    const sessionPeriodCount = activeSession.period_count || extractPeriodCount(activeSession.period) || 1;
+    const sessionPeriodCount = sessionToUse?.period_count || (sessionToUse ? extractPeriodCount(sessionToUse.period) : 1);
+
     try {
       await apiRequest('/attendance/manual-mark', {
         method: 'POST',
         body: JSON.stringify({
-          session_id: activeSession.session_id,
+          session_id: effectiveSessionId,
           roll_number: rollNumber,
           status: nextStatus,
-          period_count: nextStatus === 'PRESENT' ? sessionPeriodCount : 0
+          period_count: nextStatus === 'PRESENT' ? sessionPeriodCount : 0,
+          reason: 'scanner_failed',
+          confirm_high_volume: true
         })
       });
-      fetchSessionDetails(activeSession.session_id);
+      fetchSessionDetails(effectiveSessionId);
+      fetchHistoricalSessions();
       setToast({ 
         message: `${rollNumber} marked ${nextStatus}${nextStatus === 'PRESENT' ? ` (${sessionPeriodCount} Periods)` : ''}!`, 
         type: nextStatus === 'PRESENT' ? 'success' : 'warning' 
       });
     } catch (err: any) {
-      setToast({ message: err.message || 'Failed to update attendance', type: 'error' });
+      setToast({ message: getInstitutionalErrorMessage(err, 'Failed to update attendance'), type: 'error' });
+    }
+  };
+
+  const handleUpdateSessionPeriod = async (sessionId: number, periodCount: number, periodLabel: string) => {
+    try {
+      await apiRequest(`/teacher/sessions/${sessionId}/period`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          period: periodLabel,
+          period_count: periodCount
+        })
+      });
+      await fetchSessionDetails(sessionId);
+      await fetchHistoricalSessions();
+      setToast({
+        message: `Session period updated to ${periodLabel}! All student attendance records updated to ${periodCount} periods credit.`,
+        type: 'success'
+      });
+    } catch (err: any) {
+      setToast({ message: getInstitutionalErrorMessage(err, 'Failed to update session period'), type: 'error' });
+    }
+  };
+
+  const handleDeleteSession = (session: HistoricalAttendanceSession) => {
+    setConfirmDeleteSession(session);
+  };
+
+  const handleCalendarDeleteSession = async (sessionId: number) => {
+    try {
+      const res: any = await apiRequest(`/teacher/sessions/${sessionId}`, { method: 'DELETE' });
+      setToast({ message: res?.message || 'Attendance session deleted successfully!', type: 'success' });
+      if (activeSession?.session_id === sessionId) {
+        setActiveSession(null);
+        setIsProjectorOpen(false);
+        setIsManualOpen(false);
+      }
+      await fetchHistoricalSessions();
+      await fetchCurrentClass();
+      await fetchAssignedClasses();
+    } catch (err: any) {
+      setToast({ message: getInstitutionalErrorMessage(err, 'Failed to delete session'), type: 'error' });
+    }
+  };
+
+  const handleExecuteDeleteSession = async () => {
+    if (!confirmDeleteSession || isDeletingSession) return;
+    setIsDeletingSession(true);
+    try {
+      const res: any = await apiRequest(`/teacher/sessions/${confirmDeleteSession.session_id}`, { method: 'DELETE' });
+      setToast({ message: res?.message || 'Session deleted successfully!', type: 'success' });
+      const deletedId = confirmDeleteSession.session_id;
+      setConfirmDeleteSession(null);
+      if (activeSession?.session_id === deletedId) {
+        setActiveSession(null);
+        setIsProjectorOpen(false);
+        setIsManualOpen(false);
+      }
+      await fetchHistoricalSessions();
+      await fetchCurrentClass();
+      await fetchAssignedClasses();
+    } catch (err: any) {
+      setToast({ message: getInstitutionalErrorMessage(err, 'Failed to delete session'), type: 'error' });
+    } finally {
+      setIsDeletingSession(false);
     }
   };
 
@@ -431,8 +631,115 @@ export const TeacherDashboard: React.FC = () => {
     return true;
   });
 
+  // Server-authoritative today IST
+  const serverToday = useMemo(() => currentClassInfo?.current_date || getTodayIST(), [currentClassInfo]);
+
+  // Normalized calendar events derived deterministically from backend data
+  const calendarAllEvents = useMemo(() => {
+    return adaptSessionsToCalendarEvents(
+      historicalSessions,
+      assignments,
+      serverToday,
+      currentClassInfo?.current_time || '10:00'
+    );
+  }, [historicalSessions, assignments, serverToday, currentClassInfo]);
+
+  const calendarEventsByDate = useMemo(() => {
+    return groupEventsByDate(calendarAllEvents);
+  }, [calendarAllEvents]);
+
+  // Calendar Action Handlers
+  const handleCalendarStartAttendance = async (event: TeacherClassEvent) => {
+    if (isStartingSession) return;
+    const isPast = event.date < serverToday;
+
+    if (event.sessionId) {
+      await fetchSessionDetails(event.sessionId);
+      if (event.sessionStatus === 'OPEN') {
+        if (isPast) {
+          // Rule 30: Past classes open the attendance roster console directly without projector QR
+          setActiveTab('today');
+          setToast({ 
+            message: `Opened past attendance session for ${event.date} (${event.periodLabel}).`, 
+            type: 'success' 
+          });
+        } else {
+          setIsProjectorOpen(true);
+        }
+      } else {
+        setActiveTab('today');
+        setToast({ message: `Session #${event.sessionId} is locked. Unlock it below to modify attendance.`, type: 'warning' });
+      }
+      return;
+    }
+
+    const asgn = assignments.find(a => a.subject_id === event.subjectId && a.section_id === event.sectionId);
+    if (asgn) {
+      setSelectedAssignment(asgn);
+      setSelectedPeriods([event.periodNumber]);
+      setSelectedDate(event.date);
+      
+      setIsStartingSession(true);
+      try {
+        const geo = await getFacultyGeolocation();
+        const response: any = await apiRequest('/teacher/sessions/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            subject_id: asgn.subject_id,
+            section_id: asgn.section_id,
+            period: event.periodLabel || `Period ${event.periodNumber}`,
+            period_count: event.periodCount || 1,
+            date: event.date,
+            display_type: isPast ? 'laptop' : displayType,
+            latitude: geo.latitude,
+            longitude: geo.longitude,
+            accuracy_m: geo.accuracy_m,
+            geofence_radius_m: 100.0
+          })
+        });
+        await fetchSessionDetails(response.session_id);
+        fetchHistoricalSessions();
+        fetchCurrentClass();
+
+        if (isPast) {
+          setActiveTab('today');
+          setToast({ 
+            message: `Past attendance session initialized for ${event.date} (${event.periodLabel}). You may now record attendance.`, 
+            type: 'success' 
+          });
+        } else {
+          setIsProjectorOpen(true);
+          setToast({ 
+            message: `Attendance session launched for ${event.subjectName} (${event.sectionName})!`, 
+            type: 'success' 
+          });
+        }
+      } catch (err: any) {
+        setToast({ message: getInstitutionalErrorMessage(err, 'Failed to start session'), type: 'error' });
+      } finally {
+        setIsStartingSession(false);
+      }
+    } else {
+      setToast({ message: 'No matching faculty assignment found for this class.', type: 'warning' });
+    }
+  };
+
+  const handleCalendarOpenRosterDetails = async (event: TeacherClassEvent) => {
+    if (event.sessionId) {
+      await fetchSessionDetails(event.sessionId);
+      setActiveTab('today');
+    } else {
+      setToast({ 
+        message: event.date < serverToday 
+          ? 'Attendance has not been recorded for this class yet. Click "Take Past Attendance" to begin.'
+          : 'Attendance has not been initiated for this class yet. Click "Start Attendance" to launch.', 
+        type: 'warning' 
+      });
+    }
+  };
+
   return (
-    <div className="max-w-5xl mx-auto px-4 py-6 space-y-5">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-5">
       {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
       {/* Clean Top Header Card */}
@@ -456,11 +763,20 @@ export const TeacherDashboard: React.FC = () => {
           </div>
         </div>
 
-        {/* Global Toolbar Actions */}
+        {/* Global Toolbar Actions & Academic Year Selection */}
         <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+          <select
+            value={academicYear}
+            onChange={(e) => setAcademicYear(e.target.value)}
+            className="px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-extrabold text-[#001e40] focus:outline-none focus:ring-2 focus:ring-[#2f53d7] shadow-sm"
+          >
+            <option value="2025-26">Academic Year 2025–26</option>
+            <option value="2024-25">Academic Year 2024–25</option>
+          </select>
+
           <button
             onClick={() => setIsExcelRegisterOpen(true)}
-            className="flex-1 md:flex-initial px-3.5 py-2 bg-[#2f53d7] hover:bg-[#203db0] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm transition active:scale-95"
+            className="px-3.5 py-2 bg-[#2f53d7] hover:bg-[#203db0] text-white font-bold rounded-xl text-xs flex items-center justify-center gap-2 shadow-sm transition active:scale-95"
             title="Open Excel Register"
           >
             <FileSpreadsheet className="w-4 h-4 text-emerald-300" /> Class Register
@@ -494,18 +810,29 @@ export const TeacherDashboard: React.FC = () => {
       </div>
 
       {/* Sleek Navigation Tabs */}
-      <div className="flex bg-slate-100/80 p-1 rounded-2xl border border-slate-200 gap-1">
+      <div className="flex bg-slate-100/80 p-1 rounded-2xl border border-slate-200 gap-1 overflow-x-auto scrollbar-none">
+        <button
+          onClick={() => setActiveTab('calendar')}
+          className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 shrink-0 ${
+            activeTab === 'calendar'
+              ? 'bg-white text-[#2f53d7] shadow-sm font-black'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          <Calendar className="w-4 h-4" /> My Classes (Calendar)
+        </button>
+
         <button
           onClick={() => setActiveTab('today')}
-          className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 ${
+          className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 shrink-0 ${
             activeTab === 'today'
               ? 'bg-white text-[#2f53d7] shadow-sm font-black'
               : 'text-slate-600 hover:text-slate-900'
           }`}
         >
-          <Camera className="w-4 h-4" /> Today's Live Attendance
+          <Camera className="w-4 h-4" /> Live Session Console
           {activeSession && activeSession.status === 'OPEN' && (
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping ml-1" />
+            <span className="w-2 h-2 rounded-full bg-emerald-500 motion-safe:animate-ping motion-reduce:hidden ml-1" />
           )}
         </button>
 
@@ -514,7 +841,7 @@ export const TeacherDashboard: React.FC = () => {
             setActiveTab('historical');
             fetchHistoricalSessions(selectedDate);
           }}
-          className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 ${
+          className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 shrink-0 ${
             activeTab === 'historical'
               ? 'bg-white text-[#2f53d7] shadow-sm font-black'
               : 'text-slate-600 hover:text-slate-900'
@@ -525,7 +852,7 @@ export const TeacherDashboard: React.FC = () => {
 
         <button
           onClick={() => setActiveTab('defaulters')}
-          className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 ${
+          className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 shrink-0 ${
             activeTab === 'defaulters'
               ? 'bg-white text-[#2f53d7] shadow-sm font-black'
               : 'text-slate-600 hover:text-slate-900'
@@ -536,7 +863,7 @@ export const TeacherDashboard: React.FC = () => {
 
         <button
           onClick={() => setActiveTab('settings')}
-          className={`flex-1 py-2.5 px-4 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 ${
+          className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-extrabold transition-all flex items-center justify-center gap-2 shrink-0 ${
             activeTab === 'settings'
               ? 'bg-white text-[#2f53d7] shadow-sm font-black'
               : 'text-slate-600 hover:text-slate-900'
@@ -545,6 +872,33 @@ export const TeacherDashboard: React.FC = () => {
           <FileSpreadsheet className="w-4 h-4 text-emerald-600" /> Google Sheet Settings
         </button>
       </div>
+
+      {/* TAB 0: MY CLASSES (CALENDAR WORKSPACE) */}
+      {activeTab === 'calendar' && (
+        <TeacherCalendarContainer
+          eventsByDate={calendarEventsByDate}
+          allEvents={calendarAllEvents}
+          todayIST={serverToday}
+          allottedClasses={assignments}
+          isLoading={isLoadingInitial}
+          currentClassInfo={currentClassInfo}
+          isStartingSession={isStartingSession}
+          onStartAttendance={handleCalendarStartAttendance}
+          onLockSession={handleLockSessionFromPanel}
+          onOpenProjector={handleOpenProjector}
+          onUnlockSession={handleUnlockSession}
+          onOpenRosterDetails={handleCalendarOpenRosterDetails}
+          onOpenExcelRegister={() => setIsExcelRegisterOpen(true)}
+          onOpenReports={() => window.location.href = '/reports'}
+          onViewAssignments={() => setActiveTab('today')}
+          onTakePreviousClass={() => setActiveTab('historical')}
+          onToggleStudentAttendance={handleToggleStudentAttendance}
+          initialSelectedDate={selectedDate}
+          activeSessionId={activeSession?.session_id}
+          onUpdateSessionPeriod={handleUpdateSessionPeriod}
+          onDeleteSession={handleCalendarDeleteSession}
+        />
+      )}
 
       {/* TAB 1: TODAY'S LIVE ATTENDANCE */}
       {activeTab === 'today' && (
@@ -620,6 +974,32 @@ export const TeacherDashboard: React.FC = () => {
                 </p>
               </div>
 
+              {/* Manual Attendance Anomaly Alert Banner (15% Amber, 30% Red) */}
+              {(activeSession.manual_pct ?? 0) >= 15 && (
+                <div className={`p-3.5 rounded-xl border flex items-start gap-3 shadow-lg ${
+                  (activeSession.manual_pct ?? 0) >= 30
+                    ? 'bg-rose-500/20 border-rose-500/50 text-rose-100 ring-1 ring-rose-500/40'
+                    : 'bg-amber-500/20 border-amber-500/50 text-amber-100 ring-1 ring-amber-500/40'
+                }`}>
+                  <AlertTriangle className={`w-5 h-5 shrink-0 mt-0.5 ${
+                    (activeSession.manual_pct ?? 0) >= 30 ? 'text-rose-400' : 'text-amber-400'
+                  }`} />
+                  <div className="text-xs space-y-1">
+                    <div className="font-black text-sm flex items-center gap-2">
+                      <span>{(activeSession.manual_pct ?? 0) >= 30 ? 'CRITICAL: High Manual Attendance (>30%)' : 'High Manual Attendance Flag (≥15%)'}</span>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase bg-black/30 font-bold">
+                        {activeSession.manual_count || 0} marked manually ({activeSession.manual_pct}%)
+                      </span>
+                    </div>
+                    <p className="text-slate-200">
+                      {(activeSession.manual_pct ?? 0) >= 30
+                        ? 'Excessive manual marks exceed institutional tolerance. This session has been tagged RED for administrative and HOD audit.'
+                        : 'Manual attendance exceeds 15% of present students. Please verify student physical attendance in room.'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Progress & Live Stat Counters */}
               <div className="space-y-2 bg-white/5 rounded-xl p-4 border border-white/10">
                 <div className="flex items-center justify-between text-xs font-bold">
@@ -634,6 +1014,17 @@ export const TeacherDashboard: React.FC = () => {
                 </div>
                 <div className="flex items-center justify-between text-xs text-slate-300 font-mono pt-1">
                   <span className="text-emerald-400 font-bold">✅ Present: {presentCount}</span>
+                  {(activeSession.manual_count ?? 0) > 0 && (
+                    <span className={`font-bold ${
+                      (activeSession.manual_pct ?? 0) >= 30
+                        ? 'text-rose-400'
+                        : (activeSession.manual_pct ?? 0) >= 15
+                        ? 'text-amber-400'
+                        : 'text-blue-300'
+                    }`}>
+                      📝 Manual (M): {activeSession.manual_count} ({activeSession.manual_pct}%)
+                    </span>
+                  )}
                   <span className="text-rose-400 font-bold">❌ Absent: {absentCount}</span>
                   <span className="text-slate-400 font-bold">👥 Total: {enrolledStudents.length}</span>
                 </div>
@@ -662,6 +1053,15 @@ export const TeacherDashboard: React.FC = () => {
                 >
                   <Users className="w-4 h-4 text-amber-300" /> Absence Callout
                 </button>
+
+                <Link
+                  to="/qr-size-test"
+                  className="py-2.5 px-3 bg-purple-500/15 hover:bg-purple-500/25 text-purple-200 border border-purple-500/30 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 sm:col-span-3"
+                  title="Test and calibrate minimum effective QR display size for your classroom"
+                >
+                  <Sparkles className="w-4 h-4 text-purple-300" />
+                  <span>Calibrate Classroom QR Size & Readability (Back-Row Room Test)</span>
+                </Link>
               </div>
 
               {/* Class Switcher for Multiple Assignments */}
@@ -699,29 +1099,68 @@ export const TeacherDashboard: React.FC = () => {
             /* Start New Attendance Session Card (When Idle) */
             <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-5">
               
-              {/* Timetable One-Tap Recommendation if detected */}
-              {currentClassInfo && currentClassInfo.has_assignment && (
+              {/* Timetable Recommendation or Bell Schedule Status */}
+              {currentClassInfo && currentClassInfo.is_class_active && currentClassInfo.has_assignment ? (
                 <div className="bg-gradient-to-r from-[#001e40] to-[#15347e] rounded-xl p-4 text-white flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-md">
                   <div className="space-y-1">
                     <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 rounded bg-blue-400/20 text-blue-200 font-mono text-[11px] font-bold">
+                      <span className="px-2 py-0.5 rounded bg-blue-400/20 text-blue-200 font-mono text-[11px] font-bold flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                         IST {currentClassInfo.current_time} • {currentClassInfo.detected_period}
                       </span>
                       <span className="text-xs text-amber-300 font-bold flex items-center gap-1">
-                        <Sparkles className="w-3.5 h-3.5" /> Scheduled Now
+                        ● LIVE NOW
                       </span>
                     </div>
                     <h4 className="font-bold text-base text-white">
                       {currentClassInfo.assignment.subject_name} ({currentClassInfo.assignment.section_name})
                     </h4>
+                    {currentClassInfo.existing_session_id && (
+                      <div className="text-xs text-slate-300 font-medium flex items-center gap-2">
+                        <span>Session #{currentClassInfo.existing_session_id} ({currentClassInfo.session_status})</span>
+                        {currentClassInfo.total_enrolled > 0 && (
+                          <span className="text-emerald-300 font-bold">
+                            • {currentClassInfo.present_count} / {currentClassInfo.total_enrolled} Marked
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                   <button
                     onClick={handleOneTapStart}
                     disabled={isStartingSession}
                     className="px-5 py-2.5 bg-[#FF9F0A] hover:bg-[#e08b05] text-[#001e40] font-black text-xs uppercase tracking-wider rounded-xl transition shadow flex items-center gap-1.5 shrink-0"
                   >
-                    <Zap className="w-4 h-4" /> 1-Tap Start Attendance
+                    <Zap className="w-4 h-4" /> {currentClassInfo.existing_session_id ? 'Continue Live Attendance' : '1-Tap Start Attendance'}
                   </button>
+                </div>
+              ) : currentClassInfo && currentClassInfo.is_break ? (
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-amber-900 flex items-center gap-3 shadow-sm">
+                  <div className="p-2 rounded-xl bg-amber-100 text-amber-700">
+                    <Clock className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm text-amber-950">
+                      {currentClassInfo.break_label || 'Break Time'} (IST {currentClassInfo.current_time})
+                    </h4>
+                    <p className="text-xs text-amber-800">
+                      No active class in session during bell break. Attendance starts when the next class period begins.
+                    </p>
+                  </div>
+                </div>
+              ) : currentClassInfo && !currentClassInfo.is_class_active && (
+                <div className="bg-slate-100 border border-slate-200 rounded-xl p-4 text-slate-700 flex items-center gap-3 shadow-sm">
+                  <div className="p-2 rounded-xl bg-slate-200 text-slate-600">
+                    <Clock className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-sm text-[#001e40]">
+                      Outside Scheduled Class Hours (IST {currentClassInfo.current_time})
+                    </h4>
+                    <p className="text-xs text-slate-500">
+                      College hours are 09:30 AM to 05:00 PM. No class is currently in session.
+                    </p>
+                  </div>
                 </div>
               )}
 
@@ -988,7 +1427,17 @@ export const TeacherDashboard: React.FC = () => {
                         }`}
                       >
                         <div className="min-w-0 pr-2">
-                          <h5 className="text-xs font-bold text-slate-900 truncate">{s.name}</h5>
+                          <div className="flex items-center gap-1.5">
+                            <h5 className="text-xs font-bold text-slate-900 truncate">{s.name}</h5>
+                            {s.is_manual && (
+                              <span 
+                                className="px-1.5 py-0.2 rounded bg-amber-100 text-amber-800 text-[10px] font-mono font-black border border-amber-300 shrink-0"
+                                title={`Manually marked: ${s.manual_reason || 'scanner_failed'}`}
+                              >
+                                (M)
+                              </span>
+                            )}
+                          </div>
                           <p className="text-[11px] font-mono text-[#2f53d7] font-bold">{s.roll_number}</p>
                         </div>
 
@@ -1173,12 +1622,22 @@ export const TeacherDashboard: React.FC = () => {
                           </button>
                         </>
                       )}
+                      <button
+                        onClick={() => handleDeleteSession(hs)}
+                        className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 hover:border-rose-300 text-xs font-bold rounded-xl flex items-center gap-1.5 transition shadow-sm active:scale-95"
+                        title="Delete this attendance session"
+                      >
+                        <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                        <span>Delete</span>
+                      </button>
                     </div>
                   </div>
                 ))}
               </div>
             )}
           </div>
+
+
 
         </div>
       )}
@@ -1354,9 +1813,89 @@ export const TeacherDashboard: React.FC = () => {
           onClose={() => {
             setIsProjectorOpen(false);
             fetchSessionDetails(activeSession.session_id);
+            fetchCurrentClass();
+            fetchHistoricalSessions();
           }}
           onLockSession={handleLockSession}
         />
+      )}
+
+      {/* Delete Session Confirmation Modal (Global) */}
+      {confirmDeleteSession && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-rose-100 flex items-center justify-center text-rose-600 shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="font-heading text-base font-black text-[#001e40]">Delete Attendance Session?</h4>
+                <p className="text-xs text-slate-500 font-medium">This will permanently remove this session and all its records.</p>
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2 text-xs">
+              <div className="flex justify-between">
+                <span className="text-slate-500 font-medium">Subject:</span>
+                <span className="font-bold text-slate-800">{confirmDeleteSession.subject_name}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500 font-medium">Section:</span>
+                <span className="font-bold text-slate-800">{confirmDeleteSession.section_name}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500 font-medium">Date & Period:</span>
+                <span className="font-bold text-slate-800">{confirmDeleteSession.session_date} — {confirmDeleteSession.period}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500 font-medium">Status:</span>
+                <span className={`px-2 py-0.5 rounded-md text-[10px] font-black ${
+                  confirmDeleteSession.status === 'OPEN' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                }`}>
+                  {confirmDeleteSession.status}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-slate-500 font-medium">Records Affected:</span>
+                <span className="font-black text-rose-600">{confirmDeleteSession.present_count} student(s) marked present</span>
+              </div>
+            </div>
+
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-center gap-2 text-xs text-rose-700">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>Warning: This action cannot be undone. All scans and records for this session will be permanently deleted.</span>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setConfirmDeleteSession(null)}
+                disabled={isDeletingSession}
+                className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-100 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleExecuteDeleteSession}
+                disabled={isDeletingSession}
+                className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-rose-600/20 disabled:opacity-50"
+              >
+                {isDeletingSession ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Deleting...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Confirm Delete</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
     </div>

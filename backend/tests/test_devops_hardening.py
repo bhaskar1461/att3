@@ -103,7 +103,7 @@ def test_am200_student_scan_rate_limiter_per_roll():
     with pytest.raises(HTTPException) as exc_info:
         limiter.check_rate_limit("23311A05Y6")
     assert exc_info.value.status_code == 429
-    assert "23311A05Y6" in exc_info.value.detail
+    assert "23311A05Y6" in str(exc_info.value.detail)
     assert "Retry-After" in exc_info.value.headers
 
     # Student B on the same shared IP can scan normally (not blocked by Student A)

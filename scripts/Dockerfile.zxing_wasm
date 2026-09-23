@@ -1,0 +1,29 @@
+# Pinned Emscripten & zxing-cpp Reproducible Build
+# Toolchain: Emscripten SDK 3.1.56 (Linux x86_64)
+# Upstream: zxing-cpp tagged release v2.2.1 (commit 99a83b3a6ac514d7f850dda7fa24cddb5120c7e2)
+FROM emscripten/emsdk:3.1.56 AS builder
+
+WORKDIR /src
+
+# Clone zxing-cpp at pinned release v2.2.1
+RUN git clone --depth 1 --branch v2.2.1 https://github.com/zxing-cpp/zxing-cpp.git zxing-src
+
+WORKDIR /src/zxing-src/build
+
+# 1. Configure CMake with readers only (writers disabled) for minimal WASM footprint
+RUN emcmake cmake ../wrappers/wasm \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_WRITERS=OFF \
+    -DBUILD_READERS=ON \
+    -DCMAKE_CXX_FLAGS="-O3 -flto" \
+    -DCMAKE_EXE_LINKER_FLAGS="-O3 -flto -s ENVIRONMENT=web -s FILESYSTEM=0 -s MODULARIZE=1 -s EXPORT_NAME=ZXing -s ALLOW_MEMORY_GROWTH=1"
+
+# 2. Build zxing_reader (.wasm and .js glue)
+RUN cmake --build . --target zxing_reader -j4
+
+# Output stage
+FROM alpine:latest
+WORKDIR /dist
+COPY --from=builder /src/zxing-src/build/zxing_reader.js /dist/zxing_reader.js
+COPY --from=builder /src/zxing-src/build/zxing_reader.wasm /dist/zxing_reader.wasm
+CMD ["cp", "/dist/zxing_reader.js", "/dist/zxing_reader.wasm", "/out/"]

@@ -1,11 +1,16 @@
 # Phase 7 — End-to-End Integration Verification Test Suite
 import os
+import sys
 import unittest
 from datetime import date
 from starlette.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
+backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
 
 from app.main import app
 from app.core.database import get_db, Base

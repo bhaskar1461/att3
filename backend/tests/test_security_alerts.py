@@ -27,6 +27,7 @@ from app.services.security_alert_service import (
     THRESHOLDS
 )
 from app.models.models import User, UserRole, AuditLog
+from app.core.config import settings
 
 
 class TestSecurityAlertSystem(unittest.TestCase):
@@ -34,6 +35,14 @@ class TestSecurityAlertSystem(unittest.TestCase):
     def setUp(self):
         # Clean tracker state before every test
         alert_tracker.reset_state()
+        self._patch_alerts = patch.object(settings, "SECURITY_ALERTS_ENABLED", True)
+        self._patch_digest = patch.object(settings, "SECURITY_DIGEST_ENABLED", True)
+        self._patch_alerts.start()
+        self._patch_digest.start()
+
+    def tearDown(self):
+        self._patch_alerts.stop()
+        self._patch_digest.stop()
 
     def test_account_switch_threshold_trigger(self):
         """
@@ -199,7 +208,7 @@ class TestSecurityAlertSystem(unittest.TestCase):
         # Return empty list from query
         mock_db.query.return_value.filter.return_value.order_by.return_value.all.return_value = []
 
-        res = SecurityAlertService.generate_and_send_hourly_digest(force_window=True)
+        res = SecurityAlertService.generate_and_send_hourly_digest(force_window=True, force_send=True)
         self.assertEqual(res.get("status"), "SKIPPED")
         self.assertEqual(res.get("reason"), "ZERO_EVENTS")
         mock_send.assert_not_called()
@@ -243,7 +252,7 @@ class TestSecurityAlertSystem(unittest.TestCase):
         mock_db.query.return_value.filter.return_value.all.return_value = []
         mock_send.return_value = {"status": "SENT", "channel": "DEFAULT"}
 
-        res = SecurityAlertService.generate_and_send_hourly_digest(force_window=True)
+        res = SecurityAlertService.generate_and_send_hourly_digest(force_window=True, force_send=True)
         self.assertEqual(res.get("status"), "SENT")
         self.assertEqual(res.get("events_count"), 2)
         self.assertTrue(mock_send.called)

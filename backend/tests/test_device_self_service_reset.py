@@ -1,4 +1,5 @@
 import unittest
+import re
 from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 
@@ -317,6 +318,79 @@ class TestDeviceSelfServiceReset(unittest.TestCase):
             headers={"X-Device-Public-Id": "DEV-APPROVED-111"}
         )
         self.assertEqual(res_ok.status_code, 200)
+
+    @patch("app.api.devices.send_single_email")
+    def test_verify_reset_with_placeholder_clears_enrollment_for_auto_enroll(self, mock_email):
+        """Self-service reset with placeholder DEV-RESET-V2 sets registered_device_id=None and returns tokens."""
+        mock_email.return_value = {"status": "SENT"}
+
+        # Previously enrolled on old device
+        from app.core.device_security import register_or_get_device
+        old_dev = register_or_get_device(self.db, "DEV-OLD-PHONE", "SECRET-OLD")
+        self.s1.registered_device_id = old_dev.id
+        self.db.commit()
+
+        # Request OTP
+        self.client.post("/api/v1/devices/request-reset", json={
+            "roll_number": "23311A05Y6",
+            "password": "pass1461"
+        })
+        call_args = mock_email.call_args[1]
+        import re
+        m = re.search(r"Code:\s*([0-9]{6})", call_args["subject"])
+        otp_code = m.group(1)
+
+        # Submit verification with DEV-RESET-V2 placeholder
+        res = self.client.post("/api/v1/devices/verify-reset", json={
+            "roll_number": "23311A05Y6",
+            "otp": otp_code,
+            "new_device_public_id": "DEV-RESET-V2",
+            "new_device_secret": "V2_RESET_CREDENTIAL"
+        })
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        self.assertEqual(data["status"], "SUCCESS")
+        self.assertIn("access_token", data)
+        self.assertIn("user", data)
+
+        # registered_device_id must be None so subsequent login auto-enrolls
+        self.db.refresh(self.s1)
+        self.assertIsNone(self.s1.registered_device_id)
+
+    @patch("app.api.devices.send_single_email")
+    def test_verify_reset_multi_otp_tolerance(self, mock_email):
+        """Requesting a second OTP doesn't immediately invalidate the first; first OTP still succeeds."""
+        mock_email.return_value = {"status": "SENT"}
+
+        # Request 1st OTP
+        self.client.post("/api/v1/devices/request-reset", json={
+            "roll_number": "23311A05Y6",
+            "password": "pass1461"
+        })
+        m1 = re.search(r"Code:\s*([0-9]{6})", mock_email.call_args[1]["subject"])
+        otp_1 = m1.group(1)
+
+        # Request 2nd OTP 5 seconds later
+        self.client.post("/api/v1/devices/request-reset", json={
+            "roll_number": "23311A05Y6",
+            "password": "pass1461"
+        })
+        m2 = re.search(r"Code:\s*([0-9]{6})", mock_email.call_args[1]["subject"])
+        otp_2 = m2.group(1)
+
+        # Student enters otp_1 (received first by email)
+        res = self.client.post("/api/v1/devices/verify-reset", json={
+            "roll_number": "23311A05Y6",
+            "otp": otp_1,
+            "new_device_public_id": "DEV-RESET-V2",
+            "new_device_secret": "V2_RESET_CREDENTIAL"
+        })
+        self.assertEqual(res.status_code, 200)
+
+        # Both OTPs must now be consumed
+        otps = self.db.query(DeviceResetOTP).filter(DeviceResetOTP.roll_number == "23311A05Y6").all()
+        for o in otps:
+            self.assertTrue(o.is_consumed)
 
 if __name__ == "__main__":
     unittest.main()

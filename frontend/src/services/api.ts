@@ -1,9 +1,32 @@
 import { getDeviceHeaders } from './deviceCredential';
+import { emergencyWipeAuthState, recordAuthRedirect } from './loopBreaker';
 
 const API_BASE = '/api/v1';
 let refreshTimer: any = null;
 let lastRefreshTime = Date.now();
 let activeRefreshPromise: Promise<string | null> | null = null;
+
+type AuthRedirectHandler = (url: string) => void;
+let authRedirectHandler: AuthRedirectHandler | null = null;
+
+export function setAuthRedirectHandler(handler: AuthRedirectHandler | null) {
+  authRedirectHandler = handler;
+}
+
+export function performAuthRedirect(url: string) {
+  const isSafe = recordAuthRedirect();
+  const targetUrl = isSafe ? url : '/login?reason=loop_breaker_tripped';
+  if (!isSafe) {
+    emergencyWipeAuthState();
+  }
+
+  if (authRedirectHandler) {
+    authRedirectHandler(targetUrl);
+  } else if (typeof window !== 'undefined') {
+    window.history.replaceState({}, '', targetUrl);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  }
+}
 
 /**
  * Performs a silent token refresh using httpOnly cookie or fallback refresh_token.
@@ -18,19 +41,15 @@ export async function performTokenRefresh(): Promise<string | null> {
     try {
       const storedRefreshToken = typeof localStorage !== 'undefined' ? localStorage.getItem('refresh_token') : null;
       const currentToken = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-      const deviceHeaders = getDeviceHeaders();
-
       const refreshResponse = await fetch(`${API_BASE}/auth/refresh`, {
         method: 'POST',
         credentials: 'include', // Sends snist_refresh_token httpOnly cookie
         headers: {
           'Content-Type': 'application/json',
-          ...deviceHeaders,
           ...(currentToken ? { 'Authorization': `Bearer ${currentToken}` } : {})
         },
         body: JSON.stringify({
-          refresh_token: storedRefreshToken || undefined,
-          ...deviceHeaders
+          refresh_token: storedRefreshToken || undefined
         })
       });
 
@@ -49,11 +68,11 @@ export async function performTokenRefresh(): Promise<string | null> {
 
       // If refresh failed with 401 or 403, the session is definitively terminated
       if (refreshResponse.status === 401 || refreshResponse.status === 403) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('refresh_token');
-        localStorage.removeItem('user');
+        emergencyWipeAuthState();
         if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-          window.location.href = '/login?reason=session_expired';
+          const currentPath = window.location.pathname + window.location.search;
+          const nextParam = currentPath.startsWith('/a/') ? `&next=${encodeURIComponent(currentPath)}` : '';
+          performAuthRedirect(`/login?reason=token_expired${nextParam}`);
         }
         return null;
       }
@@ -117,7 +136,6 @@ if (typeof document !== 'undefined') {
 export async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem('token');
   const deviceHeaders = getDeviceHeaders();
-
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...deviceHeaders,
@@ -143,7 +161,21 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
         return apiRequest<T>(endpoint, { ...(options as any), _isRetry: true });
       }
 
-      // If token refresh definitively failed, performTokenRefresh already handled redirect if 401/403
+      // If token refresh failed, parse response error code if available
+      let reason = 'token_expired';
+      try {
+        const errText = await response.text();
+        const parsed = JSON.parse(errText);
+        if (parsed.code) reason = parsed.code;
+        else if (parsed.detail?.code) reason = parsed.detail.code;
+      } catch {}
+
+      emergencyWipeAuthState();
+      if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+        const currentPath = window.location.pathname + window.location.search;
+        const nextParam = currentPath && currentPath !== '/' ? `&next=${encodeURIComponent(currentPath)}` : '';
+        performAuthRedirect(`/login?reason=${reason}${nextParam}`);
+      }
       throw new Error('Session expired. Please log in again.');
     }
 
@@ -151,17 +183,41 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
 
     if (!response.ok) {
       let msg = `Request failed (${response.status})`;
+      let code: string | undefined;
+      let serverNow: number | undefined;
+      let retryAfter: number | undefined;
       if (text) {
         try {
           const errData = JSON.parse(text);
-          if (typeof errData.detail === 'string') msg = errData.detail;
-          else if (typeof errData.message === 'string') msg = errData.message;
-          else if (Array.isArray(errData.detail)) msg = errData.detail.map((d: any) => d.msg || d).join(', ');
+          if (typeof errData.detail === 'string') {
+            msg = errData.detail;
+          } else if (errData.detail && typeof errData.detail === 'object') {
+            msg = errData.detail.message || errData.detail.msg || msg;
+            code = errData.detail.code;
+            serverNow = errData.detail.serverNow;
+            retryAfter = errData.detail.retry_after;
+          } else if (typeof errData.message === 'string') {
+            msg = errData.message;
+          } else if (Array.isArray(errData.detail)) {
+            msg = errData.detail.map((d: any) => d.msg || d).join(', ');
+          }
+          if (!code && errData.code) code = errData.code;
+          if (!serverNow && errData.serverNow) serverNow = errData.serverNow;
+          if (!retryAfter && errData.retry_after) retryAfter = errData.retry_after;
         } catch {
           if (!text.includes('<html')) msg = text;
         }
       }
-      throw new Error(msg);
+      if (!retryAfter && response.headers.get('Retry-After')) {
+        const parsedRa = parseInt(response.headers.get('Retry-After') || '0', 10);
+        if (!isNaN(parsedRa) && parsedRa > 0) retryAfter = parsedRa;
+      }
+      const apiErr: any = new Error(msg);
+      apiErr.status = response.status;
+      if (code) apiErr.code = code;
+      if (serverNow) apiErr.serverNow = serverNow;
+      if (retryAfter) apiErr.retry_after = retryAfter;
+      throw apiErr;
     }
 
     if (!text || text.trim() === '') {
@@ -180,6 +236,10 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
     if (message.includes('pattern') || message.includes('SyntaxError') || message.includes('Unexpected token')) {
       message = 'Connection error. Please refresh the page.';
     }
-    throw new Error(message);
+    const finalErr: any = new Error(message);
+    if (err?.code) finalErr.code = err.code;
+    if (err?.status) finalErr.status = err.status;
+    if (err?.serverNow) finalErr.serverNow = err.serverNow;
+    throw finalErr;
   }
 }

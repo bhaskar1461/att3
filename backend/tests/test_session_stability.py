@@ -237,23 +237,34 @@ class TestSessionStabilityAndAuthHardening(unittest.TestCase):
         })
         self.assertEqual(res_locked.status_code, 429)
 
-    def test_06_unapproved_cross_device_login_still_blocks_403(self):
-        """Requirement R4: Student bound to Device A cannot log in on Device B -> returns 403."""
-        # Initial login on Device A
+    def test_06_account_switching_on_same_device_blocks_403(self):
+        """Rule 6: Device bound to Student A cannot switch to Student B within 30 min -> returns 403."""
+        # Create Student B
+        user_b = User(
+            username="23311A0502",
+            email="23311A0502@sreenidhi.edu.in",
+            password_hash=get_password_hash("password123"),
+            role=UserRole.STUDENT,
+            is_active=True
+        )
+        self.db.add(user_b)
+        self.db.commit()
+
+        # Initial login for Student A on Device A -> succeeds and binds device to Student A
         res_dev_a = self.client.post("/api/v1/auth/login", json={
             "username": "23311A0501",
             "password": "password123",
-            "device_public_id": "DEV-PHONE-A",
-            "device_secret": "SECRET-A"
+            "device_public_id": "DEV-PHONE-SHARED",
+            "device_secret": "SECRET-SHARED"
         })
         self.assertEqual(res_dev_a.status_code, 200)
 
-        # Attempt login on Device B
+        # Student B attempts login on the same Device A within 30m -> blocked with 403
         res_dev_b = self.client.post("/api/v1/auth/login", json={
-            "username": "23311A0501",
+            "username": "23311A0502",
             "password": "password123",
-            "device_public_id": "DEV-PHONE-B",
-            "device_secret": "SECRET-B"
+            "device_public_id": "DEV-PHONE-SHARED",
+            "device_secret": "SECRET-SHARED"
         })
         self.assertEqual(res_dev_b.status_code, 403)
-        self.assertIn("registered to a different device", res_dev_b.json()["detail"])
+        self.assertIn("temporarily associated with another student account", res_dev_b.json()["detail"])

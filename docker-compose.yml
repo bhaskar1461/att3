@@ -1,24 +1,44 @@
-# Podman / Podman Compose Container Specifications
+# Docker Compose Stack for SNIST QR Attendance System
+# Configured for domain whiteleos.cc.cd with local high-speed MariaDB/MySQL
 version: '3.8'
 
 services:
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: attendance-app:latest
-    container_name: attendance_system_app
+  # ----------------------------------------------------------------------------
+  # 1. DATABASE: High-Speed Local MySQL/MariaDB (Sub-millisecond query latency)
+  # ----------------------------------------------------------------------------
+  db:
+    image: mariadb:10.6
+    container_name: snist_local_mysql
     restart: always
     ports:
-      - "8080:8000"
+      - "3307:3306"
     environment:
-      - DATABASE_URL=${DATABASE_URL:-mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo}
+      MYSQL_ROOT_PASSWORD: fast_root_secret
+      MYSQL_DATABASE: snist_fast_db
+      MYSQL_USER: snist_user
+      MYSQL_PASSWORD: snist_fast_pass
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --innodb-buffer-pool-size=256M
+      --innodb-log-buffer-size=64M
+      --innodb-flush-log-at-trx-commit=2
+      --skip-name-resolve
+      --max-connections=200
     volumes:
-      - ./backend/app:/app/app
-      - ./frontend/dist:/app/frontend_dist
-      - ./backend/data:/app/data
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+      - snist_mysql_fast_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "snist_user", "-psnist_fast_pass"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks:
+      - snist_net
 
+  # ----------------------------------------------------------------------------
+  # 2. BACKEND: FastAPI Server connected to local low-latency DB
+  # ----------------------------------------------------------------------------
   backend:
     build:
       context: ./backend
@@ -30,10 +50,26 @@ services:
     environment:
       - SECRET_KEY=8f3b2a19e5d4c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2
       - QR_SECRET_KEY=a1b2c3d4e5f678901234567890abcdef1234567890abcdef1234567890abcdef
-      - DATABASE_URL=${DATABASE_URL:-mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo}
+      - DATABASE_URL=mysql+pymysql://snist_user:snist_fast_pass@db:3306/snist_fast_db
+      - FRONTEND_URL=https://whiteleos.cc.cd
+      - ATTENDANCE_BASE_URL=https://whiteleos.cc.cd
+      - LAUNCH_TOKEN_GRACE_SECONDS=30
+      - ENVIRONMENT=development
+      - JNTUH_ELIGIBLE_THRESHOLD=75.0
+      - JNTUH_CONDONABLE_THRESHOLD=65.0
+      - JNTUH_INCLUDE_APPROVED_ABSENCES=True
     volumes:
       - ./backend/data:/app/data
+      - ./seed_dev.py:/app/seed_dev.py
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - snist_net
 
+  # ----------------------------------------------------------------------------
+  # 3. FRONTEND: Nginx Reverse Proxy with HTTPS on 443 & 80 for whiteleos.cc.cd
+  # ----------------------------------------------------------------------------
   frontend:
     build:
       context: ./frontend
@@ -41,11 +77,21 @@ services:
     container_name: attendance_frontend_pwa
     restart: always
     ports:
-      - "8088:80"
+      - "80:80"
       - "443:443"
       - "8443:443"
     volumes:
       - ./certs:/etc/nginx/certs:ro
     depends_on:
       - backend
+    networks:
+      - snist_net
+
+networks:
+  snist_net:
+    driver: bridge
+
+volumes:
+  snist_mysql_fast_data:
+    driver: local
 

@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { 
   X, Maximize2, Minimize2, Lock, RefreshCw, Users, CheckCircle, 
-  Clock, ShieldCheck, Sparkles, BookOpen, AlertCircle, Tv, Eye
+  Clock, ShieldCheck, Sparkles, BookOpen, AlertCircle, Tv, Eye,
+  Moon, Sun, Smartphone
 } from 'lucide-react';
 import { apiRequest } from '../services/api';
 
@@ -24,16 +25,42 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [secondsRemaining, setSecondsRemaining] = useState<number>(10);
+  const [isStale, setIsStale] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
   const [isLocking, setIsLocking] = useState<boolean>(false);
   const [isFullScreenQrMode, setIsFullScreenQrMode] = useState<boolean>(true);
   const [wakeLockActive, setWakeLockActive] = useState<boolean>(false);
+  const [wakeLockSupported, setWakeLockSupported] = useState<boolean>(true);
+
+  // Server-authoritative timing refs (Never trust client laptop clock)
+  const serverOffsetRef = useRef<number>(0);
+  const expiresAtRef = useRef<number>(0);
+  const isFetchingRef = useRef<boolean>(false);
+  const failCountRef = useRef<number>(0);
+
+  // Week 5: Dark-room inverted variant & Double-buffering state
+  const [isDarkRoom, setIsDarkRoom] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('snist_qr_dark_room') === 'true';
+    } catch {
+      return false;
+    }
+  });
+
+  // Double-buffering image state for seamless zero-blank-frame crossfade
+  const [currentQr, setCurrentQr] = useState<string | null>(null);
+  const [incomingQr, setIncomingQr] = useState<string | null>(null);
+  const [isCrossfading, setIsCrossfading] = useState<boolean>(false);
+  const currentQrRef = useRef<string | null>(null);
+
+  // Auto-hiding chrome controls for distraction-free presentation mode
+  const [showControls, setShowControls] = useState<boolean>(true);
+  const hideControlsTimerRef = useRef<any>(null);
   
   const modalContainerRef = useRef<HTMLDivElement | null>(null);
   const countdownIntervalRef = useRef<any>(null);
   const pollTimerRef = useRef<any>(null);
   const wakeLockSentinelRef = useRef<any>(null);
-
   const dataRef = useRef<any>(null);
 
   // Keep ref synchronized with state
@@ -45,8 +72,31 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
     dataRef.current = data;
   }, [data]);
 
+  // Handle auto-hiding chrome when in fullscreen presentation mode
+  const handleUserActivity = () => {
+    setShowControls(true);
+    if (hideControlsTimerRef.current) clearTimeout(hideControlsTimerRef.current);
+    if (isFullScreenQrMode) {
+      hideControlsTimerRef.current = setTimeout(() => {
+        setShowControls(false);
+      }, 3500);
+    }
+  };
+
+  useEffect(() => {
+    handleUserActivity();
+    return () => {
+      if (hideControlsTimerRef.current) clearTimeout(hideControlsTimerRef.current);
+    };
+  }, [isFullScreenQrMode]);
+
   // W3C Screen Wake Lock API to prevent projector sleep during 30-60 min lecture sessions
   useEffect(() => {
+    if (!('wakeLock' in navigator)) {
+      setWakeLockSupported(false);
+      return;
+    }
+
     const requestWakeLock = async () => {
       try {
         if ('wakeLock' in navigator && (navigator as any).wakeLock) {
@@ -83,50 +133,124 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
     };
   }, []);
 
-  // Fetch rotating token from backend with dynamic period_count
-  const fetchBroadcastToken = async (overridePeriod?: number) => {
+  // Fetch rotating token from backend with dynamic period_count and dark_mode
+  const fetchBroadcastToken = async (overridePeriod?: number, overrideDarkMode?: boolean) => {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
     const currentP = overridePeriod !== undefined ? overridePeriod : periodCountRef.current;
+    const currentDark = overrideDarkMode !== undefined ? overrideDarkMode : isDarkRoom;
     try {
-      const res: any = await apiRequest(`/teacher/sessions/${sessionId}/broadcast-token?period_count=${currentP}`);
+      const clientReqTime = Date.now();
+      const res: any = await apiRequest(
+        `/teacher/sessions/${sessionId}/broadcast-token?period_count=${currentP}&dark_mode=${currentDark}&_t=${clientReqTime}`,
+        {
+          cache: 'no-store',
+          headers: {
+            'Cache-Control': 'no-store, no-cache, must-revalidate',
+            'Pragma': 'no-cache'
+          }
+        }
+      );
+
+      // Server time drift correction: compute server clock offset
+      const clientResTime = Date.now();
+      const serverNowSec = res.server_now ?? res.serverNow;
+      if (serverNowSec !== undefined) {
+        const roundTripMs = clientResTime - clientReqTime;
+        const estimatedServerNowMs = (serverNowSec * 1000) + (roundTripMs / 2);
+        serverOffsetRef.current = estimatedServerNowMs - clientResTime;
+      }
+
+      const expSec = res.expires_at ?? res.expiresAt;
+      if (expSec !== undefined) {
+        expiresAtRef.current = expSec * 1000;
+      } else {
+        expiresAtRef.current = (Date.now() + serverOffsetRef.current) + 10000;
+      }
+
       setData(res);
-      setSecondsRemaining(res.seconds_remaining || 10);
+      const estServerTime = Date.now() + serverOffsetRef.current;
+      const secLeft = Math.max(0, Math.ceil((expiresAtRef.current - estServerTime) / 1000));
+      setSecondsRemaining(secLeft);
       setError(null);
+      setIsStale(false);
+      failCountRef.current = 0;
+
+      // Double-buffering transition: Preload before swapping into DOM
+      if (res?.qr_base64) {
+        if (!currentQrRef.current) {
+          setCurrentQr(res.qr_base64);
+          currentQrRef.current = res.qr_base64;
+        } else if (res.qr_base64 !== currentQrRef.current) {
+          const img = new Image();
+          img.src = res.qr_base64;
+          img.onload = () => {
+            setIncomingQr(res.qr_base64);
+            setIsCrossfading(true);
+            setTimeout(() => {
+              setCurrentQr(res.qr_base64);
+              currentQrRef.current = res.qr_base64;
+              setIncomingQr(null);
+              setIsCrossfading(false);
+            }, 300); // 300ms smooth crossfade
+          };
+        }
+      }
     } catch (err: any) {
       console.error('Failed to fetch broadcast token:', err);
+      failCountRef.current += 1;
+      const estServerTime = Date.now() + serverOffsetRef.current;
+      const isPastExpiry = expiresAtRef.current > 0 && estServerTime >= expiresAtRef.current;
+
       if (!dataRef.current) {
         setError(err.message || 'Error loading broadcast QR token');
       } else {
-        // If already broadcasting, keep active QR code visible and silently retry in 2s
+        if (isPastExpiry || failCountRef.current >= 2) {
+          setIsStale(true);
+        }
+        // Exponential backoff retry: 1.5s, 2.25s, 3.3s, up to 6s
+        const backoff = Math.min(6000, Math.round(1500 * Math.pow(1.5, failCountRef.current - 1)));
         if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
         pollTimerRef.current = setTimeout(() => {
-          fetchBroadcastToken(currentP);
-        }, 2000);
+          fetchBroadcastToken(currentP, currentDark);
+        }, backoff);
       }
     } finally {
+      isFetchingRef.current = false;
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchBroadcastToken(periodCountRef.current);
+    fetchBroadcastToken(periodCountRef.current, isDarkRoom);
 
-    // 1-second countdown ticker for smooth visual bar
+    // High frequency drift-free server countdown ticker (runs every 250ms)
     countdownIntervalRef.current = setInterval(() => {
-      setSecondsRemaining((prev) => {
-        if (prev <= 1) {
-          // Trigger refresh when token reaches 0 using current selected period count
-          fetchBroadcastToken(periodCountRef.current);
-          return 10;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+      if (!expiresAtRef.current) return;
+      const currentServerNow = Date.now() + serverOffsetRef.current;
+      const secRemaining = Math.max(0, Math.ceil((expiresAtRef.current - currentServerNow) / 1000));
+      setSecondsRemaining(secRemaining);
+
+      if (currentServerNow >= expiresAtRef.current && !isFetchingRef.current) {
+        fetchBroadcastToken(periodCountRef.current, isDarkRoom);
+      }
+    }, 250);
+
+    // Re-sync immediately on visibilitychange
+    const handleVisibilitySync = () => {
+      if (document.visibilityState === 'visible') {
+        console.log('[Projector] Window became visible — re-syncing broadcast token with server time');
+        fetchBroadcastToken(periodCountRef.current, isDarkRoom);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilitySync);
 
     return () => {
       if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
       if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+      document.removeEventListener('visibilitychange', handleVisibilitySync);
     };
-  }, [sessionId]);
+  }, [sessionId, isDarkRoom]);
 
   // Fullscreen toggle handler
   const toggleFullscreen = () => {
@@ -151,6 +275,15 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
     return () => document.removeEventListener('fullscreenchange', handleFsChange);
   }, []);
 
+  const toggleDarkRoom = () => {
+    const nextVal = !isDarkRoom;
+    setIsDarkRoom(nextVal);
+    try {
+      localStorage.setItem('snist_qr_dark_room', String(nextVal));
+    } catch {}
+    fetchBroadcastToken(undefined, nextVal);
+  };
+
   const handleLock = async () => {
     setIsLocking(true);
     try {
@@ -167,23 +300,66 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
     }
   };
 
+  // SVG Circular countdown calculation: circumference = 2 * PI * 44 ≈ 276.46
+  const circleRadius = 44;
+  const circumference = 2 * Math.PI * circleRadius;
+  const strokeDashoffset = circumference * (1 - secondsRemaining / 10);
   const progressPercent = Math.max(0, Math.min(100, (secondsRemaining / 10) * 100));
+
+  const isPhoneDisplay = data?.display_type === 'phone_screen';
 
   return (
     <div 
       ref={modalContainerRef}
-      className="fixed inset-0 z-50 bg-[#000d1a] text-white flex flex-col justify-between overflow-hidden font-sans select-none"
+      onMouseMove={handleUserActivity}
+      onTouchStart={handleUserActivity}
+      onClick={() => { if (!showControls) setShowControls(true); }}
+      className={`fixed inset-0 z-50 flex flex-col justify-between overflow-hidden font-sans select-none transition-colors duration-500 ${
+        isDarkRoom ? 'bg-black text-white' : 'bg-[#000d1a] text-white'
+      }`}
     >
-      {/* FULL SCREEN ATTENDANCE QR MODE: Maximum projector pixel footprint (85-90% viewport height) */}
+      {/* Red STALE Banner: Displayed if token refresh fails or network stalled */}
+      {isStale && (
+        <div className="z-50 bg-rose-600 text-white px-6 py-2.5 flex items-center justify-between shadow-2xl font-sans border-b border-rose-400 animate-pulse">
+          <div className="flex items-center gap-2.5">
+            <AlertCircle className="w-5 h-5 text-amber-200 shrink-0" />
+            <div>
+              <span className="font-black tracking-wide uppercase text-xs sm:text-sm bg-rose-800/80 px-2 py-0.5 rounded mr-2">
+                STALE - refresh failed
+              </span>
+              <span className="text-xs sm:text-sm font-medium text-rose-100">
+                The projected QR code is expired. Retrying connection...
+              </span>
+            </div>
+          </div>
+          <button
+            onClick={(e) => { e.stopPropagation(); fetchBroadcastToken(); }}
+            className="px-3.5 py-1 bg-white hover:bg-rose-50 text-rose-800 rounded-lg text-xs font-black shadow-md transition flex items-center gap-1.5 shrink-0"
+          >
+            <RefreshCw className="w-3.5 h-3.5 text-rose-700" />
+            <span>Retry Now</span>
+          </button>
+        </div>
+      )}
+
+      {/* FULL SCREEN ATTENDANCE QR MODE: Maximum projector pixel footprint (92-96% viewport) */}
       {isFullScreenQrMode ? (
-        <div className="flex-1 flex flex-col h-full justify-between">
+        <div className="flex-1 relative flex flex-col h-full justify-between">
           
-          {/* Subtle Top Header bar with controls */}
-          <div className="px-6 py-2 bg-black/40 border-b border-white/10 flex items-center justify-between text-xs">
+          {/* Top Header bar with auto-hide slide transition */}
+          <div 
+            className={`px-6 py-2 bg-black/60 backdrop-blur-md border-b border-white/10 flex items-center justify-between text-xs z-30 transition-all duration-300 ${
+              showControls ? 'translate-y-0 opacity-100' : '-translate-y-full opacity-0 pointer-events-none'
+            }`}
+          >
             <div className="flex items-center gap-3">
-              <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono font-bold flex items-center gap-1.5 border border-emerald-500/30">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                PROJECTOR MODE (85% DISPLAY)
+              <span className={`px-2.5 py-0.5 rounded-full font-mono font-bold flex items-center gap-1.5 border ${
+                isDarkRoom 
+                  ? 'bg-purple-500/20 text-purple-300 border-purple-500/30' 
+                  : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
+              }`}>
+                <span className={`w-2 h-2 rounded-full animate-ping ${isDarkRoom ? 'bg-purple-400' : 'bg-emerald-400'}`} />
+                {isDarkRoom ? 'DARK-ROOM INVERTED (MAX CONTRAST)' : 'EDGE-TO-EDGE PRESENTATION MODE'}
               </span>
               <span className="text-slate-300 font-semibold hidden md:inline">
                 {data?.subject_name} • {data?.section_name} • {data?.session_date}
@@ -191,23 +367,42 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
             </div>
 
             <div className="flex items-center gap-2">
-              {/* Screen Wake Lock Status */}
+              {/* Screen Wake Lock Status / Unsupported Warning */}
               <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 text-[11px] text-slate-300">
                 {wakeLockActive ? (
                   <>
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-                    <span className="text-emerald-300 font-medium">Screen Kept Awake ✓</span>
+                    <span className="text-emerald-300 font-medium">Screen Awake ✓</span>
                   </>
+                ) : !wakeLockSupported ? (
+                  <span className="text-amber-300 flex items-center gap-1">
+                    <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+                    Set display sleep to Never
+                  </span>
                 ) : (
-                  <span className="text-amber-300">Display sleep: set to Never</span>
+                  <span className="text-slate-400">WakeLock Inactive</span>
                 )}
               </div>
 
+              {/* Dark-Room Mode Toggle (Faculty Preference) */}
+              <button
+                onClick={(e) => { e.stopPropagation(); toggleDarkRoom(); }}
+                className={`px-2.5 py-1 rounded-lg font-bold flex items-center gap-1.5 transition border ${
+                  isDarkRoom 
+                    ? 'bg-purple-600/40 text-purple-200 border-purple-400 hover:bg-purple-600/60' 
+                    : 'bg-white/10 hover:bg-white/20 text-slate-200 border-white/15'
+                }`}
+                title="Toggle High-Contrast Inverted Mode for dimly lit projector halls"
+              >
+                {isDarkRoom ? <Sun className="w-3.5 h-3.5 text-amber-300" /> : <Moon className="w-3.5 h-3.5 text-purple-300" />}
+                <span>{isDarkRoom ? 'Light Variant' : 'Dark-Room'}</span>
+              </button>
+
               {/* Toggle to Standard View */}
               <button
-                onClick={() => setIsFullScreenQrMode(false)}
+                onClick={(e) => { e.stopPropagation(); setIsFullScreenQrMode(false); }}
                 className="px-3 py-1 bg-white/10 hover:bg-white/20 text-white rounded-lg font-bold flex items-center gap-1.5 transition border border-white/15"
-                title="Switch to Standard Mode with full dashboards"
+                title="Switch to Standard Mode with detailed metrics"
               >
                 <Eye className="w-3.5 h-3.5" />
                 <span>Standard Layout</span>
@@ -215,16 +410,16 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
 
               {/* Fullscreen Toggle */}
               <button
-                onClick={toggleFullscreen}
+                onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
                 className="p-1.5 bg-white/10 hover:bg-white/20 text-white rounded-lg transition border border-white/15"
-                title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen'}
+                title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen (F11)'}
               >
                 {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
               </button>
 
               {/* Lock Session */}
               <button
-                onClick={handleLock}
+                onClick={(e) => { e.stopPropagation(); handleLock(); }}
                 disabled={isLocking}
                 className="px-3 py-1 bg-rose-600 hover:bg-rose-700 disabled:opacity-50 text-white font-bold rounded-lg flex items-center gap-1.5 transition shadow"
               >
@@ -234,7 +429,7 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
 
               {/* Close */}
               <button
-                onClick={onClose}
+                onClick={(e) => { e.stopPropagation(); onClose(); }}
                 className="p-1.5 bg-white/10 hover:bg-white/20 text-slate-300 hover:text-white rounded-lg transition border border-white/15"
                 title="Close"
               >
@@ -243,14 +438,22 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
             </div>
           </div>
 
-          {/* Center Stage: The Massive, Sharp, High-Contrast Projector QR Matrix */}
-          <div className="flex-1 flex items-center justify-center p-2 sm:p-4 min-h-0">
-            {loading && !data ? (
+          {/* Optional Phone Screen Broadcast Guidance Notice */}
+          {isPhoneDisplay && showControls && (
+            <div className="bg-amber-500/20 border-b border-amber-500/30 px-4 py-1.5 text-center text-xs text-amber-200 flex items-center justify-center gap-2 font-medium z-20">
+              <Smartphone className="w-4 h-4 text-amber-400" />
+              <span>📱 Phone-Screen Mode: Hold phone at arm's length (30–50cm) towards students. Set screen brightness to 100%.</span>
+            </div>
+          )}
+
+          {/* Center Stage: The Massive Edge-to-Edge QR Matrix with Double-Buffered Crossfade */}
+          <div className="flex-1 relative flex items-center justify-center p-1 sm:p-2 min-h-0">
+            {loading && !currentQr ? (
               <div className="flex flex-col items-center gap-4 text-center">
                 <RefreshCw className="w-16 h-16 text-amber-400 animate-spin" />
-                <p className="text-xl font-bold text-slate-300">Rendering High-Resolution Projector Token...</p>
+                <p className="text-xl font-bold text-slate-300">Rendering Crisp Optical QR Matrix...</p>
               </div>
-            ) : error && !data ? (
+            ) : error && !currentQr ? (
               <div className="p-6 bg-rose-500/20 border border-rose-500/40 rounded-2xl text-center space-y-3 max-w-md">
                 <AlertCircle className="w-12 h-12 text-rose-400 mx-auto" />
                 <h3 className="text-lg font-bold text-white">Broadcast Error</h3>
@@ -263,24 +466,63 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
                 </button>
               </div>
             ) : (
-              /* Maximum size square container without rounded corners, shadows, or noise */
-              <div className="relative flex items-center justify-center bg-white p-4 sm:p-6" style={{ height: 'min(82vh, 82vw)', width: 'min(82vh, 82vw)' }}>
-                {data?.qr_base64 && (
+              /* High-Contrast Container with Guaranteed 4-Module Quiet Zone and Zero Rounding */
+              <div 
+                className={`relative flex items-center justify-center transition-colors duration-300 ${
+                  isDarkRoom ? 'bg-black border border-white/20' : 'bg-white shadow-2xl'
+                }`}
+                style={{ 
+                  height: showControls ? 'min(82vh, 82vw)' : 'min(93vh, 93vw)', 
+                  width: showControls ? 'min(82vh, 82vw)' : 'min(93vh, 93vw)',
+                  padding: '3%' // Preserves >=4 module quiet zone buffer
+                }}
+              >
+                {/* Double-Buffered Layer: Current Base QR */}
+                {currentQr && (
                   <img
-                    src={data.qr_base64}
-                    alt="Projector Attendance QR"
-                    className="w-full h-full object-contain"
+                    src={currentQr}
+                    alt="Attendance QR Matrix"
+                    className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-300 ${
+                      isCrossfading ? 'opacity-0' : 'opacity-100'
+                    }`}
                     style={{
-                      imageRendering: 'pixelated'
+                      imageRendering: 'pixelated',
+                      padding: '3%'
                     }}
                   />
+                )}
+
+                {/* Double-Buffered Layer: Incoming Preloaded QR for 300ms Crossfade */}
+                {incomingQr && (
+                  <img
+                    src={incomingQr}
+                    alt="Incoming Attendance QR Matrix"
+                    className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-300 ${
+                      isCrossfading ? 'opacity-100' : 'opacity-0'
+                    }`}
+                    style={{
+                      imageRendering: 'pixelated',
+                      padding: '3%'
+                    }}
+                  />
+                )}
+
+                {/* Subtle Floating Controls Trigger when chrome is hidden */}
+                {!showControls && (
+                  <div className="absolute top-2 right-2 px-2 py-1 rounded bg-black/50 text-[10px] text-slate-400 pointer-events-none backdrop-blur font-mono">
+                    Tap to show controls
+                  </div>
                 )}
               </div>
             )}
           </div>
 
-          {/* Slim Bottom Telemetry & Countdown Strip */}
-          <div className="px-6 py-2.5 bg-black/60 border-t border-white/10 flex flex-wrap items-center justify-between gap-4 text-xs font-mono">
+          {/* Slim Bottom Telemetry & Countdown Strip with Auto-Hide */}
+          <div 
+            className={`px-6 py-2 bg-black/70 backdrop-blur-md border-t border-white/10 flex flex-wrap items-center justify-between gap-4 text-xs font-mono z-30 transition-all duration-300 ${
+              showControls ? 'translate-y-0 opacity-100' : 'translate-y-full opacity-0 pointer-events-none'
+            }`}
+          >
             {/* Left: Section & Step Info */}
             <div className="flex items-center gap-4">
               <span className="text-slate-400">
@@ -290,29 +532,54 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
                 PERIODS: <strong className="text-white">{data?.period_count || 1}</strong>
               </span>
               <span className="text-slate-500 hidden md:inline">
-                STEP: {data?.step}
+                RENDER: <strong className="text-amber-300 uppercase">{data?.render_version || 'V2'}</strong> (ECC L)
               </span>
             </div>
 
-            {/* Center: Live 10s Token Countdown */}
+            {/* Center: High-Visibility Countdown Ring & Digital Ticker */}
             <div className="flex items-center gap-3">
-              <span className="flex items-center gap-1.5 text-slate-300 font-bold">
-                <Clock className="w-3.5 h-3.5 text-amber-400" />
-                <span>Refreshes in:</span>
+              {/* Circular SVG Ring Countdown */}
+              <div className="relative w-7 h-7 flex items-center justify-center">
+                <svg className="w-full h-full -rotate-90" viewBox="0 0 100 100">
+                  <circle
+                    cx="50"
+                    cy="50"
+                    r={circleRadius}
+                    className="stroke-white/20"
+                    strokeWidth="10"
+                    fill="transparent"
+                  />
+                  <circle
+                    cx="50"
+                    cy="50"
+                    r={circleRadius}
+                    className={`transition-all duration-1000 ease-linear ${
+                      secondsRemaining > 4 
+                        ? 'stroke-emerald-400' 
+                        : secondsRemaining > 2 
+                          ? 'stroke-amber-400' 
+                          : 'stroke-rose-400'
+                    }`}
+                    strokeWidth="10"
+                    strokeDasharray={circumference}
+                    strokeDashoffset={strokeDashoffset}
+                    strokeLinecap="round"
+                    fill="transparent"
+                  />
+                </svg>
+                <span className="absolute text-[10px] font-black font-mono">
+                  {secondsRemaining}
+                </span>
+              </div>
+
+              <span className="text-slate-300 font-bold hidden sm:inline">
+                Rotates in:
               </span>
               <span className={`text-base font-black ${
                 secondsRemaining > 4 ? 'text-emerald-400' : secondsRemaining > 2 ? 'text-amber-400' : 'text-rose-400'
               }`}>
                 {secondsRemaining}s
               </span>
-              <div className="w-24 sm:w-36 h-2 bg-white/10 rounded-full overflow-hidden border border-white/20">
-                <div 
-                  className={`h-full rounded-full transition-all duration-1000 ease-linear ${
-                    secondsRemaining > 4 ? 'bg-emerald-400' : secondsRemaining > 2 ? 'bg-amber-400' : 'bg-rose-500'
-                  }`}
-                  style={{ width: `${progressPercent}%` }}
-                />
-              </div>
             </div>
 
             {/* Right: Live Attendance Headcount */}
@@ -337,7 +604,10 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
                 <div className="flex items-center gap-2">
                   <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs font-mono font-bold flex items-center gap-1.5">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                    CLASSROOM PROJECTOR BROADCAST
+                    STANDARD BROADCAST VIEW
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-white/10 text-slate-300 text-xs font-mono">
+                    ECC L • QUIET ZONE ≥4
                   </span>
                 </div>
                 <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight mt-0.5">
@@ -354,10 +624,23 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
               <button
                 onClick={() => setIsFullScreenQrMode(true)}
                 className="p-2.5 sm:px-4 sm:py-2.5 bg-amber-500 hover:bg-amber-600 text-[#001e40] rounded-xl text-xs font-black transition flex items-center gap-2 shadow-lg"
-                title="Expand QR to 85% full-screen for long-distance hall scanning"
+                title="Expand QR to edge-to-edge presentation mode for long-distance hall scanning"
               >
                 <Tv className="w-4 h-4" />
-                <span>Full-Screen QR (Distance Mode)</span>
+                <span>Presentation Mode</span>
+              </button>
+
+              <button
+                onClick={toggleDarkRoom}
+                className={`p-2.5 sm:px-3 sm:py-2.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 border ${
+                  isDarkRoom 
+                    ? 'bg-purple-600/40 text-purple-200 border-purple-400' 
+                    : 'bg-white/10 hover:bg-white/20 text-white border-white/15'
+                }`}
+                title="Toggle Dark-Room High Contrast Inverted QR"
+              >
+                {isDarkRoom ? <Sun className="w-4 h-4 text-amber-300" /> : <Moon className="w-4 h-4 text-purple-300" />}
+                <span className="hidden sm:inline">{isDarkRoom ? 'Light Variant' : 'Dark Variant'}</span>
               </button>
 
               <button
@@ -366,7 +649,7 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
                 title={isFullscreen ? 'Exit Fullscreen' : 'Enter Fullscreen for Projector'}
               >
                 {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-                <span className="hidden sm:inline">{isFullscreen ? 'Exit Fullscreen' : 'Projector Fullscreen'}</span>
+                <span className="hidden sm:inline">{isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}</span>
               </button>
 
               <button
@@ -390,12 +673,12 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
 
           {/* Center Body: Standard QR View */}
           <div className="flex-1 flex flex-col items-center justify-center py-6">
-            {loading && !data ? (
+            {loading && !currentQr ? (
               <div className="flex flex-col items-center gap-4 text-center">
                 <RefreshCw className="w-12 h-12 text-amber-400 animate-spin" />
                 <p className="text-lg font-bold text-slate-300">Generating Rotating Projector Token...</p>
               </div>
-            ) : error && !data ? (
+            ) : error && !currentQr ? (
               <div className="max-w-md p-6 bg-rose-500/20 border border-rose-500/40 rounded-2xl text-center space-y-3">
                 <AlertCircle className="w-10 h-10 text-rose-400 mx-auto" />
                 <h3 className="text-lg font-bold text-white">Broadcast Error</h3>
@@ -418,10 +701,12 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
                   </p>
                 </div>
 
-                <div className="relative p-6 bg-white rounded-2xl shadow-2xl transition-all duration-300">
-                  {data?.qr_base64 && (
+                <div className={`relative p-6 rounded-2xl shadow-2xl transition-all duration-300 ${
+                  isDarkRoom ? 'bg-black border border-white/20' : 'bg-white'
+                }`}>
+                  {currentQr && (
                     <img
-                      src={data.qr_base64}
+                      src={currentQr}
                       alt="Projector Attendance QR"
                       className="w-72 h-72 sm:w-88 sm:h-88 md:w-96 md:h-96 object-contain"
                       style={{ imageRendering: 'pixelated' }}

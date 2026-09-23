@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { 
   Activity, RefreshCw, Download, AlertTriangle, CheckCircle2, 
   Smartphone, Clock, ShieldAlert, Zap, TrendingDown, Database,
-  Sliders, UserX, BarChart2, Info, Monitor, Timer
+  Sliders, UserX, BarChart2, Info, Monitor, Timer, X
 } from 'lucide-react';
 import { apiRequest } from '../../services/api';
 
@@ -15,6 +15,9 @@ export const ScannerHealthTab: React.FC = () => {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isRollupTriggering, setIsRollupTriggering] = useState(false);
   const [rollupMsg, setRollupMsg] = useState<string | null>(null);
+  const [showContractModal, setShowContractModal] = useState<boolean>(false);
+  const [contractData, setContractData] = useState<any>(null);
+  const [isLoadingContract, setIsLoadingContract] = useState<boolean>(false);
 
   const fetchHealthMetrics = async () => {
     setIsLoading(true);
@@ -64,6 +67,19 @@ export const ScannerHealthTab: React.FC = () => {
     if (displayType !== 'all') exportUrl += `&display_type=${displayType}`;
     if (token) exportUrl += `&token=${encodeURIComponent(token)}`;
     window.open(exportUrl, '_blank');
+  };
+
+  const fetchContractComparison = async () => {
+    setIsLoadingContract(true);
+    try {
+      const res: any = await apiRequest('/telemetry/contract-comparison');
+      setContractData(res);
+      setShowContractModal(true);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Failed to load contract comparison');
+    } finally {
+      setIsLoadingContract(false);
+    }
   };
 
   const headline = data?.headline;
@@ -179,6 +195,17 @@ export const ScannerHealthTab: React.FC = () => {
             >
               <Download className="w-3.5 h-3.5" />
               <span>CSV</span>
+            </button>
+
+            {/* Contract Verdict */}
+            <button
+              onClick={fetchContractComparison}
+              disabled={isLoadingContract}
+              className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold transition flex items-center gap-1.5 shadow-sm shadow-purple-500/30"
+              title="View Week 2 Baseline vs Week 10 Contract Verdict"
+            >
+              <Sliders className={`w-3.5 h-3.5 ${isLoadingContract ? 'animate-spin' : ''}`} />
+              <span>Contract Verdict</span>
             </button>
           </div>
         </div>
@@ -450,6 +477,46 @@ export const ScannerHealthTab: React.FC = () => {
         )}
       </div>
 
+      {/* Week 8: Degradation Ladder Usage Forensics (Rungs 1 to 5) */}
+      <div className="snist-card p-6 bg-white border border-slate-200 rounded-3xl shadow-sm space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+              <ShieldAlert className="w-4 h-4 text-indigo-600" />
+              Complete Degradation Ladder Usage (Rungs 1 → 5)
+            </h3>
+            <p className="text-xs text-slate-500">
+              Auditing student attendance path transitions through the 5-rung fault-tolerance degradation ladder.
+            </p>
+          </div>
+          <div className="flex items-center gap-2 bg-indigo-50 border border-indigo-200 rounded-xl px-3 py-1.5 text-xs text-indigo-900 font-semibold">
+            <span>Ladder Transitions: <strong>{data?.ladder_usage?.total_ladder_events || 0}</strong></span>
+          </div>
+        </div>
+
+        {/* 5 Rungs Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-3 pt-2">
+          {[
+            { rung: 1, title: 'Rung 1: WASM Primary', desc: 'Default ZXing-C++ Engine', count: data?.ladder_usage?.rung_1_primary_scan || 0, color: 'border-emerald-200 bg-emerald-50/50 text-emerald-900', badge: 'bg-emerald-600' },
+            { rung: 2, title: 'Rung 2: jsQR Fallback', desc: 'Auto Engine Switch', count: data?.ladder_usage?.rung_2_engine_fallback || 0, color: 'border-blue-200 bg-blue-50/50 text-blue-900', badge: 'bg-blue-600' },
+            { rung: 3, title: 'Rung 3: Soft Guidance', desc: 'Steady Frame / Zoom Guidance', count: data?.ladder_usage?.rung_3_retry_guidance || 0, color: 'border-amber-200 bg-amber-50/50 text-amber-900', badge: 'bg-amber-600' },
+            { rung: 4, title: 'Rung 4: Help / Roll Card', desc: 'One-Tap Roll Number Card', count: data?.ladder_usage?.rung_4_cant_scan_help || 0, color: 'border-purple-200 bg-purple-50/50 text-purple-900', badge: 'bg-purple-600' },
+            { rung: 5, title: 'Rung 5: Faculty Manual', desc: 'Audited (M) Roster Mark', count: data?.ladder_usage?.rung_5_faculty_manual || 0, color: 'border-rose-200 bg-rose-50/50 text-rose-900', badge: 'bg-rose-600' },
+          ].map((item) => (
+            <div key={item.rung} className={`p-3.5 rounded-2xl border ${item.color} space-y-1.5 relative overflow-hidden`}>
+              <div className="flex items-center justify-between text-xs">
+                <span className={`px-2 py-0.5 rounded text-[10px] text-white font-bold ${item.badge}`}>
+                  Rung {item.rung}
+                </span>
+                <span className="font-extrabold text-lg font-mono">{item.count}</span>
+              </div>
+              <div className="font-bold text-xs pt-1">{item.title}</div>
+              <div className="text-[11px] opacity-75 leading-tight">{item.desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
       {/* Two Column Section: Failure Matrix & Manual Overrides */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Failure Breakdown by Device Tier */}
@@ -583,6 +650,122 @@ export const ScannerHealthTab: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Contract Verdict Comparison Modal */}
+      {showContractModal && contractData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/70 backdrop-blur-sm animate-in fade-in duration-200 overflow-y-auto">
+          <div className="bg-white border border-slate-200 rounded-3xl shadow-2xl max-w-4xl w-full p-6 space-y-6 my-8 max-h-[90vh] overflow-y-auto">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-purple-50 text-purple-600 border border-purple-200">
+                  <Sliders className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-slate-900">
+                    Week 2 Baseline vs Week 10 Contract Verdict
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Empirical performance scorecard measured against frozen institutional contract ({contractData.sample_sizes?.final_total_events || 0} real telemetry events).
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowContractModal(false)}
+                className="p-2 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Scorecard Table */}
+            <div className="space-y-2">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Primary Contract Metrics
+              </h4>
+              <div className="overflow-x-auto border border-slate-200 rounded-2xl">
+                <table className="w-full text-xs text-left">
+                  <thead className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
+                    <tr>
+                      <th className="py-2.5 px-3">Metric</th>
+                      <th className="py-2.5 px-3">Baseline (W2)</th>
+                      <th className="py-2.5 px-3">Final (W10)</th>
+                      <th className="py-2.5 px-3">Target</th>
+                      <th className="py-2.5 px-3">Delta</th>
+                      <th className="py-2.5 px-3">Sample (n)</th>
+                      <th className="py-2.5 px-3 text-center">Verdict</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium">
+                    {contractData.contract_table?.map((row: any, idx: number) => {
+                      const isPass = row.verdict === 'PASS';
+                      return (
+                        <tr key={idx} className="hover:bg-slate-50/50">
+                          <td className="py-2.5 px-3 font-semibold text-slate-900">{row.metric}</td>
+                          <td className="py-2.5 px-3 text-slate-600 font-mono">{row.baseline_w2}</td>
+                          <td className="py-2.5 px-3 font-bold font-mono text-indigo-700">{row.final_w10}</td>
+                          <td className="py-2.5 px-3 text-slate-500 font-mono">{row.target}</td>
+                          <td className="py-2.5 px-3 font-bold text-emerald-600 font-mono">{row.delta}</td>
+                          <td className="py-2.5 px-3 text-slate-400 font-mono">{row.n}</td>
+                          <td className="py-2.5 px-3 text-center">
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-black uppercase ${
+                              isPass 
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-300' 
+                                : 'bg-amber-100 text-amber-800 border border-amber-300'
+                            }`}>
+                              {row.verdict}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Per-Stage Funnel Waterfall */}
+            <div className="space-y-2">
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Funnel Conversion Waterfall: W2 Baseline vs W10 Final
+              </h4>
+              <div className="overflow-x-auto border border-slate-200 rounded-2xl">
+                <table className="w-full text-xs text-left">
+                  <thead className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
+                    <tr>
+                      <th className="py-2.5 px-3">Funnel Stage</th>
+                      <th className="py-2.5 px-3">Baseline Completion %</th>
+                      <th className="py-2.5 px-3">Final Completion %</th>
+                      <th className="py-2.5 px-3 text-right">Conversion Delta</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium">
+                    {contractData.funnel_waterfall?.map((step: any, idx: number) => (
+                      <tr key={idx} className="hover:bg-slate-50/50">
+                        <td className="py-2 px-3 font-semibold text-slate-800">{step.stage}</td>
+                        <td className="py-2 px-3 font-mono text-slate-500">{step.baseline_pct.toFixed(1)}%</td>
+                        <td className="py-2 px-3 font-mono font-bold text-slate-900">{step.final_pct.toFixed(1)}%</td>
+                        <td className="py-2 px-3 font-mono font-bold text-right text-emerald-600">{step.delta}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* Footer / Close */}
+            <div className="flex justify-end pt-2 border-t border-slate-100">
+              <button
+                onClick={() => setShowContractModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold transition"
+              >
+                Close Verdict
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+

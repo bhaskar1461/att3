@@ -2,32 +2,42 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import jsQR from 'jsqr';
 import { 
   X, Camera, CheckCircle, AlertTriangle, RefreshCw,
-  Clock, WifiOff, Flashlight, ZoomIn, ZoomOut, Sliders
+  Clock, WifiOff, Flashlight, User, KeyRound, ShieldCheck
 } from 'lucide-react';
 import { apiRequest } from '../services/api';
-import { getOrCreateDeviceCredentials } from '../services/deviceCredential';
 import { PwaInstallGuard } from './PwaInstallGuard';
 import { scannerTelemetry } from '../services/scannerTelemetry';
-import { FailureErrorType, DisplayType, TokenFormat } from '../types/telemetry';
+import { FailureErrorType, DisplayType } from '../types/telemetry';
+import { decodeFrame, getActiveScannerEngine, syncScannerEngineFromServer, ScannerEngine } from '../services/qrEngine';
+import { initWasmScanner } from '../services/wasmScanner';
+import { offlineSubmissionQueue } from '../services/offlineSubmissionQueue';
+import { BINDING_V2_ENABLED, signChallenge, getBindingState, generateKeyPair } from '../services/binding';
+import { PostAttendanceSelfieModal } from './PostAttendanceSelfieModal';
 
 interface StudentClassScannerModalProps {
   onClose: () => void;
-  onScanComplete: () => void;
+  onScanComplete: (result?: any) => void;
   displayType?: DisplayType;
+  studentRoll?: string;
 }
 
 export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> = ({
   onClose,
   onScanComplete,
-  displayType = 'projector'
+  displayType = 'projector',
+  studentRoll
 }) => {
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [isOfflineQueued, setIsOfflineQueued] = useState<boolean>(false);
+  const [queuedSessionInfo, setQueuedSessionInfo] = useState<any>(null);
+  const [pendingQueueCount, setPendingQueueCount] = useState<number>(0);
+  const [cachedSessionHint, setCachedSessionHint] = useState<any>(null);
+  const [isRetryingQueue, setIsRetryingQueue] = useState<boolean>(false);
   const [successResult, setSuccessResult] = useState<any>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [isOffline, setIsOffline] = useState<boolean>(!navigator.onLine);
-  const [qrExpiredCountdown, setQrExpiredCountdown] = useState<number | null>(null);
   const [facingMode, setFacingMode] = useState<'environment' | 'user'>('environment');
 
   // Dynamic Camera Capabilities
@@ -38,12 +48,235 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
   const [hasTorchCapability, setHasTorchCapability] = useState<boolean>(false);
   const [torchActive, setTorchActive] = useState<boolean>(false);
 
-  // Dynamic Visual Guidance Text (Honesty Rule)
-  const [guideText, setGuideText] = useState<string>('Point your camera at the attendance QR');
-  const [permissionState, setPermissionState] = useState<'prompt' | 'granted' | 'denied' | 'unknown'>('unknown');
-  const [isSteadying, setIsSteadying] = useState<boolean>(false);
-  const [activeLadderRung, setActiveLadderRung] = useState<number>(1);
+  // Dynamic Visual Guidance Text
+  const [guideText, setGuideText] = useState<string>('Align the QR inside the frame');
+  const [permissionState, setPermissionState] = useState<'prompt' | 'granted' | 'denied' | 'insecure_origin' | 'unknown'>('unknown');
+
+  // Authorized debug mode flag: only active if explicitly requested via ?debug=1 or localStorage
+  const isDebugMode = typeof window !== 'undefined' && (
+    new URLSearchParams(window.location.search).get('debug') === '1' ||
+    localStorage.getItem('scanner_debug') === '1'
+  );
+  const [diagHud, setDiagHud] = useState<{
+    cam: string; eng: string; qr: string; url: string; submit: string;
+  }>({ cam: 'INIT', eng: '-', qr: 'SEARCHING', url: '-', submit: 'IDLE' });
+  const diagHudRef = useRef<{ cam: string; eng: string; qr: string; url: string; submit: string }>({ cam: 'INIT', eng: '-', qr: 'SEARCHING', url: '-', submit: 'IDLE' });
+
+  // Lifecycle & Permission Refs
+  const isMountedRef = useRef<boolean>(true);
+  const permStatusRef = useRef<PermissionStatus | null>(null);
+
+  // 3. Scanner: Track last expired and failed payloads to prevent rapid duplicate frame submissions
+  const lastExpiredPayloadRef = useRef<string | null>(null);
+  const lastFailedPayloadRef = useRef<string | null>(null);
+  const rateLimitCooldownTimerRef = useRef<any>(null);
+  const [rateLimitSecondsLeft, setRateLimitSecondsLeft] = useState<number>(0);
+  const [scanErrorCode, setScanErrorCode] = useState<string | null>(null);
+
+  // Pre-cached binding proof — computed once at mount, not per-scan
+  const bindingProofRef = useRef<{
+    challenge_token?: string;
+    binding_signature?: string;
+    device_id?: string;
+  } | null>(null);
+  const [isInlineEnrolling, setIsInlineEnrolling] = useState<boolean>(false);
+  const [rebindOtpRequired, setRebindOtpRequired] = useState<boolean>(false);
+  const [rebindMaskedEmail, setRebindMaskedEmail] = useState<string>('');
+  const [rebindOtpValue, setRebindOtpValue] = useState<string>('');
+  const [cachedEnrollPayload, setCachedEnrollPayload] = useState<any>(null);
+  const [isSubmittingRebindOtp, setIsSubmittingRebindOtp] = useState<boolean>(false);
+  const [rebindOtpError, setRebindOtpError] = useState<string | null>(null);
   const hasSoftRestartedRef = useRef<boolean>(false);
+
+  // Stage 5 & Stage 6: GPS Geofence, Controlled Fallback & Post-Attendance Selfie
+  const [showSelfieModal, setShowSelfieModal] = useState<boolean>(false);
+  const [selfieAttendanceId, setSelfieAttendanceId] = useState<number | null>(null);
+  const [showFallbackInput, setShowFallbackInput] = useState<boolean>(false);
+  const [fallbackCode, setFallbackCode] = useState<string>('');
+  const [fallbackSubmitting, setFallbackSubmitting] = useState<boolean>(false);
+  const [fallbackError, setFallbackError] = useState<string | null>(null);
+  const studentGeoRef = useRef<{ latitude: number; longitude: number; accuracy_m: number } | null>(null);
+
+  const getStudentGeolocation = useCallback((): Promise<{ latitude?: number; longitude?: number; accuracy_m?: number }> => {
+    return new Promise((resolve) => {
+      if (typeof window === 'undefined' || !navigator.geolocation) {
+        return resolve({});
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const coords = {
+            latitude: pos.coords.latitude,
+            longitude: pos.coords.longitude,
+            accuracy_m: pos.coords.accuracy
+          };
+          studentGeoRef.current = coords;
+          resolve(coords);
+        },
+        (err) => {
+          console.warn('[Student GPS] Location acquisition warning:', err.message);
+          resolve({});
+        },
+        { enableHighAccuracy: true, timeout: 6000, maximumAge: 10000 }
+      );
+    });
+  }, []);
+
+  useEffect(() => {
+    getStudentGeolocation();
+  }, [getStudentGeolocation]);
+
+  const handleFallbackSubmit = async () => {
+    const code = fallbackCode.trim();
+    if (!code) {
+      setFallbackError('Please enter a valid session token or short code.');
+      return;
+    }
+    setFallbackSubmitting(true);
+    setFallbackError(null);
+    try {
+      const geo = studentGeoRef.current || await getStudentGeolocation();
+      let bindingChallengeToken: string | undefined = undefined;
+      let bindingSignature: string | undefined = undefined;
+      let bindingDeviceId: string | undefined = undefined;
+      if (BINDING_V2_ENABLED) {
+        try {
+          const bindingState = await getBindingState(studentRoll);
+          if (bindingState === 'enrolled') {
+            const challengeRes: any = await apiRequest('/binding/challenge', {
+              method: 'POST',
+              body: JSON.stringify({})
+            });
+            if (challengeRes?.challenge_token) {
+              bindingChallengeToken = challengeRes.challenge_token;
+              const sigResult = await signChallenge(bindingChallengeToken!, studentRoll);
+              bindingSignature = sigResult.signature_b64;
+              bindingDeviceId = sigResult.device_id;
+            }
+          }
+        } catch (bindErr: any) {
+          console.warn('[Binding V2 Fallback] Challenge/sign pipeline error:', bindErr?.message || bindErr);
+        }
+      }
+
+      const res: any = await apiRequest('/student/scan-session', {
+        method: 'POST',
+        body: JSON.stringify({
+          short_code: code.length <= 16 ? code : undefined,
+          session_token: code.length > 16 ? code : undefined,
+          scan_mode: 'QR_CAMERA_FALLBACK',
+          ...(geo?.latitude != null ? { latitude: geo.latitude, longitude: geo.longitude, accuracy_m: geo.accuracy_m } : {}),
+          ...(bindingChallengeToken ? { challenge_token: bindingChallengeToken } : {}),
+          ...(bindingSignature ? { binding_signature: bindingSignature, device_signature: bindingSignature } : {}),
+          ...(bindingDeviceId ? { device_id: bindingDeviceId } : {})
+        })
+      });
+
+      triggerFeedback(true);
+      setSuccessResult(res);
+      if (res.attendance_id) {
+        setSelfieAttendanceId(res.attendance_id);
+      }
+      setShowFallbackInput(false);
+      setShowHelpSheet(false);
+      stopCamera();
+    } catch (err: any) {
+      setFallbackError(err.message || 'Controlled fallback verification failed.');
+    } finally {
+      setFallbackSubmitting(false);
+    }
+  };
+
+  const handleInlineEnroll = async () => {
+    setIsInlineEnrolling(true);
+    setRebindOtpError(null);
+    try {
+      const payload = await generateKeyPair(studentRoll);
+      setCachedEnrollPayload(payload);
+      const res: any = await apiRequest('/binding/enroll', {
+        method: 'POST',
+        body: JSON.stringify({
+          public_key_spki_b64: payload.public_key_spki_b64,
+          key_id: payload.key_id
+        })
+      });
+
+      if (res?.status === 'REBIND_REQUIRED' && res?.otp_required) {
+        setRebindOtpRequired(true);
+        setRebindMaskedEmail(res.email_masked || 'your registered college email');
+        setGuideText('Verification code sent to your email to link this device.');
+        return;
+      }
+
+      setScanError(null);
+      setRebindOtpRequired(false);
+      isScanningLockedRef.current = false;
+      setIsSubmitting(false);
+      setGuideText('Device enrolled securely! Rescan the attendance QR now.');
+    } catch (err: any) {
+      setScanError(err.message || 'Inline enrollment failed. Please try again.');
+    } finally {
+      setIsInlineEnrolling(false);
+    }
+  };
+
+  const handleConfirmRebindOtp = async () => {
+    if (!rebindOtpValue || rebindOtpValue.trim().length !== 6) {
+      setRebindOtpError('Please enter the 6-digit verification code.');
+      return;
+    }
+    if (!cachedEnrollPayload) {
+      setRebindOtpError('Enrollment state missing. Please click Enroll again.');
+      setRebindOtpRequired(false);
+      return;
+    }
+
+    setIsSubmittingRebindOtp(true);
+    setRebindOtpError(null);
+    try {
+      const res: any = await apiRequest('/binding/enroll', {
+        method: 'POST',
+        body: JSON.stringify({
+          public_key_spki_b64: cachedEnrollPayload.public_key_spki_b64,
+          key_id: cachedEnrollPayload.key_id,
+          rebind_otp: rebindOtpValue.trim()
+        })
+      });
+
+      if (res?.status === 'DEVICE_ENROLLED') {
+        setRebindOtpRequired(false);
+        setScanError(null);
+        setRebindOtpValue('');
+        isScanningLockedRef.current = false;
+        setIsSubmitting(false);
+        setGuideText('New device verified & linked! Rescan the attendance QR now.');
+      } else {
+        throw new Error(res?.detail?.message || res?.message || 'Rebind verification failed.');
+      }
+    } catch (err: any) {
+      setRebindOtpError(err.message || 'Invalid verification code. Please try again.');
+    } finally {
+      setIsSubmittingRebindOtp(false);
+    }
+  };
+
+  const handleResendRebindOtp = async () => {
+    try {
+      setRebindOtpError(null);
+      await apiRequest('/binding/request-rebind-otp', { method: 'POST' });
+      setGuideText('New verification code sent to your email.');
+    } catch (err: any) {
+      setRebindOtpError(err.message || 'Failed to resend code. Please try again.');
+    }
+  };
+
+  // Week 8: Degradation Ladder & Acquisition Hardening States
+  const [showHelpSheet, setShowHelpSheet] = useState<boolean>(false);
+  const [showRollCard, setShowRollCard] = useState<boolean>(false);
+  const [studentInfo, setStudentInfo] = useState<{ roll_number: string; name: string; section: string }>({ roll_number: '', name: '', section: '' });
+  const [cameraStarting, setCameraStarting] = useState<boolean>(false);
+  const [recoveryBrowser, setRecoveryBrowser] = useState<'chrome' | 'ios'>('chrome');
+  const [isCameraInUse, setIsCameraInUse] = useState<boolean>(false);
+  const [secondsScanning, setSecondsScanning] = useState<number>(0);
 
   // Strict Single-Instance Refs (No Memory Leaks / No Zombie Loops)
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -53,6 +286,21 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
   const isScanningLockedRef = useRef<boolean>(false);
   const barcodeDetectorRef = useRef<any>(null);
   const wakeLockRef = useRef<any>(null);
+
+  // Frame Budget & Back-Pressure Instrumentation (Week 6)
+  const isDecodingRef = useRef<boolean>(false);
+  const framesCapturedRef = useRef<number>(0);
+  const framesDecodedRef = useRef<number>(0);
+  const framesSkippedRef = useRef<number>(0);
+  const lastDecodeMsRef = useRef<number>(0);
+  const totalDecodeMsRef = useRef<number>(0);
+  const activeEngineRef = useRef<ScannerEngine>(getActiveScannerEngine());
+
+  // Dynamic Resolution Ladder & Multi-QR Tracking (Week 7)
+  const consecutiveMissesRef = useRef<number>(0);
+  const frameAttemptCounterRef = useRef<number>(0);
+  const lastDecodeScaleRef = useRef<number>(640);
+  const lastTapTimeRef = useRef<number>(0);
 
   // Decode Throttling & Auto-Zoom Timing Refs (~8-10 fps execution)
   const lastDecodeTimeRef = useRef<number>(0);
@@ -75,39 +323,105 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
   const decodeWatchdogTimerRef = useRef<any>(null);
   const sessionIdRef = useRef<string>('');
 
-  // Funnel Stage: scan_page_opened
+  // Funnel Stage: scan_page_opened & timer cleanup
   useEffect(() => {
-    scannerTelemetry.recordStage('scan_page_opened', undefined, undefined, undefined, displayType);
-  }, []);
+    // Eagerly pre-warm WASM runtime in parallel while camera initializes
+    initWasmScanner().catch(() => {});
 
-  // Online/Offline network state listener
-  useEffect(() => {
-    const handleOnline = () => setIsOffline(false);
-    const handleOffline = () => setIsOffline(true);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
+    syncScannerEngineFromServer()
+      .then((eng) => {
+        activeEngineRef.current = eng;
+      })
+      .catch(() => {});
+    scannerTelemetry.recordStage('scan_page_opened', undefined, undefined, undefined, displayType, undefined, undefined, activeEngineRef.current);
     return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
+      if (rateLimitCooldownTimerRef.current) {
+        clearInterval(rateLimitCooldownTimerRef.current);
+      }
     };
   }, []);
 
-  // Live QR expiry countdown ticker
+  // Pre-cache Binding V2 proof at mount (not per-scan)
+  // The challenge/sign pipeline takes 100-500ms network + 10-30ms crypto.
+  // Running it once at mount removes this latency from every scan.
   useEffect(() => {
-    if (qrExpiredCountdown === null || qrExpiredCountdown <= 0) return;
-    const timer = setInterval(() => {
-      setQrExpiredCountdown((prev) => {
-        if (prev === null || prev <= 1) {
-          clearInterval(timer);
-          isScanningLockedRef.current = false;
-          setIsSubmitting(false);
-          return null;
+    if (!BINDING_V2_ENABLED) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const state = await getBindingState(studentRoll);
+        if (cancelled || state !== 'enrolled') return;
+        const challengeRes: any = await apiRequest('/binding/challenge', {
+          method: 'POST',
+          body: JSON.stringify({})
+        });
+        if (cancelled || !challengeRes?.challenge_token) return;
+        const sigResult = await signChallenge(challengeRes.challenge_token, studentRoll);
+        bindingProofRef.current = {
+          challenge_token: challengeRes.challenge_token,
+          binding_signature: sigResult.signature_b64,
+          device_id: sigResult.device_id
+        };
+        console.log('[QR] Binding proof pre-cached at mount (challenge signed)');
+      } catch (e: any) {
+        console.warn('[QR] Binding pre-cache failed (non-fatal):', e?.message || e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [studentRoll]);
+
+  // Week 8: Load student profile for Rung 4 / 5 manual mark handoff
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem('user');
+      if (stored) {
+        const u = JSON.parse(stored);
+        setStudentInfo({
+          roll_number: u.roll_number || u.username || 'STUDENT',
+          name: u.name || 'Student',
+          section: u.section || u.department || ''
+        });
+      }
+    } catch {}
+
+    apiRequest<any>('/student/profile')
+      .then(prof => {
+        if (prof) {
+          setStudentInfo({
+            roll_number: prof.roll_number || prof.username || 'STUDENT',
+            name: prof.name || 'Student',
+            section: prof.section_name || prof.department_name || ''
+          });
         }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [qrExpiredCountdown]);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Online/Offline network state listener + Offline queue subscription
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOffline(false);
+      offlineSubmissionQueue.flush();
+    };
+    const handleOffline = () => setIsOffline(true);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    const unsubscribe = offlineSubmissionQueue.subscribe((cnt) => {
+      setPendingQueueCount(cnt);
+    });
+
+    const cached = offlineSubmissionQueue.getCachedLastSession();
+    if (cached) {
+      setCachedSessionHint(cached);
+    }
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      unsubscribe();
+    };
+  }, []);
 
   // Sound and Haptic feedback: 2 short pulses for success, 3 distinct pulses for error
   const triggerFeedback = (isSuccess: boolean) => {
@@ -128,133 +442,406 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
     } catch {}
   };
 
-  const handleScanSuccess = async (decodedText: string) => {
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SAFE QR DATA PARSER — Treats QR purely as attendance data payload.
+  // NEVER performs browser navigation, window.open, or location redirects.
+  // ═══════════════════════════════════════════════════════════════════════════
+  interface ParsedQrPayload {
+    token: string;
+    sourceType: 'launch_url' | 'launch_path' | 'short_code' | 'legacy' | 'raw_token';
+  }
+
+  const parseAttendanceQrPayload = (decodedText: string): ParsedQrPayload | null => {
+    const trimmed = decodedText.trim();
+    if (!trimmed || trimmed.length < 6) return null;
+
+    // 1. Full HTTPS / HTTP URL (e.g. https://ather-os.de5.net/a/<token>)
+    if (trimmed.startsWith('https://') || trimmed.startsWith('http://')) {
+      try {
+        const url = new URL(trimmed);
+        // Protocol guard: only accept https: (or http: in local dev/testing)
+        if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+          return null;
+        }
+
+        // Check for /a/<token> launch URL pattern
+        if (url.pathname.includes('/a/')) {
+          const match = url.pathname.match(/\/a\/([A-Za-z0-9_-]{10,})/);
+          if (match && match[1]) {
+            return { token: match[1], sourceType: 'launch_url' };
+          }
+        }
+
+        // Check for query parameters (?token=... or ?session_token=...)
+        const tokenParam = url.searchParams.get('token') || url.searchParams.get('session_token');
+        if (tokenParam && tokenParam.length >= 10) {
+          return { token: tokenParam, sourceType: 'launch_url' };
+        }
+
+        // Check for ?s=... Crockford short code
+        const sParam = url.searchParams.get('s');
+        const vParam = url.searchParams.get('v');
+        if (sParam) {
+          return {
+            token: vParam ? `?s=${sParam}&v=${vParam}` : sParam,
+            sourceType: 'short_code'
+          };
+        }
+
+        return null;
+      } catch {
+        return null;
+      }
+    }
+
+    // 2. Relative launch path: /a/<token>
+    if (trimmed.startsWith('/a/')) {
+      const rawToken = trimmed.slice('/a/'.length).split(/[?#]/)[0];
+      if (rawToken.length >= 10) {
+        return { token: rawToken, sourceType: 'launch_path' };
+      }
+    }
+
+    // 3. Short code query string (?s=... or s=...)
+    if (trimmed.includes('s=') && (trimmed.includes('v=') || trimmed.length <= 30)) {
+      return { token: trimmed, sourceType: 'short_code' };
+    }
+
+    // 4. Legacy format (S|... or SNIST-SES|...)
+    if (trimmed.startsWith('S|') || trimmed.startsWith('SNIST-SES|')) {
+      return { token: trimmed, sourceType: 'legacy' };
+    }
+
+    // 5. Raw token string (Base64 launch token or Crockford code)
+    if (/^[A-Za-z0-9_-]{6,}$/.test(trimmed)) {
+      return {
+        token: trimmed,
+        sourceType: trimmed.length >= 30 ? 'raw_token' : 'short_code'
+      };
+    }
+
+    return null;
+  };
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // THIN CLIENT handleScanSuccess — Detect → Extract Token → Submit → Show Result
+  //
+  // ALL security validation lives on the server (HMAC, expiry, binding, GPS).
+  // The client only:
+  //   1. Parses the QR string as data (NEVER navigates browser)
+  //   2. Concurrency-locks against duplicate submissions
+  //   3. Immediately POSTs the extracted token to the attendance API
+  //   4. Shows the result in-modal
+  // ═══════════════════════════════════════════════════════════════════════════
+  const handleScanSuccess = async (decodedText: string, engineUsed?: ScannerEngine) => {
+    // Concurrency guard: Ignore duplicate frames if already submitting or locked
     if (isScanningLockedRef.current || isSubmitting) return;
 
     const trimmed = decodedText.trim();
-    // Dual-format detection: Legacy (SNIST-SES| or S|) vs Short (?s=...&v=...)
-    const isLegacy = trimmed.startsWith('SNIST-SES|') || trimmed.startsWith('S|') || trimmed.includes('token=SNIST-SES');
-    const isShort = (trimmed.includes('s=') && trimmed.includes('v=')) ||
-                    /^[0-9A-HJ-NP-Za-km-z]{6,12}[:|][0-9]+$/i.test(trimmed) ||
-                    /^\?s=[0-9A-HJ-NP-Za-km-z]{6,12}&v=[0-9]+$/i.test(trimmed);
+    if (!trimmed || trimmed.length < 6) return;
 
-    if (!isLegacy && !isShort) {
+    // Parse payload safely as DATA — NEVER navigate browser to the QR text
+    const parsed = parseAttendanceQrPayload(trimmed);
+    if (!parsed || !parsed.token) {
+      console.warn('[QR] Unrecognized QR structure:', trimmed.slice(0, 40));
+      setScanError('QR not recognized. Please scan the current classroom QR.');
+      setGuideText('QR not recognized — scan classroom QR');
+      triggerFeedback(false);
       return;
     }
 
-    const detectedFormat: TokenFormat = isShort ? 'short' : 'legacy';
+    const payloadToken = parsed.token;
 
+    // 3. Scanner: Never resubmit a payload that just failed or expired until the projector QR refreshes
+    if (
+      payloadToken === lastExpiredPayloadRef.current || trimmed === lastExpiredPayloadRef.current ||
+      payloadToken === lastFailedPayloadRef.current || trimmed === lastFailedPayloadRef.current
+    ) {
+      setGuideText('Waiting for classroom QR to refresh...');
+      diagHudRef.current = { ...diagHudRef.current, qr: 'FOUND', submit: 'WAIT_REFRESH' };
+      if (isDebugMode) setDiagHud({ ...diagHudRef.current });
+      return;
+    }
+
+    // When a fresh payload is detected, clear the expired and failed trackers
+    lastExpiredPayloadRef.current = null;
+    lastFailedPayloadRef.current = null;
+
+    // Cancel decode watchdog
     if (decodeWatchdogTimerRef.current) {
       clearTimeout(decodeWatchdogTimerRef.current);
       decodeWatchdogTimerRef.current = null;
     }
 
-    // Extract session preview from token
-    let sessionPreview: string | undefined = undefined;
-    if (isLegacy) {
-      const parts = trimmed.split('|');
-      sessionPreview = parts.length > 1 ? `SES_${parts[1]}` : undefined;
-    } else {
-      const sMatch = trimmed.match(/[?&]s=([0-9A-Za-z]+)/i) || trimmed.match(/^([0-9A-Za-z]+)[:|]/);
-      sessionPreview = sMatch ? `CODE_${sMatch[1]}` : undefined;
-    }
-    sessionIdRef.current = sessionPreview || '';
-
-    frameDecodedTimeRef.current = performance.now();
-    const msSinceFirstFrame = firstFrameTimeRef.current > 0 ? Math.round(frameDecodedTimeRef.current - firstFrameTimeRef.current) : 0;
-    scannerTelemetry.recordStage('frame_decoded', msSinceFirstFrame, sessionPreview, { decode_duration_ms: msSinceFirstFrame, display_type: displayType, token_format: detectedFormat }, displayType, msSinceFirstFrame, detectedFormat);
-    scannerTelemetry.recordEvent({
-      event_type: 'decode_duration_histogram',
-      stage: 'frame_decoded',
-      duration_ms: msSinceFirstFrame,
-      decode_duration_ms: msSinceFirstFrame,
-      display_type: displayType,
-      token_format: detectedFormat,
-      session_id: sessionPreview
-    });
-
-    // Honest offline check: classroom QR rotation requires instantaneous server verification
-    if (!navigator.onLine) {
-      triggerFeedback(false);
-      setIsOffline(true);
-      setScanError(null);
-      scannerTelemetry.recordFailure('network_error', 'frame_decoded', sessionPreview, { reason: 'offline' }, displayType, detectedFormat);
-      return;
-    }
-
+    // Lock scanner atomically before making network request
     isScanningLockedRef.current = true;
     setIsSubmitting(true);
     setScanError(null);
-    setQrExpiredCountdown(null);
+    setScanErrorCode(null);
+    console.log(`[QR] Token extracted (${payloadToken.length}ch, type=${parsed.sourceType}) — submitting directly to attendance API`);
+    diagHudRef.current = { ...diagHudRef.current, qr: 'FOUND', submit: 'SENDING…' };
+    if (isDebugMode) setDiagHud({ ...diagHudRef.current });
 
-    tokenSubmitTimeRef.current = performance.now();
-    const msSinceDecode = tokenSubmitTimeRef.current - frameDecodedTimeRef.current;
-    scannerTelemetry.recordStage('token_submitted', msSinceDecode, sessionPreview, { token_format: detectedFormat }, displayType, undefined, detectedFormat);
+    // Offline fast-path: queue to IndexedDB without any network call
+    if (!navigator.onLine) {
+      try {
+        await offlineSubmissionQueue.enqueue({
+          client_id: `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+          session_token: payloadToken
+        });
+        triggerFeedback(true);
+        stopCamera();
+        setIsOfflineQueued(true);
+        setQueuedSessionInfo({
+          token: payloadToken,
+          sessionPreview: 'Class Session',
+          queuedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        });
+        diagHudRef.current = { ...diagHudRef.current, submit: 'QUEUED OFFLINE' };
+        if (isDebugMode) setDiagHud({ ...diagHudRef.current });
+      } catch {
+        isScanningLockedRef.current = false;
+        setIsSubmitting(false);
+      }
+      return;
+    }
 
+    let isSuccess = false;
     try {
-      const deviceCred = getOrCreateDeviceCredentials();
-      const res: any = await apiRequest('/student/scan-session', {
-        method: 'POST',
-        body: JSON.stringify({
-          session_token: trimmed,
-          token_format: detectedFormat,
-          device_uuid: deviceCred?.device_public_id || ''
-        })
-      });
+      // Use pre-cached GPS (acquired at mount, never blocks scan)
+      const geo = studentGeoRef.current;
+      // Use pre-cached binding proof (signed at mount, never blocks scan)
+      const binding = bindingProofRef.current;
 
-      const serverMs = performance.now() - tokenSubmitTimeRef.current;
-      scannerTelemetry.recordStage('server_response', serverMs, sessionPreview, { status: res?.status || 'SUCCESS', token_format: detectedFormat }, displayType, undefined, detectedFormat);
-      const totalFromOpen = Date.now() - pageOpenTimeRef.current;
-      scannerTelemetry.recordStage('attendance_confirmed', totalFromOpen, sessionPreview, { token_format: detectedFormat }, displayType, undefined, detectedFormat);
+      // 8-second submission watchdog: prevents the scanner from freezing
+      // if the server or network hangs. On timeout, we recover to scanning state.
+      const abortCtrl = new AbortController();
+      const timeoutId = setTimeout(() => abortCtrl.abort(), 8000);
+
+      let res: any;
+      try {
+        res = await apiRequest('/student/scan-session', {
+          method: 'POST',
+          signal: abortCtrl.signal,
+          body: JSON.stringify({
+            session_token: payloadToken,
+            scan_mode: 'QR_CAMERA',
+            ...(geo?.latitude != null ? {
+              latitude: geo.latitude,
+              longitude: geo.longitude,
+              accuracy_m: geo.accuracy_m
+            } : {}),
+            ...(binding?.challenge_token ? { challenge_token: binding.challenge_token } : {}),
+            ...(binding?.binding_signature ? {
+              binding_signature: binding.binding_signature,
+              device_signature: binding.binding_signature
+            } : {}),
+            ...(binding?.device_id ? { device_id: binding.device_id } : {})
+          })
+        });
+      } catch (abortErr: any) {
+        if (abortErr?.name === 'AbortError' || abortCtrl.signal.aborted) {
+          console.warn('[QR] Submission timed out after 8s — returning to scanning');
+          isScanningLockedRef.current = false;
+          setIsSubmitting(false);
+          setScanError('Submission timed out. Please try scanning again.');
+          setGuideText('Timed out — scan again');
+          diagHudRef.current = { ...diagHudRef.current, submit: 'TIMEOUT 8s' };
+          if (isDebugMode) setDiagHud({ ...diagHudRef.current });
+          if (mediaStreamRef.current && isMountedRef.current) {
+            animationFrameIdRef.current = requestAnimationFrame(processFrame);
+          }
+          return;
+        }
+        throw abortErr; // Re-throw non-abort errors to the outer catch
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      // ── Success! ──
+      isSuccess = true;
+      console.log('[QR] Server response: SUCCESS —', res?.status || 'MARKED');
+      diagHudRef.current = { ...diagHudRef.current, qr: 'FOUND', submit: 'SUCCESS ✓' };
+      if (isDebugMode) setDiagHud({ ...diagHudRef.current });
+
+      // Cache session hint for offline resilience (fire-and-forget)
+      try {
+        offlineSubmissionQueue.saveCachedLastSession({
+          subject_name: res.subject_name || 'Class Session',
+          session_id: res.session_id,
+          session_date: res.session_date || new Date().toISOString().split('T')[0],
+          period_count: res.period_count || 1
+        });
+      } catch {}
+
+      // Fire-and-forget telemetry (never blocks UI)
+      try {
+        const totalFromOpen = Date.now() - pageOpenTimeRef.current;
+        scannerTelemetry.recordStage('attendance_confirmed', totalFromOpen, res.session_id);
+      } catch {}
 
       triggerFeedback(true);
       setSuccessResult(res);
-
-      // Stop camera once successfully processed
+      if (res.attendance_id) setSelfieAttendanceId(res.attendance_id);
       stopCamera();
+
     } catch (err: any) {
-      triggerFeedback(false);
-      const serverMs = tokenSubmitTimeRef.current > 0 ? (performance.now() - tokenSubmitTimeRef.current) : 0;
-      const rawMsg = err.message || '';
+      // Record failed token immediately so the camera won't immediately refire against this same QR frame
+      lastFailedPayloadRef.current = payloadToken;
+
+      // ── Clean Error Handling ──
+      const rawMsg = err?.message || '';
       const lowerMsg = rawMsg.toLowerCase();
-      scannerTelemetry.recordStage('server_response', serverMs, sessionPreview, { status: 'ERROR', error: rawMsg });
+      const code: string = err?.code || (
+        err?.status === 429 || lowerMsg.includes('too many') || lowerMsg.includes('rate_limited') ? 'rate_limited' :
+        lowerMsg.includes('expired') ? 'expired' :
+        lowerMsg.includes('invalid') ? 'invalid' :
+        (lowerMsg.includes('no_active_binding') || lowerMsg.includes('binding_required') || lowerMsg.includes('device')) ? 'no_active_binding' :
+        (lowerMsg.includes('geofence') || lowerMsg.includes('location') || lowerMsg.includes('gps')) ? 'geofence_failed' :
+        'error'
+      );
 
-      let failType: FailureErrorType = 'network_error';
-      if (!navigator.onLine || lowerMsg.includes('failed to fetch') || lowerMsg.includes('networkerror')) {
-        failType = 'network_error';
-      } else if (lowerMsg.includes('expired') || lowerMsg.includes('invalid') || lowerMsg.includes('session token')) {
-        failType = 'token_expired';
-      } else if (lowerMsg.includes('revoked') || lowerMsg.includes('disabled') || lowerMsg.includes('403') || lowerMsg.includes('forbidden') || lowerMsg.includes('binding')) {
-        failType = 'device_binding_403';
-      } else if (lowerMsg.includes('rate') || lowerMsg.includes('too many') || lowerMsg.includes('429')) {
-        failType = 'rate_limited';
-      } else if (lowerMsg.includes('500') || lowerMsg.includes('server error')) {
-        failType = 'server_5xx';
-      }
-      scannerTelemetry.recordFailure(failType, 'token_submitted', sessionPreview, { error: rawMsg });
+      console.warn('[QR] Scan submission error:', rawMsg, 'Code:', code);
+      setScanErrorCode(code);
+      diagHudRef.current = { ...diagHudRef.current, qr: 'FOUND', submit: code };
+      if (isDebugMode) setDiagHud({ ...diagHudRef.current });
 
-      // Check if network connection dropped
-      if (!navigator.onLine || lowerMsg.includes('failed to fetch') || lowerMsg.includes('networkerror')) {
-        setIsOffline(true);
-        isScanningLockedRef.current = false;
-        setIsSubmitting(false);
+      // HTTP 429 Rate Limiting Cooldown: Lock camera and show countdown
+      if (code === 'rate_limited' || err?.status === 429 || lowerMsg.includes('too many scan attempts')) {
+        const retrySec = Math.max(1, Number(err?.retry_after || 20));
+        isScanningLockedRef.current = true;
+        setRateLimitSecondsLeft(retrySec);
+        setScanError(`Too many scan attempts. Please wait ${retrySec}s before scanning again.`);
+        setGuideText(`Rate limit active — cooldown ${retrySec}s`);
+
+        if (rateLimitCooldownTimerRef.current) clearInterval(rateLimitCooldownTimerRef.current);
+        let countdown = retrySec;
+        rateLimitCooldownTimerRef.current = setInterval(() => {
+          countdown -= 1;
+          if (countdown <= 0) {
+            clearInterval(rateLimitCooldownTimerRef.current);
+            rateLimitCooldownTimerRef.current = null;
+            setRateLimitSecondsLeft(0);
+            setScanError(null);
+            setGuideText('Align the QR inside the frame');
+            isScanningLockedRef.current = false;
+            if (mediaStreamRef.current && isMountedRef.current) {
+              animationFrameIdRef.current = requestAnimationFrame(processFrame);
+            }
+          } else {
+            setRateLimitSecondsLeft(countdown);
+            setScanError(`Too many scan attempts. Please wait ${countdown}s before scanning again.`);
+            setGuideText(`Rate limit active — cooldown ${countdown}s`);
+          }
+        }, 1000);
         return;
       }
 
-      // Check for rotating token expiry
-      if (lowerMsg.includes('expired') || lowerMsg.includes('invalid') || lowerMsg.includes('session token')) {
-        setQrExpiredCountdown(5);
-        attemptCountRef.current += 1;
-        scannerTelemetry.recordRetry(attemptCountRef.current, sessionPreview);
-      } else {
-        setScanError(rawMsg || 'Scan verification failed. Please try again.');
-        // Unlock after 2 seconds to allow rescanning
+      // Network failure → save to offline queue
+      const isNetErr = !navigator.onLine ||
+        lowerMsg.includes('failed to fetch') ||
+        lowerMsg.includes('networkerror') ||
+        lowerMsg.includes('load failed');
+
+      if (isNetErr) {
+        try {
+          await offlineSubmissionQueue.enqueue({
+            client_id: `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
+            session_token: payloadToken
+          });
+          triggerFeedback(true);
+          stopCamera();
+          setIsOfflineQueued(true);
+          setQueuedSessionInfo({
+            token: payloadToken,
+            sessionPreview: 'Career Enhancement Training (CET)',
+            queuedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          });
+        } catch {}
+        return;
+      }
+
+      triggerFeedback(false);
+
+      if (code === 'expired' || lowerMsg.includes('expired')) {
+        lastExpiredPayloadRef.current = payloadToken;
+        setGuideText('Old QR — waiting for the projector to refresh');
+        setScanError('QR expired. Please scan the current classroom QR.');
+        return;
+      }
+
+      // Already marked (ensuring challenge replay errors are not misidentified as attendance)
+      const isChallengeReused = lowerMsg.includes('challenge') && (lowerMsg.includes('replayed') || lowerMsg.includes('used'));
+      if (!isChallengeReused && (err?.code === 'already_marked' || lowerMsg.includes('already marked') || lowerMsg.includes('already present') || lowerMsg.includes('already been marked'))) {
+        setSuccessResult({
+          status: 'ALREADY_MARKED',
+          message: 'Attendance already recorded for this session.',
+          subject_name: err?.subject_name || 'Career Enhancement Training (CET)',
+          roll_number: studentInfo.roll_number || studentRoll,
+          session_date: new Date().toISOString().split('T')[0]
+        });
+        stopCamera();
+        return;
+      }
+
+      // Geofence / Location failure
+      if (code === 'geofence_failed' || lowerMsg.includes('location') || lowerMsg.includes('geofence') || lowerMsg.includes('gps')) {
+        setScanError(rawMsg || 'Location verification failed. Please ensure you are inside the classroom.');
+        setGuideText('Location check failed');
+        return;
+      }
+
+      // Binding not enrolled → show clean device link message & action
+      if (code === 'no_active_binding' || lowerMsg.includes('no_active_binding') || lowerMsg.includes('binding_required')) {
+        setScanError('This device is not linked. Please enroll this device to record attendance.');
+        setGuideText('Device not linked — enroll below');
+        return;
+      }
+
+      // Binding challenge expired → re-cache proof and unlock for retry
+      if (lowerMsg.includes('challenge') && (lowerMsg.includes('expired') || lowerMsg.includes('invalid'))) {
+        console.log('[QR] Binding challenge expired — re-caching proof');
+        bindingProofRef.current = null;
+        (async () => {
+          try {
+            const challengeRes: any = await apiRequest('/binding/challenge', {
+              method: 'POST', body: JSON.stringify({})
+            });
+            if (challengeRes?.challenge_token) {
+              const sigResult = await signChallenge(challengeRes.challenge_token, studentRoll);
+              bindingProofRef.current = {
+                challenge_token: challengeRes.challenge_token,
+                binding_signature: sigResult.signature_b64,
+                device_id: sigResult.device_id
+              };
+            }
+          } catch {}
+        })();
+        setGuideText('Align the QR inside the frame');
+        isScanningLockedRef.current = false;
+        if (mediaStreamRef.current && isMountedRef.current) {
+          animationFrameIdRef.current = requestAnimationFrame(processFrame);
+        }
+        return;
+      }
+
+      // Generic error: never show ERR_FAILED or raw crash
+      setScanError(rawMsg || 'Unable to mark attendance. Please try again.');
+      setGuideText('Scan failed — please try again');
+    } finally {
+      // Release processing lock in a finally block after every API result
+      setIsSubmitting(false);
+      if (!isSuccess && !rateLimitCooldownTimerRef.current) {
+        // Debounce camera frame unlock by 2.5s to prevent millisecond frame floods
         setTimeout(() => {
-          isScanningLockedRef.current = false;
-          setIsSubmitting(false);
-          attemptCountRef.current += 1;
-          scannerTelemetry.recordRetry(attemptCountRef.current, sessionPreview);
-        }, 2000);
+          if (!rateLimitCooldownTimerRef.current) {
+            isScanningLockedRef.current = false;
+            if (mediaStreamRef.current && isMountedRef.current) {
+              animationFrameIdRef.current = requestAnimationFrame(processFrame);
+            }
+          }
+        }, 2500);
       }
     }
   };
@@ -315,8 +902,28 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
   // Performance-Throttled Decode Loop (~8-10 fps)
   const processFrame = useCallback(async () => {
+    if (!isMountedRef.current) return;
+    if (isScanningLockedRef.current || isSubmitting) {
+      // Do not process or re-request animation frame while submitting or locked
+      return;
+    }
     const video = videoRef.current;
-    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || isScanningLockedRef.current) {
+    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      animationFrameIdRef.current = requestAnimationFrame(processFrame);
+      return;
+    }
+
+    // [QR] Periodic diagnostic log every 60 frames (~7s at 9fps)
+    if (framesCapturedRef.current % 60 === 0 && framesCapturedRef.current > 0) {
+      console.log(`[QR] Frame stats: captured=${framesCapturedRef.current}, decoded=${framesDecodedRef.current}, skipped=${framesSkippedRef.current}, avgMs=${framesDecodedRef.current > 0 ? Math.round(totalDecodeMsRef.current / framesDecodedRef.current) : 0}, engine=${activeEngineRef.current}, zoom=${currentZoom}`);
+    }
+
+    framesCapturedRef.current += 1;
+    frameAttemptCounterRef.current += 1;
+
+    // BACK-PRESSURE GUARD (Week 6): If decoder is busy, DROP incoming frame immediately (never queue)
+    if (isDecodingRef.current) {
+      framesSkippedRef.current += 1;
       animationFrameIdRef.current = requestAnimationFrame(processFrame);
       return;
     }
@@ -325,7 +932,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       hasCapturedFirstFrameRef.current = true;
       firstFrameTimeRef.current = performance.now();
       const msSinceCam = cameraOpenTimeRef.current > 0 ? (firstFrameTimeRef.current - cameraOpenTimeRef.current) : 0;
-      scannerTelemetry.recordStage('first_frame_captured', msSinceCam);
+      scannerTelemetry.recordStage('first_frame_captured', msSinceCam, undefined, undefined, displayType, undefined, undefined, activeEngineRef.current);
     }
 
     const now = performance.now();
@@ -344,200 +951,521 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
     let detectedCandidate = false;
 
-    // PASS 1: Native BarcodeDetector (Chrome/Android C++ engine)
-    if (barcodeDetectorRef.current) {
-      try {
-        const barcodes = await barcodeDetectorRef.current.detect(video);
-        if (barcodes && barcodes.length > 0) {
-          detectedCandidate = true;
-          for (const b of barcodes) {
-            // Auto-zoom probe from detected bounding box
-            if (b.boundingBox && videoW > 0) {
-              const fraction = b.boundingBox.width / videoW;
-              triggerAutoZoomIfNeeded(fraction);
+    // Active Engine Resolution
+    const currentEng = getActiveScannerEngine();
+    activeEngineRef.current = currentEng;
+
+    if (currentEng === 'wasm') {
+      // PATH 1: zxing-cpp WASM FRAME PIPELINE (Week 6 & Week 7)
+      // FIX: Central 50% ROI crop for distant projector scanning.
+      // Previously downscaled the ENTIRE 16:9 frame to 640px, causing distant QR codes
+      // to shrink below the readable threshold. Now extracts the central 50% ROI at
+      // high resolution (960px) where the student's crosshair is aiming.
+      const shouldProbeHigherRes = consecutiveMissesRef.current >= 6 && (frameAttemptCounterRef.current % 3 === 0);
+      const MAX_DOWNSCALE_W = shouldProbeHigherRes ? 960 : 640;
+      lastDecodeScaleRef.current = MAX_DOWNSCALE_W;
+
+      let canvas = canvasRef.current;
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvasRef.current = canvas;
+      }
+
+      // --- PASS A: Central 50% ROI Crop (high-res for distant projectors) ---
+      const roiFraction = 0.50;
+      const roiSrcW = Math.floor(videoW * roiFraction);
+      const roiSrcH = Math.floor(videoH * roiFraction);
+      const roiSrcX = Math.floor((videoW - roiSrcW) / 2);
+      const roiSrcY = Math.floor((videoH - roiSrcH) / 2);
+      // Scale the ROI crop to 960px wide for high-res decoding
+      const roiTargetW = Math.min(960, roiSrcW);
+      const roiScale = roiTargetW / roiSrcW;
+      const roiTargetH = Math.round(roiSrcH * roiScale);
+
+      canvas.width = roiTargetW;
+      canvas.height = roiTargetH;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+      let decodedInRoi = false;
+      if (ctx) {
+        // Draw only the central 50% of the video frame, scaled up
+        ctx.drawImage(video, roiSrcX, roiSrcY, roiSrcW, roiSrcH, 0, 0, roiTargetW, roiTargetH);
+        const roiImgData = ctx.getImageData(0, 0, roiTargetW, roiTargetH);
+
+        isDecodingRef.current = true;
+        try {
+          const { result, usedEngine } = await decodeFrame(roiImgData, currentEng);
+          activeEngineRef.current = usedEngine;
+          framesDecodedRef.current += 1;
+          lastDecodeMsRef.current = result.ms_taken;
+          totalDecodeMsRef.current += result.ms_taken;
+
+          // Multi-QR Guard
+          if (result.candidateCount && result.candidateCount > 1) {
+            setScanError('Multiple QR codes detected. Please frame only one QR code.');
+            setGuideText('Multiple QRs detected — frame single QR');
+            scannerTelemetry.recordFailure('multi_code_detected', 'frame_decoded', undefined, { candidate_count: result.candidateCount, scale: roiTargetW }, displayType, undefined, usedEngine);
+            triggerFeedback(false);
+            animationFrameIdRef.current = requestAnimationFrame(processFrame);
+            return;
+          }
+
+          if (result.ok) {
+            consecutiveMissesRef.current = 0;
+            detectedCandidate = true;
+            decodedInRoi = true;
+            diagHudRef.current = { ...diagHudRef.current, eng: usedEngine.toUpperCase(), qr: `DETECTED (ROI ${result.text?.length || 0}ch)` };
+            if (isDebugMode) setDiagHud({ ...diagHudRef.current });
+            if (result.boundingBox && roiTargetW > 0) {
+              const approxFraction = result.boundingBox.width / roiTargetW;
+              triggerAutoZoomIfNeeded(approxFraction);
             }
-            if (b.rawValue) {
-              handleScanSuccess(b.rawValue);
+            if (result.text) {
+              console.log(`[QR] QR detected by ${usedEngine} (ROI crop): length=${result.text.length}, ms=${result.ms_taken.toFixed(1)}`);
+              handleScanSuccess(result.text, usedEngine);
+              return;
+            }
+          } else {
+            consecutiveMissesRef.current += 1;
+          }
+        } finally {
+          isDecodingRef.current = false;
+        }
+      }
+
+      // --- PASS B: Full-frame downscaled fallback (only if ROI missed) ---
+      if (!decodedInRoi && ctx) {
+        const scale = videoW > MAX_DOWNSCALE_W ? (MAX_DOWNSCALE_W / videoW) : 1.0;
+        const targetW = Math.round(videoW * scale);
+        const targetH = Math.round(videoH * scale);
+        canvas.width = targetW;
+        canvas.height = targetH;
+        ctx.drawImage(video, 0, 0, targetW, targetH);
+        const imgData = ctx.getImageData(0, 0, targetW, targetH);
+
+        isDecodingRef.current = true;
+        try {
+          const { result, usedEngine } = await decodeFrame(imgData, currentEng);
+          activeEngineRef.current = usedEngine;
+          framesDecodedRef.current += 1;
+          lastDecodeMsRef.current = result.ms_taken;
+          totalDecodeMsRef.current += result.ms_taken;
+
+          if (result.candidateCount && result.candidateCount > 1) {
+            setScanError('Multiple QR codes detected. Please frame only one QR code.');
+            setGuideText('Multiple QRs detected — frame single QR');
+            scannerTelemetry.recordFailure('multi_code_detected', 'frame_decoded', undefined, { candidate_count: result.candidateCount, scale: targetW }, displayType, undefined, usedEngine);
+            triggerFeedback(false);
+            animationFrameIdRef.current = requestAnimationFrame(processFrame);
+            return;
+          }
+
+          if (result.ok) {
+            consecutiveMissesRef.current = 0;
+            detectedCandidate = true;
+            diagHudRef.current = { ...diagHudRef.current, eng: usedEngine.toUpperCase(), qr: `DETECTED (FULL ${result.text?.length || 0}ch)` };
+            if (isDebugMode) setDiagHud({ ...diagHudRef.current });
+            if (result.boundingBox && targetW > 0) {
+              const approxFraction = result.boundingBox.width / targetW;
+              triggerAutoZoomIfNeeded(approxFraction);
+            }
+            if (result.text) {
+              console.log(`[QR] QR detected by ${usedEngine} (full-frame): length=${result.text.length}, ms=${result.ms_taken.toFixed(1)}`);
+              handleScanSuccess(result.text, usedEngine);
+              return;
+            }
+          } else {
+            consecutiveMissesRef.current += 1;
+          }
+        } finally {
+          isDecodingRef.current = false;
+        }
+      }
+
+      // Update HUD on miss
+      if (!detectedCandidate) {
+        diagHudRef.current = { ...diagHudRef.current, qr: 'SEARCHING' };
+        if (isDebugMode && consecutiveMissesRef.current % 15 === 0) {
+          setDiagHud({ ...diagHudRef.current });
+        }
+      }
+    } else {
+      // PATH 2: DEFAULT jsQR ENGINE PATH (Untouched & 100% Functional)
+      // PASS 1: Native BarcodeDetector (Chrome/Android C++ engine)
+      if (barcodeDetectorRef.current) {
+        try {
+          const barcodes = await barcodeDetectorRef.current.detect(video);
+          if (barcodes && barcodes.length > 0) {
+            // Multi-QR Guard for native detector
+            if (barcodes.length > 1) {
+              setScanError('Multiple QR codes detected. Please frame only one QR code.');
+              setGuideText('Multiple QRs detected — frame single QR');
+              scannerTelemetry.recordFailure(
+                'multi_code_detected',
+                'frame_decoded',
+                undefined,
+                { candidate_count: barcodes.length },
+                displayType,
+                undefined,
+                'jsqr'
+              );
+              triggerFeedback(false);
+              animationFrameIdRef.current = requestAnimationFrame(processFrame);
+              return;
+            }
+            detectedCandidate = true;
+            for (const b of barcodes) {
+              // Auto-zoom probe from detected bounding box
+              if (b.boundingBox && videoW > 0) {
+                const fraction = b.boundingBox.width / videoW;
+                triggerAutoZoomIfNeeded(fraction);
+              }
+              if (b.rawValue) {
+                animationFrameIdRef.current = requestAnimationFrame(processFrame);
+                handleScanSuccess(b.rawValue, 'jsqr');
+                return;
+              }
+            }
+          }
+        } catch {
+          // Fall through to Pass 2 on detector failure
+        }
+      }
+
+      // PASS 2 & 3: Single Canvas Buffer for jsQR (Safari / Firefox / Distance Fallback)
+      let canvas = canvasRef.current;
+      if (!canvas) {
+        canvas = document.createElement('canvas');
+        canvasRef.current = canvas;
+      }
+
+      if (canvas.width !== videoW || canvas.height !== videoH) {
+        canvas.width = videoW;
+        canvas.height = videoH;
+      }
+
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, videoW, videoH);
+
+        isDecodingRef.current = true;
+        const decodeStart = performance.now();
+        try {
+          // Pass 2: Full-Frame jsQR scan
+          const fullImgData = ctx.getImageData(0, 0, videoW, videoH);
+          const codeFull = jsQR(fullImgData.data, videoW, videoH, { inversionAttempts: 'dontInvert' });
+          const msTaken = Math.max(0.1, performance.now() - decodeStart);
+          framesDecodedRef.current += 1;
+          lastDecodeMsRef.current = msTaken;
+          totalDecodeMsRef.current += msTaken;
+
+          if (codeFull) {
+            detectedCandidate = true;
+            if (codeFull.location && videoW > 0) {
+              const approxWidth = Math.abs(codeFull.location.topRightCorner.x - codeFull.location.topLeftCorner.x);
+              triggerAutoZoomIfNeeded(approxWidth / videoW);
+            }
+            if (codeFull.data) {
+              handleScanSuccess(codeFull.data, 'jsqr');
               return;
             }
           }
-        }
-      } catch {
-        // Fall through to Pass 2 on detector failure
-      }
-    }
 
-    // PASS 2 & 3: Single Canvas Buffer for jsQR (Safari / Firefox / Distance Fallback)
-    let canvas = canvasRef.current;
-    if (!canvas) {
-      canvas = document.createElement('canvas');
-      canvasRef.current = canvas;
-    }
+          // Pass 3: Central 45% ROI Adaptive Software Crop (for distant 10m-30m projectors)
+          const roiW = Math.floor(videoW * 0.45);
+          const roiH = Math.floor(videoH * 0.45);
+          const roiX = Math.floor((videoW - roiW) / 2);
+          const roiY = Math.floor((videoH - roiH) / 2);
 
-    if (canvas.width !== videoW || canvas.height !== videoH) {
-      canvas.width = videoW;
-      canvas.height = videoH;
-    }
+          const roiImgData = ctx.getImageData(roiX, roiY, roiW, roiH);
+          const codeRoi = jsQR(roiImgData.data, roiW, roiH, { inversionAttempts: 'dontInvert' });
 
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (ctx) {
-      ctx.drawImage(video, 0, 0, videoW, videoH);
-
-      // Pass 2: Full-Frame jsQR scan
-      const fullImgData = ctx.getImageData(0, 0, videoW, videoH);
-      const codeFull = jsQR(fullImgData.data, videoW, videoH, { inversionAttempts: 'dontInvert' });
-
-      if (codeFull) {
-        detectedCandidate = true;
-        if (codeFull.location && videoW > 0) {
-          const approxWidth = Math.abs(codeFull.location.topRightCorner.x - codeFull.location.topLeftCorner.x);
-          triggerAutoZoomIfNeeded(approxWidth / videoW);
-        }
-        if (codeFull.data) {
-          handleScanSuccess(codeFull.data);
-          return;
-        }
-      }
-
-      // Pass 3: Central 45% ROI Adaptive Software Crop (for distant 10m-30m projectors)
-      // HONESTY: Only amplifies sensor pixel density in the center; does not synthesize data.
-      const roiW = Math.floor(videoW * 0.45);
-      const roiH = Math.floor(videoH * 0.45);
-      const roiX = Math.floor((videoW - roiW) / 2);
-      const roiY = Math.floor((videoH - roiH) / 2);
-
-      const roiImgData = ctx.getImageData(roiX, roiY, roiW, roiH);
-      const codeRoi = jsQR(roiImgData.data, roiW, roiH, { inversionAttempts: 'dontInvert' });
-
-      if (codeRoi) {
-        detectedCandidate = true;
-        if (codeRoi.data) {
-          handleScanSuccess(codeRoi.data);
-          return;
+          if (codeRoi) {
+            detectedCandidate = true;
+            if (codeRoi.data) {
+              handleScanSuccess(codeRoi.data, 'jsqr');
+              return;
+            }
+          }
+        } finally {
+          isDecodingRef.current = false;
         }
       }
     }
 
-    // Dynamic Guidance Text Updates & Quick Win C.4 Decode-Loop Soft Restart
-    const elapsedSeconds = (Date.now() - scanStartTimeRef.current) / 1000;
+    // Dynamic Guidance Text Updates
     if (detectedCandidate) {
-      setGuideText('QR detected — hold steady…');
-    } else if (elapsedSeconds > 5.0 && !hasSoftRestartedRef.current) {
-      // C.4 Soft restart on 5s decode stall: reset frame loop + subtle steadying hint
-      hasSoftRestartedRef.current = true;
-      setIsSteadying(true);
-      setGuideText('Steadying camera focus…');
-      if (animationFrameIdRef.current) cancelAnimationFrame(animationFrameIdRef.current);
-      setTimeout(() => {
-        setIsSteadying(false);
-        setGuideText('Point your camera at the attendance QR');
-        scanStartTimeRef.current = Date.now();
-        hasSoftRestartedRef.current = false;
-        animationFrameIdRef.current = requestAnimationFrame(processFrame);
-      }, 400);
-      return;
-    } else if (elapsedSeconds > 3.0) {
-      setGuideText('Move closer or increase zoom');
+      setGuideText((prev) => prev !== 'QR detected — hold steady…' ? 'QR detected — hold steady…' : prev);
     } else {
-      setGuideText('Point your camera at the attendance QR');
+      setGuideText((prev) => prev !== 'Align the QR inside the frame' ? 'Align the QR inside the frame' : prev);
     }
 
     // Schedule next throttled frame
     animationFrameIdRef.current = requestAnimationFrame(processFrame);
-  }, [autoZoomEnabled, hasZoomCapability, zoomRange, currentZoom]);
+  }, [autoZoomEnabled, hasZoomCapability, zoomRange, currentZoom, hasTorchCapability, torchActive]);
 
-  // Quick Win C.3: Camera Constraint Fallback Ladder Rungs
+  // Part A.2: getUserMedia Constraint Ladder Rungs
   const CAMERA_LADDER_RUNGS: MediaStreamConstraints[] = [
-    // Rung 1: Ideal 720p / 1080p without rigid min dimensions that cause OverconstrainedError
+    // Rung 1: Ideal 720p landscape environment camera (no min framerate constraint to prevent Safari OverconstrainedError)
     {
       audio: false,
       video: {
         facingMode: { ideal: facingMode },
         width: { ideal: 1280 },
-        height: { ideal: 720 },
-        frameRate: { ideal: 30, min: 15 }
+        height: { ideal: 720 }
       }
     },
-    // Rung 2: Standard VGA (640x480) for low-end / older chipsets
-    {
-      audio: false,
-      video: {
-        facingMode: { ideal: facingMode },
-        width: { ideal: 640 },
-        height: { ideal: 480 }
-      }
-    },
-    // Rung 3: Basic unconstrained video feed
+    // Rung 2: Basic environment camera without dimension constraints
     {
       audio: false,
       video: {
         facingMode: { ideal: facingMode }
       }
+    },
+    // Rung 3: Absolute fallback: any available video device
+    {
+      audio: false,
+      video: true
     }
   ];
 
-  // Camera Lifecycle Start with C.3 Constraint Ladder
+  // Robust Video Stream Setup & Playback for iOS Safari & Android
+  const playVideoStream = useCallback(async (video: HTMLVideoElement, stream: MediaStream): Promise<void> => {
+    console.log('[Scanner] video element found');
+    try {
+      video.setAttribute('autoplay', 'true');
+      video.setAttribute('muted', 'true');
+      video.setAttribute('playsinline', 'true');
+      video.setAttribute('webkit-playsinline', 'true');
+      video.playsInline = true;
+      video.autoplay = true;
+      video.muted = true;
+
+      if (video.srcObject !== stream) {
+        video.srcObject = stream;
+        console.log('[Scanner] stream attached');
+      }
+
+      // Ensure video metadata and dimensions are loaded before calling play()
+      await new Promise<void>((resolve) => {
+        if (video.readyState >= 1 && video.videoWidth > 0 && video.videoHeight > 0) {
+          console.log('[Scanner] metadata loaded');
+          console.log(`[Scanner] video dimensions: ${video.videoWidth}x${video.videoHeight}`);
+          resolve();
+          return;
+        }
+
+        let resolved = false;
+        const onLoaded = () => {
+          if (!resolved) {
+            resolved = true;
+            video.removeEventListener('loadedmetadata', onLoaded);
+            video.removeEventListener('canplay', onLoaded);
+            console.log('[Scanner] metadata loaded');
+            console.log(`[Scanner] video dimensions: ${video.videoWidth}x${video.videoHeight}`);
+            resolve();
+          }
+        };
+
+        video.addEventListener('loadedmetadata', onLoaded, { once: true });
+        video.addEventListener('canplay', onLoaded, { once: true });
+
+        // Safety fallback: don't hang indefinitely if browser delays metadata event
+        setTimeout(() => {
+          if (!resolved) {
+            resolved = true;
+            video.removeEventListener('loadedmetadata', onLoaded);
+            video.removeEventListener('canplay', onLoaded);
+            console.log('[Scanner] metadata loaded (timeout fallback)');
+            console.log(`[Scanner] video dimensions: ${video.videoWidth}x${video.videoHeight}`);
+            resolve();
+          }
+        }, 2000);
+      });
+
+      // Now start playback with playsInline & muted verified
+      try {
+        await video.play();
+        console.log('[Scanner] video playing');
+      } catch (playErr) {
+        console.warn('[Scanner] video.play() caught:', playErr);
+        // Fallback for strict browser autoplay policies: play on first user touch
+        const onUserInteraction = () => {
+          if (videoRef.current) {
+            videoRef.current.play()
+              .then(() => console.log('[Scanner] video playing (touch resumed)'))
+              .catch(() => {});
+          }
+          window.removeEventListener('touchstart', onUserInteraction);
+          window.removeEventListener('click', onUserInteraction);
+        };
+        window.addEventListener('touchstart', onUserInteraction, { once: true });
+        window.addEventListener('click', onUserInteraction, { once: true });
+      }
+
+      console.log(`[Scanner] video dimensions: ${video.videoWidth}x${video.videoHeight}, readyState=${video.readyState}`);
+    } catch (e) {
+      console.warn('[Scanner] playVideoStream error:', e);
+    }
+  }, []);
+
+  // Callback ref to attach stream whenever the video node mounts/updates
+  const attachVideoRef = useCallback((node: HTMLVideoElement | null) => {
+    videoRef.current = node;
+    if (node && mediaStreamRef.current) {
+      playVideoStream(node, mediaStreamRef.current);
+    }
+  }, [playVideoStream]);
+
+  // Part A.3: Camera-Open Watchdog (>8s abort + retry next rung)
+  const getUserMediaWithTimeout = (constraints: MediaStreamConstraints, timeoutMs: number = 8000): Promise<MediaStream> => {
+    return new Promise((resolve, reject) => {
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        const err = new Error('CAMERA_OPEN_TIMEOUT');
+        err.name = 'CameraOpenTimeoutError';
+        reject(err);
+      }, timeoutMs);
+
+      navigator.mediaDevices.getUserMedia(constraints)
+        .then((stream) => {
+          if (!timedOut) {
+            clearTimeout(timer);
+            resolve(stream);
+          } else {
+            // Late arrival after watchdog aborted; stop tracks cleanly to avoid zombie indicator
+            stream.getTracks().forEach((t) => {
+              try { t.stop(); } catch {}
+            });
+          }
+        })
+        .catch((err) => {
+          if (!timedOut) {
+            clearTimeout(timer);
+            reject(err);
+          }
+        });
+    });
+  };
+
+  // Camera Lifecycle Start with Constraint Ladder & Watchdog
   const startCamera = async (targetRung: number = 1) => {
     try {
+      setCameraStarting(true);
       setCameraError(null);
+      setIsCameraInUse(false);
       stopCamera();
       scanStartTimeRef.current = Date.now();
       setGuideText('Point your camera at the attendance QR');
 
-      // 1. Check native BarcodeDetector support
+      // Part A.1: Insecure origin detection (HTTP on non-localhost)
+      if (typeof window !== 'undefined' && !window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+        setPermissionState('insecure_origin');
+        setCameraStarting(false);
+        setCameraError('Camera access requires HTTPS or localhost. Current origin is not secure.');
+        scannerTelemetry.recordFailure('insecure_origin', 'camera_permission_requested', sessionIdRef.current, { origin: window.location.origin }, displayType);
+        return;
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setCameraStarting(false);
+        setCameraError('Browser does not support mediaDevices.getUserMedia. Please open in Chrome or Safari.');
+        scannerTelemetry.recordFailure('camera_unavailable', 'camera_permission_requested', sessionIdRef.current, { reason: 'mediaDevices_missing' }, displayType);
+        return;
+      }
+
+      // Check native BarcodeDetector support
       if ('BarcodeDetector' in window) {
         try {
           const supportedFormats = await (window as any).BarcodeDetector.getSupportedFormats();
           if (supportedFormats.includes('qr_code')) {
             barcodeDetectorRef.current = new (window as any).BarcodeDetector({ formats: ['qr_code'] });
+            console.log('[Scanner] QR decoder initialized (native BarcodeDetector)');
           }
         } catch {
           barcodeDetectorRef.current = null;
         }
       } else {
         barcodeDetectorRef.current = null;
+        console.log('[Scanner] QR decoder initialized (WASM / jsQR)');
       }
 
       permissionReqTimeRef.current = performance.now();
-      scannerTelemetry.recordStage('camera_permission_requested', undefined, undefined, undefined, displayType);
+      console.log('[Scanner] requesting camera');
+      scannerTelemetry.recordStage('camera_permission_requested', undefined, sessionIdRef.current, undefined, displayType);
 
       let stream: MediaStream | null = null;
       let usedRung = targetRung;
       for (let r = targetRung; r <= 3; r++) {
         usedRung = r;
         try {
-          stream = await navigator.mediaDevices.getUserMedia(CAMERA_LADDER_RUNGS[r - 1]);
+          stream = await getUserMediaWithTimeout(CAMERA_LADDER_RUNGS[r - 1], 8000);
+          if (!isMountedRef.current) {
+            if (stream) {
+              stream.getTracks().forEach((t) => {
+                try { t.stop(); } catch {}
+              });
+            }
+            return;
+          }
           if (stream) break;
         } catch (rungErr: any) {
-          console.warn(`Camera ladder rung ${r} failed:`, rungErr?.name);
+          console.warn(`[Scanner] Camera ladder constraint rung ${r} failed:`, rungErr?.name || rungErr);
+          if (rungErr?.name === 'CameraOpenTimeoutError') {
+            scannerTelemetry.recordCameraOpenTimeout(r, sessionIdRef.current);
+          }
           if (rungErr?.name === 'NotAllowedError' || rungErr?.name === 'PermissionDeniedError') {
+            throw rungErr;
+          }
+          if (rungErr?.name === 'NotReadableError' || rungErr?.name === 'TrackStartError') {
+            setIsCameraInUse(true);
             throw rungErr;
           }
           if (r === 3) throw rungErr;
         }
       }
 
+      if (!isMountedRef.current) {
+        if (stream) {
+          stream.getTracks().forEach((t) => {
+            try { t.stop(); } catch {}
+          });
+        }
+        return;
+      }
+
       if (!stream) {
         throw new Error('Unable to initialize device camera stream.');
       }
 
-      setActiveLadderRung(usedRung);
       const permDuration = performance.now() - permissionReqTimeRef.current;
-      scannerTelemetry.recordStage('camera_permission_result', permDuration, undefined, { granted: true, ladder_rung: usedRung }, displayType);
+      console.log('[Scanner] permission result: GRANTED');
+      scannerTelemetry.recordStage('camera_permission_result', permDuration, sessionIdRef.current, { granted: true, constraint_ladder_rung: usedRung }, displayType);
       setPermissionState('granted');
+
+      const vTracks = stream.getVideoTracks();
+      console.log(`[Scanner] stream acquired (${vTracks.length} video tracks, active=${stream.active})`);
+      if (vTracks[0]) {
+        const track = vTracks[0];
+        console.log(`[Scanner] primary video track: ${track.label}, readyState=${track.readyState}, enabled=${track.enabled}, muted=${track.muted}`);
+        try {
+          const settings = track.getSettings();
+          console.log(`[Scanner] videoTrack settings: ${settings.width}x${settings.height}, facingMode=${settings.facingMode}`);
+        } catch {}
+      }
 
       mediaStreamRef.current = stream;
 
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
+        await playVideoStream(videoRef.current, stream);
       }
 
       cameraOpenTimeRef.current = performance.now();
       const camMs = cameraOpenTimeRef.current - permissionReqTimeRef.current;
       hasCapturedFirstFrameRef.current = false;
       frameDecodedTimeRef.current = 0;
-      scannerTelemetry.recordStage('camera_opened', camMs, sessionIdRef.current, { ladder_rung: usedRung }, displayType);
+      scannerTelemetry.recordStage('camera_opened', camMs, sessionIdRef.current, { constraint_ladder_rung: usedRung }, displayType);
 
       // Start 15-second decode watchdog timer
       if (decodeWatchdogTimerRef.current) clearTimeout(decodeWatchdogTimerRef.current);
@@ -545,82 +1473,104 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
         if (!frameDecodedTimeRef.current) {
           scannerTelemetry.recordFailure('decode_timeout', 'camera_opened', sessionIdRef.current, {
             elapsed_ms: 15000,
-            ladder_rung: usedRung
+            constraint_ladder_rung: usedRung
           }, displayType);
         }
       }, 15000);
 
-      // 3. Probe track capabilities safely
+      // Probe track capabilities safely
       const track = stream.getVideoTracks()[0];
-      if (track && 'getCapabilities' in track) {
-        const capabilities: any = track.getCapabilities();
+      if (track) {
+        track.onended = () => {
+          console.warn('[Camera] Track ended unexpectedly.');
+          setCameraActive(false);
+          setCameraError('Camera stream disconnected. Please tap Retry.');
+        };
 
-        // Continuous Autofocus
-        if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
-          try {
-            await track.applyConstraints({
-              advanced: [{ focusMode: 'continuous' } as any]
-            });
-          } catch {}
-        }
+        if ('getCapabilities' in track) {
+          const capabilities: any = track.getCapabilities();
 
-        // Hardware Zoom: reset to 1x on scanner open
-        if (capabilities.zoom) {
-          setHasZoomCapability(true);
-          const minZ = capabilities.zoom.min || 1;
-          const maxZ = capabilities.zoom.max || 1;
-          const stepZ = capabilities.zoom.step || 0.1;
-          setZoomRange({ min: minZ, max: maxZ, step: stepZ });
-          setCurrentZoom(minZ);
-          // Apply initial 1x zoom reset
-          try {
-            await track.applyConstraints({
-              advanced: [{ zoom: minZ } as any]
-            });
-          } catch {}
-        } else {
-          setHasZoomCapability(false);
-        }
+          if (capabilities.focusMode && capabilities.focusMode.includes('continuous')) {
+            try {
+              await track.applyConstraints({
+                advanced: [{ focusMode: 'continuous' } as any]
+              });
+            } catch {}
+          }
 
-        // Torch / Flashlight
-        if (capabilities.torch) {
-          setHasTorchCapability(true);
-        } else {
-          setHasTorchCapability(false);
+          if (capabilities.zoom) {
+            setHasZoomCapability(true);
+            const minZ = capabilities.zoom.min || 1;
+            const maxZ = capabilities.zoom.max || 1;
+            const stepZ = capabilities.zoom.step || 0.1;
+            setZoomRange({ min: minZ, max: maxZ, step: stepZ });
+            const startZoom = Math.max(1.0, minZ);
+            setCurrentZoom(startZoom);
+            console.log(`[QR] Camera zoom init: min=${minZ}, max=${maxZ}, startZoom=${startZoom} (clamped from min=${minZ})`);
+            try {
+              await track.applyConstraints({
+                advanced: [{ zoom: startZoom } as any]
+              });
+            } catch {}
+          } else {
+            setHasZoomCapability(false);
+            console.log('[QR] Camera zoom: not supported on this device');
+          }
+
+          if (capabilities.torch) {
+            setHasTorchCapability(true);
+          } else {
+            setHasTorchCapability(false);
+          }
         }
       }
 
-      // 4. Request Screen Wake Lock during active scanning
+      // Request Screen Wake Lock
       if ('wakeLock' in navigator) {
         try {
           wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
         } catch {}
       }
 
+      setCameraStarting(false);
       setCameraActive(true);
+      console.log('[Scanner] scanning started');
       animationFrameIdRef.current = requestAnimationFrame(processFrame);
     } catch (err: any) {
-      console.error('Camera initialization error:', err);
+      setCameraStarting(false);
+      setCameraActive(false);
+      console.error('[Scanner] Camera initialization error:', err);
       const permDuration = permissionReqTimeRef.current > 0 ? (performance.now() - permissionReqTimeRef.current) : 0;
       const isDenied = err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError';
-      const failType: FailureErrorType = isDenied ? 'permission_denied' : 'camera_unavailable';
+      const isReadable = err.name === 'NotReadableError' || err.name === 'TrackStartError';
+      const failType: FailureErrorType = isDenied 
+        ? 'permission_denied' 
+        : isReadable 
+          ? 'camera_in_use' 
+          : 'camera_unavailable';
+
       if (isDenied) {
+        console.log('[Scanner] permission result: DENIED');
         setPermissionState('denied');
       }
-      scannerTelemetry.recordStage('camera_permission_result', permDuration, undefined, { granted: false }, displayType);
-      scannerTelemetry.recordFailure(failType, 'camera_permission_requested', undefined, { error: err.name || err.message }, displayType);
+      scannerTelemetry.recordStage('camera_permission_result', permDuration, sessionIdRef.current, { granted: false }, displayType);
+      scannerTelemetry.recordFailure(failType, 'camera_permission_requested', sessionIdRef.current, { error: err.name || err.message }, displayType);
       triggerFeedback(false);
-      setCameraError(
-        isDenied 
-          ? 'Camera permission was denied. Tap the lock or camera icon in your browser address bar, enable Camera, and tap Retry.' 
-          : (err.message || 'Unable to access device camera. Please check camera permissions in browser settings.')
-      );
+
+      if (isDenied) {
+        setCameraError('Camera access is required to scan the classroom QR. Enable camera access in Safari settings and try again.');
+      } else if (isReadable) {
+        setCameraError('Camera is in use by another app. Please close other camera apps (WhatsApp, Camera, Instagram) and retry.');
+      } else {
+        setCameraError('Camera unavailable. Allow camera access to scan the classroom QR.');
+      }
       setCameraActive(false);
     }
   };
 
   // Camera Lifecycle Stop (Complete Teardown: Green Light Turns Off)
   const stopCamera = useCallback(() => {
+    console.log('[Scanner] stopCamera invoked');
     if (decodeWatchdogTimerRef.current) {
       clearTimeout(decodeWatchdogTimerRef.current);
       decodeWatchdogTimerRef.current = null;
@@ -633,6 +1583,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       mediaStreamRef.current.getTracks().forEach((track) => {
         try {
           track.stop();
+          console.log(`[Scanner] track ${track.label} stopped`);
         } catch {}
       });
       mediaStreamRef.current = null;
@@ -653,24 +1604,44 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
     setCameraActive(false);
   }, []);
 
-  // Quick Win C.1: Permission-Aware Initialization (Explainer for prompt, Auto-Start if granted)
+  // Part A.1 & A.4: Permission-Aware Initialization & Page Lifecycle Listener
   useEffect(() => {
-    let isMounted = true;
+    isMountedRef.current = true;
+    console.log('[Scanner] mounted');
+
+    // Insecure origin pre-check
+    if (typeof window !== 'undefined' && !window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
+      setPermissionState('insecure_origin');
+      setCameraError('Camera access requires HTTPS or localhost. Current origin is not secure.');
+      return;
+    }
+
     if (navigator.permissions && navigator.permissions.query) {
       navigator.permissions.query({ name: 'camera' as any })
         .then((status) => {
-          if (!isMounted) return;
+          if (!isMountedRef.current) return;
+          permStatusRef.current = status;
+          console.log('[Scanner] permission state queried:', status.state);
           setPermissionState(status.state as any);
-          if (status.state === 'granted') {
+          if (status.state === 'denied') {
+            console.log('[Scanner] permission result: DENIED');
+            setCameraError('Camera access blocked. Enable camera access in browser settings and try again.');
+          } else {
+            // Both 'granted' and 'prompt' must start camera so getUserMedia prompts or activates immediately
             startCamera(1);
           }
           status.onchange = () => {
-            if (!isMounted) return;
+            if (!isMountedRef.current) return;
+            console.log('[Scanner] permission status changed:', status.state);
             setPermissionState(status.state as any);
+            if (status.state !== 'denied' && !mediaStreamRef.current) {
+              startCamera(1);
+            }
           };
         })
-        .catch(() => {
-          if (!isMounted) return;
+        .catch((err) => {
+          if (!isMountedRef.current) return;
+          console.log('[Scanner] permissions.query not supported on this browser (Safari/WebKit fallback):', err?.message || err);
           setPermissionState('unknown');
           startCamera(1);
         });
@@ -678,8 +1649,32 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       setPermissionState('unknown');
       startCamera(1);
     }
+
+    // Part A.4: visibilitychange listener (pause stream when backgrounded / re-acquire on foreground)
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        if (mediaStreamRef.current) {
+          stopCamera();
+          (window as any).__snist_resume_camera_after_vis__ = true;
+        }
+      } else if (document.visibilityState === 'visible') {
+        if ((window as any).__snist_resume_camera_after_vis__) {
+          (window as any).__snist_resume_camera_after_vis__ = false;
+          startCamera(1);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
-      isMounted = false;
+      isMountedRef.current = false;
+      if (permStatusRef.current) {
+        try {
+          permStatusRef.current.onchange = null;
+        } catch {}
+        permStatusRef.current = null;
+      }
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       stopCamera();
     };
   }, [facingMode]);
@@ -713,400 +1708,595 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
     }
   };
 
+  const handleDoubleTap = () => {
+    if (!hasZoomCapability) return;
+    const target = currentZoom > 1.5 ? 1 : Math.min(zoomRange.max, 2);
+    setAutoZoomEnabled(false);
+    applyZoom(target);
+  };
+
   const handleTouchEnd = () => {
+    const now = Date.now();
+    if (now - lastTapTimeRef.current < 300) {
+      handleDoubleTap();
+    }
+    lastTapTimeRef.current = now;
     pinchStartDistanceRef.current = null;
   };
 
   return (
     <PwaInstallGuard onDismiss={() => { stopCamera(); onClose(); }}>
-    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4">
-      <div className="bg-white text-slate-900 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl flex flex-col max-h-[95vh] font-sans">
-        
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 py-3.5 border-b border-slate-100 bg-slate-50/90">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-[#001e40] text-white flex items-center justify-center font-bold text-xs shadow-sm">
-              <Camera className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="font-extrabold text-sm text-[#001e40]">Scan Classroom QR</h3>
-              <p className="text-[11px] font-semibold text-slate-500">
-                {guideText}
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={() => {
-              stopCamera();
-              onClose();
-            }}
-            className="p-1.5 rounded-full hover:bg-slate-200 text-slate-400 hover:text-slate-700 transition"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Content Area */}
-        <div className="p-4 sm:p-6 flex-1 flex flex-col items-center justify-center overflow-y-auto">
-          {successResult ? (
-            /* Celebration Success Screen */
-            <div className="text-center space-y-4 py-4 animate-in fade-in zoom-in-95 duration-300 w-full">
-              <div className="w-20 h-20 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-inner">
-                <CheckCircle className="w-12 h-12 animate-bounce" />
+      <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4">
+        <div className="bg-white text-slate-900 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl flex flex-col max-h-[92vh] font-sans border border-slate-100">
+          
+          {isOfflineQueued ? (
+            /* Offline Buffered Confirmation Screen */
+            <div className="p-6 sm:p-8 flex flex-col items-center justify-center text-center space-y-5 animate-in fade-in zoom-in-95 duration-300 w-full">
+              <div className="w-20 h-20 rounded-full bg-blue-50 border-2 border-blue-200 text-blue-600 flex items-center justify-center shadow-lg shadow-blue-500/10">
+                <CheckCircle className="w-10 h-10 text-blue-600" />
               </div>
 
-              <div>
-                <span className={`inline-block px-3 py-1 rounded-full text-xs font-black uppercase mb-1 ${
+              <div className="space-y-1.5">
+                <span className="inline-block px-3 py-1 rounded-full text-xs font-bold tracking-wide uppercase bg-blue-100 text-blue-800">
+                  Saved Offline
+                </span>
+                <h2 className="text-2xl font-black text-[#001e40] tracking-tight">
+                  Attendance Saved!
+                </h2>
+                <p className="text-xs text-slate-500 font-medium max-w-xs mx-auto leading-relaxed">
+                  Your attendance has been securely saved on this device and will submit automatically when connectivity returns.
+                </p>
+              </div>
+
+              <div className="w-full bg-slate-50 rounded-2xl p-4 border border-slate-200/80 text-left space-y-2 text-xs">
+                <div className="flex justify-between items-center py-0.5">
+                  <span className="text-slate-500 font-medium">Session</span>
+                  <span className="font-bold text-slate-800">{queuedSessionInfo?.sessionPreview || 'Class Session'}</span>
+                </div>
+                <div className="flex justify-between items-center py-0.5 border-t border-slate-200/50 pt-1.5">
+                  <span className="text-slate-500 font-medium">Time</span>
+                  <span className="font-semibold text-slate-700">{queuedSessionInfo?.queuedAt || 'Just now'}</span>
+                </div>
+                {pendingQueueCount > 1 && (
+                  <div className="flex justify-between items-center py-0.5 border-t border-slate-200/50 pt-1.5">
+                    <span className="text-slate-500 font-medium">Queue</span>
+                    <span className="font-semibold text-blue-700">{pendingQueueCount} scans waiting to sync</span>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2 w-full pt-1">
+                {navigator.onLine && (
+                  <button
+                    type="button"
+                    disabled={isRetryingQueue}
+                    onClick={async () => {
+                      setIsRetryingQueue(true);
+                      const res = await offlineSubmissionQueue.flush();
+                      setIsRetryingQueue(false);
+                      if (res.success > 0) {
+                        triggerFeedback(true);
+                        setSuccessResult({
+                          status: 'SUCCESS',
+                          message: 'Attendance recorded successfully!',
+                          roll_number: studentInfo.roll_number || studentRoll,
+                          subject_name: 'Class Session',
+                          session_date: new Date().toISOString().split('T')[0]
+                        });
+                        setIsOfflineQueued(false);
+                      }
+                    }}
+                    className="w-full py-3.5 bg-[#001e40] hover:bg-[#002f6c] text-white font-bold text-sm rounded-2xl shadow-lg transition flex items-center justify-center gap-2 active:scale-98 disabled:opacity-50 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-4 h-4 ${isRetryingQueue ? 'animate-spin' : ''}`} />
+                    <span>{isRetryingQueue ? 'Submitting to Server…' : 'Sync Now to Server'}</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    onScanComplete(queuedSessionInfo || { status: 'OFFLINE_QUEUED' });
+                    onClose();
+                  }}
+                  className="w-full py-3.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-sm rounded-2xl transition active:scale-98 cursor-pointer"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          ) : successResult ? (
+            /* Clean Production Attendance Success Screen */
+            <div className="p-6 sm:p-8 flex flex-col items-center justify-center text-center space-y-5 animate-in fade-in zoom-in-95 duration-300 w-full">
+              {/* Checkmark Circle */}
+              <div className="w-20 h-20 rounded-full bg-emerald-50 border-2 border-emerald-200 text-emerald-600 flex items-center justify-center shadow-lg shadow-emerald-500/10">
+                <CheckCircle className="w-10 h-10 animate-in zoom-in-75 duration-300 text-emerald-600" />
+              </div>
+
+              <div className="space-y-1.5">
+                <span className={`inline-block px-3 py-1 rounded-full text-xs font-bold tracking-wide uppercase ${
                   successResult.status === 'ALREADY_MARKED'
                     ? 'bg-amber-100 text-amber-800'
                     : 'bg-emerald-100 text-emerald-800'
                 }`}>
-                  {successResult.status === 'ALREADY_MARKED' ? 'Already Present' : 'Verified Present'}
+                  {successResult.status === 'ALREADY_MARKED' ? 'Already Marked' : 'Attendance Marked'}
                 </span>
-                <h2 className="text-2xl font-black text-[#001e40]">
-                  {successResult.status === 'ALREADY_MARKED' ? "You're Already Marked Present ✅" : 'Marked Present!'}
+                <h2 className="text-2xl font-black text-[#001e40] tracking-tight">
+                  {successResult.status === 'ALREADY_MARKED' ? 'Already Present' : 'Present!'}
                 </h2>
-                <p className="text-xs text-slate-600 font-medium mt-1">
-                  {successResult.message}
+                <p className="text-sm text-slate-600 font-medium">
+                  Present for <span className="font-bold text-slate-900">{successResult.subject_name || 'Career Enhancement Training (CET)'}</span>
                 </p>
               </div>
 
-              <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200/80 text-left space-y-2 text-xs">
-                <div className="flex justify-between items-center py-1 border-b border-slate-200/60">
-                  <span className="text-slate-500 font-medium">Subject:</span>
-                  <span className="font-bold text-slate-800">{successResult.subject_name || 'Class Session'}</span>
+              {/* Clean Student & Session Card */}
+              <div className="w-full bg-slate-50 rounded-2xl p-4 border border-slate-200/80 text-left space-y-2 text-xs">
+                <div className="flex justify-between items-center py-0.5">
+                  <span className="text-slate-500 font-medium">Student</span>
+                  <span className="font-bold text-slate-800">{studentInfo.name || 'Student'} ({studentInfo.roll_number || studentRoll})</span>
                 </div>
-                <div className="flex justify-between items-center py-1 border-b border-slate-200/60">
-                  <span className="text-slate-500 font-medium">Period Count:</span>
-                  <span className="font-bold text-emerald-700 font-mono">
-                    {successResult.period_count} Period{successResult.period_count > 1 ? 's' : ''}
+                <div className="flex justify-between items-center py-0.5 border-t border-slate-200/50 pt-1.5">
+                  <span className="text-slate-500 font-medium">Time</span>
+                  <span className="font-semibold text-slate-700">
+                    {new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} • Today
                   </span>
-                </div>
-                <div className="flex justify-between items-center py-1 border-b border-slate-200/60">
-                  <span className="text-slate-500 font-medium">Roll Number:</span>
-                  <span className="font-mono font-bold text-slate-800">{successResult.roll_number}</span>
-                </div>
-                <div className="flex justify-between items-center py-1">
-                  <span className="text-slate-500 font-medium">Date:</span>
-                  <span className="font-mono text-slate-700">{successResult.session_date}</span>
                 </div>
               </div>
 
+              {/* Institutional Selfie CTA if required */}
+              {selfieAttendanceId && (
+                <div className="w-full p-4 bg-indigo-50 border border-indigo-200 rounded-2xl text-left space-y-2 animate-in fade-in">
+                  <div className="flex items-center gap-2 text-indigo-900 font-bold text-xs">
+                    <Camera className="w-4 h-4 text-indigo-600" />
+                    <span>Quick Photo Verification</span>
+                  </div>
+                  <p className="text-xs text-indigo-700 leading-relaxed">
+                    Attendance recorded! Take a quick front-camera selfie to verify institutional photo records.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowSelfieModal(true)}
+                    className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5 shadow-sm active:scale-98 cursor-pointer"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>Take Selfie</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Done Button */}
               <button
+                type="button"
                 onClick={() => {
-                  onScanComplete();
+                  onScanComplete(successResult);
                   onClose();
                 }}
-                className="w-full py-3.5 bg-[#001e40] hover:bg-[#002f6c] text-white font-black text-sm rounded-2xl shadow-lg transition active:scale-98"
+                className="w-full py-3.5 bg-[#001e40] hover:bg-[#002f6c] text-white font-bold text-sm rounded-2xl shadow-lg transition active:scale-98 cursor-pointer"
               >
-                Back to Dashboard
+                Done
               </button>
             </div>
           ) : (
             /* Active Camera Scanner View */
-            <div className="w-full flex flex-col items-center space-y-3.5">
+            <div className="w-full flex flex-col items-center">
               
-              {/* Task 0: Honest Offline Amber Card */}
-              {isOffline && (
-                <div className="w-full p-3.5 bg-amber-50 border-2 border-amber-300 rounded-2xl text-center space-y-2 animate-in fade-in">
-                  <div className="w-8 h-8 bg-amber-100 text-amber-800 rounded-full flex items-center justify-center mx-auto border border-amber-300">
-                    <WifiOff className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-amber-950 uppercase tracking-wide">Offline — Live Verification Required</h4>
-                    <p className="text-xs font-semibold text-amber-900 mt-1">
-                      No connection — ask your teacher to mark you present manually.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (navigator.onLine) {
-                        setIsOffline(false);
-                        isScanningLockedRef.current = false;
-                        setIsSubmitting(false);
-                      } else {
-                        triggerFeedback(false);
-                      }
-                    }}
-                    className="px-3.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 mx-auto shadow-sm active:scale-95"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Check Connection &amp; Rescan</span>
-                  </button>
-                </div>
-              )}
-
-              {/* Task 1: Actionable QR Expiry Countdown Ticker */}
-              {qrExpiredCountdown !== null && qrExpiredCountdown > 0 && (
-                <div className="w-full p-3.5 bg-amber-50 border-2 border-amber-300 rounded-2xl text-center space-y-2 animate-in fade-in">
-                  <div className="w-8 h-8 bg-amber-100 text-amber-800 rounded-full flex items-center justify-center mx-auto border border-amber-300">
-                    <Clock className="w-4 h-4 animate-pulse" />
-                  </div>
-                  <h4 className="text-xs font-bold text-amber-950">QR Code Expired</h4>
-                  <p className="text-xs text-amber-900 font-semibold">
-                    QR expired — code refreshes automatically. Rescan in a few seconds ⏳
-                  </p>
-                  <div className="inline-block px-3 py-1 bg-amber-200 text-amber-900 rounded-full text-xs font-mono font-extrabold">
-                    Rescanning in {qrExpiredCountdown}s...
-                  </div>
-                </div>
-              )}
-
-              {/* Wide Viewfinder (Zero Cropping Constraint) */}
+              {/* Dominant Camera Viewport */}
               <div 
-                className="relative w-full max-w-[320px] sm:max-w-[340px] h-[300px] rounded-3xl overflow-hidden bg-slate-950 border-4 border-[#001e40] shadow-xl"
+                className="relative w-full h-[58vh] sm:h-[420px] min-h-[320px] bg-black overflow-hidden select-none flex items-center justify-center"
                 onTouchStart={handleTouchStart}
                 onTouchMove={handleTouchMove}
                 onTouchEnd={handleTouchEnd}
+                onDoubleClick={handleDoubleTap}
               >
+                {/* 1. Camera Video Feed - Rendered directly above background and behind reticle */}
                 <video
-                  ref={videoRef}
+                  ref={attachVideoRef}
                   autoPlay
                   playsInline
                   muted
-                  className="w-full h-full object-cover"
+                  className="absolute inset-0 w-full h-full object-cover"
+                  style={{ zIndex: 1, transform: 'translateZ(0)', WebkitTransform: 'translateZ(0)' }}
                 />
 
-                {/* Targeting Crosshair Lines */}
-                <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                  <div className="w-56 h-56 border-2 border-dashed border-amber-400/80 rounded-2xl animate-pulse flex items-center justify-center">
-                    <div className="w-4 h-4 border border-amber-300/60 rounded-full" />
+                {/* 2. Top Floating Control Bar */}
+                <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-auto" style={{ zIndex: 20 }}>
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 bg-black/50 backdrop-blur-md rounded-full text-white/90 text-xs font-medium border border-white/10 shadow-sm">
+                    <Camera className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Scan Classroom QR</span>
                   </div>
-                </div>
-
-                {/* Quick Win C.4: Steadying Focus Pill */}
-                {isSteadying && (
-                  <div className="absolute top-4 left-1/2 -translate-x-1/2 px-3 py-1 bg-indigo-950/90 text-indigo-200 border border-indigo-500/50 rounded-full text-xs font-semibold flex items-center gap-1.5 shadow-lg animate-in fade-in pointer-events-none z-10">
-                    <RefreshCw className="w-3 h-3 animate-spin text-cyan-400" />
-                    <span>Steadying camera focus…</span>
-                  </div>
-                )}
-
-                {/* Submitting Overlay */}
-                {isSubmitting && (
-                  <div className="absolute inset-0 bg-black/65 backdrop-blur-sm flex flex-col items-center justify-center gap-2 text-white">
-                    <RefreshCw className="w-8 h-8 text-amber-400 animate-spin" />
-                    <span className="text-xs font-bold font-mono">Verifying Attendance...</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Quick Win C.1: Pre-permission Explainer Card */}
-              {permissionState === 'prompt' && !cameraActive && !cameraError && (
-                <div className="w-full max-w-[320px] p-4 bg-slate-50 border-2 border-indigo-200 rounded-2xl text-center space-y-2.5 animate-in fade-in mt-2">
-                  <div className="w-10 h-10 bg-indigo-100 text-[#001e40] rounded-xl flex items-center justify-center mx-auto">
-                    <Camera className="w-5 h-5 text-indigo-600" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-[#001e40] uppercase tracking-wide">Camera Access Required</h4>
-                    <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
-                      Camera needed to scan attendance QR displayed on screen. No pictures are saved or uploaded.
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => startCamera(1)}
-                    className="px-4 py-1.5 bg-[#001e40] hover:bg-[#002d60] text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 mx-auto shadow-sm active:scale-95"
-                  >
-                    <Camera className="w-3.5 h-3.5" />
-                    <span>Enable Camera</span>
-                  </button>
-                </div>
-              )}
-
-              {/* Camera Access Error Notification */}
-              {cameraError && (
-                <div className="w-full p-3.5 bg-rose-50 border-2 border-rose-300 rounded-2xl text-center space-y-2 animate-in fade-in">
-                  <div className="w-8 h-8 bg-rose-100 text-rose-700 rounded-full flex items-center justify-center mx-auto border border-rose-300">
-                    <AlertTriangle className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-rose-950 uppercase tracking-wide">Camera Access Blocked</h4>
-                    <p className="text-xs font-medium text-rose-800 mt-1 leading-relaxed">
-                      {cameraError.toLowerCase().includes('permission') || cameraError.toLowerCase().includes('denied') || cameraError.toLowerCase().includes('notallowed')
-                        ? 'Camera permission was denied. Tap the lock or camera icon in your browser address bar, enable Camera, and tap Retry.'
-                        : cameraError}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => startCamera()}
-                    className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 mx-auto shadow-sm active:scale-95 cursor-pointer"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Retry Camera</span>
-                  </button>
-                </div>
-              )}
-
-              {/* Status or Error Notifications */}
-              {scanError && (
-                <div className="w-full p-3 bg-rose-50 border border-rose-200 rounded-2xl text-xs text-rose-700 flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
-                  <p className="font-medium">{scanError}</p>
-                </div>
-              )}
-
-              {/* Camera Zoom Slider & Controls (ALWAYS visible when capabilities.zoom exists) */}
-              <div className="w-full flex flex-col items-center gap-2 pt-1">
-                {hasZoomCapability && (
-                  <div className="w-full max-w-[320px] bg-slate-50 p-2.5 rounded-2xl border border-slate-200 space-y-2">
-                    {/* Zoom Slider Header */}
-                    <div className="flex items-center justify-between text-xs font-bold text-slate-700">
-                      <span className="flex items-center gap-1">
-                        <Sliders className="w-3.5 h-3.5 text-[#001e40]" />
-                        <span>Camera Zoom:</span>
-                      </span>
-                      <span className="font-mono text-[#001e40] font-black">{currentZoom.toFixed(1)}×</span>
+                  <div className="flex items-center gap-2">
+                    {hasTorchCapability && (
                       <button
                         type="button"
-                        onClick={() => {
-                          setAutoZoomEnabled(!autoZoomEnabled);
-                        }}
-                        className={`text-[10px] px-2 py-0.5 rounded-md font-bold transition ${
-                          autoZoomEnabled ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200 text-slate-600'
+                        onClick={toggleTorch}
+                        className={`p-2 rounded-full backdrop-blur-md transition shadow-sm ${
+                          torchActive
+                            ? 'bg-amber-400 text-slate-950 shadow-amber-400/30'
+                            : 'bg-black/50 text-white/80 hover:text-white border border-white/10'
                         }`}
+                        title={torchActive ? 'Turn off torch' : 'Turn on torch'}
                       >
-                        Auto: {autoZoomEnabled ? 'ON' : 'OFF'}
+                        <Flashlight className="w-4 h-4" />
                       </button>
-                    </div>
-
-                    {/* Continuous Range Slider */}
-                    <div className="flex items-center gap-2">
-                      <ZoomOut className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                      <input
-                        type="range"
-                        min={zoomRange.min}
-                        max={zoomRange.max}
-                        step={zoomRange.step}
-                        value={currentZoom}
-                        onChange={(e) => {
-                          setAutoZoomEnabled(false); // Manual slider interaction disables auto-zoom
-                          applyZoom(parseFloat(e.target.value));
-                        }}
-                        className="w-full accent-[#001e40] cursor-pointer h-1.5 bg-slate-200 rounded-lg appearance-none"
-                      />
-                      <ZoomIn className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                    </div>
-
-                    {/* Quick Preset Buttons (Always reset to 1x option available) */}
-                    <div className="flex items-center justify-between gap-1 pt-0.5">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setAutoZoomEnabled(true);
-                          applyZoom(1);
-                        }}
-                        className={`flex-1 py-1 rounded-lg text-xs font-mono font-black transition ${
-                          Math.abs(currentZoom - 1) < 0.1 ? 'bg-[#001e40] text-white shadow-sm' : 'bg-white text-slate-700 hover:bg-slate-200'
-                        }`}
-                      >
-                        1× (Reset)
-                      </button>
-                      {zoomRange.max >= 2 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAutoZoomEnabled(false);
-                            applyZoom(2);
-                          }}
-                          className={`flex-1 py-1 rounded-lg text-xs font-mono font-black transition ${
-                            Math.abs(currentZoom - 2) < 0.1 ? 'bg-[#001e40] text-white shadow-sm' : 'bg-white text-slate-700 hover:bg-slate-200'
-                          }`}
-                        >
-                          2×
-                        </button>
-                      )}
-                      {zoomRange.max >= 3 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAutoZoomEnabled(false);
-                            applyZoom(3);
-                          }}
-                          className={`flex-1 py-1 rounded-lg text-xs font-mono font-black transition ${
-                            Math.abs(currentZoom - 3) < 0.1 ? 'bg-[#001e40] text-white shadow-sm' : 'bg-white text-slate-700 hover:bg-slate-200'
-                          }`}
-                        >
-                          3×
-                        </button>
-                      )}
-                      {zoomRange.max >= 4 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setAutoZoomEnabled(false);
-                            applyZoom(zoomRange.max);
-                          }}
-                          className={`flex-1 py-1 rounded-lg text-xs font-mono font-black transition ${
-                            Math.abs(currentZoom - zoomRange.max) < 0.1 ? 'bg-[#001e40] text-white shadow-sm' : 'bg-white text-slate-700 hover:bg-slate-200'
-                          }`}
-                        >
-                          {zoomRange.max.toFixed(0)}×
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Secondary Controls: Torch & Camera Flip */}
-                <div className="flex items-center gap-2.5">
-                  {hasTorchCapability && (
+                    )}
                     <button
                       type="button"
-                      onClick={toggleTorch}
-                      className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm ${
-                        torchActive
-                          ? 'bg-amber-400 text-[#001e40]'
-                          : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                      onClick={toggleFacingMode}
+                      className="p-2 rounded-full bg-black/50 text-white/80 hover:text-white backdrop-blur-md border border-white/10 transition shadow-sm"
+                      title="Flip camera"
+                    >
+                      <RefreshCw className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        stopCamera();
+                        onClose();
+                      }}
+                      className="p-2 rounded-full bg-black/50 text-white/80 hover:text-white backdrop-blur-md border border-white/10 transition shadow-sm"
+                      title="Close"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3. Clean Corner Bracket Reticle */}
+                <div className="absolute inset-0 pointer-events-none flex items-center justify-center" style={{ zIndex: 10 }}>
+                  <div className="relative w-56 h-56 sm:w-64 sm:h-64">
+                    <div className="absolute top-0 left-0 w-8 h-8 border-t-3 border-l-3 border-emerald-400 rounded-tl-xl shadow-[0_0_12px_rgba(52,211,153,0.4)]" />
+                    <div className="absolute top-0 right-0 w-8 h-8 border-t-3 border-r-3 border-emerald-400 rounded-tr-xl shadow-[0_0_12px_rgba(52,211,153,0.4)]" />
+                    <div className="absolute bottom-0 left-0 w-8 h-8 border-b-3 border-l-3 border-emerald-400 rounded-bl-xl shadow-[0_0_12px_rgba(52,211,153,0.4)]" />
+                    <div className="absolute bottom-0 right-0 w-8 h-8 border-b-3 border-r-3 border-emerald-400 rounded-br-xl shadow-[0_0_12px_rgba(52,211,153,0.4)]" />
+                    <div className="absolute inset-0 border border-emerald-400/20 rounded-xl" />
+                  </div>
+                </div>
+
+                {/* 4. Minimal Unobtrusive Zoom Pills */}
+                {hasZoomCapability && zoomRange.max >= 1.5 && (
+                  <div className="absolute bottom-3.5 left-1/2 -translate-x-1/2 flex items-center bg-black/50 backdrop-blur-md rounded-full p-1 border border-white/15 shadow-lg" style={{ zIndex: 20 }}>
+                    <button
+                      type="button"
+                      onClick={() => applyZoom(1)}
+                      className={`px-3 py-0.5 rounded-full text-xs font-bold transition-all ${
+                        Math.abs(currentZoom - 1) < 0.2
+                          ? 'bg-white text-slate-950 shadow-sm'
+                          : 'text-white/80 hover:text-white'
                       }`}
                     >
-                      <Flashlight className="w-3.5 h-3.5" />
-                      <span>{torchActive ? 'Torch On' : 'Torch Off'}</span>
+                      1×
                     </button>
-                  )}
+                    <button
+                      type="button"
+                      onClick={() => applyZoom(Math.min(zoomRange.max, 2))}
+                      className={`px-3 py-0.5 rounded-full text-xs font-bold transition-all ${
+                        Math.abs(currentZoom - 2) < 0.2
+                          ? 'bg-white text-slate-950 shadow-sm'
+                          : 'text-white/80 hover:text-white'
+                      }`}
+                    >
+                      2×
+                    </button>
+                    {zoomRange.max >= 3 && (
+                      <button
+                        type="button"
+                        onClick={() => applyZoom(Math.min(zoomRange.max, 3))}
+                        className={`px-3 py-0.5 rounded-full text-xs font-bold transition-all ${
+                          Math.abs(currentZoom - 3) < 0.2
+                            ? 'bg-white text-slate-950 shadow-sm'
+                            : 'text-white/80 hover:text-white'
+                        }`}
+                      >
+                        3×
+                      </button>
+                    )}
+                  </div>
+                )}
 
+                {/* 5. Submitting Overlay */}
+                {isSubmitting && (
+                  <div className="absolute inset-0 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center gap-3 text-white animate-in fade-in duration-150" style={{ zIndex: 30 }}>
+                    <div className="w-10 h-10 rounded-full border-3 border-emerald-400 border-t-transparent animate-spin" />
+                    <span className="text-xs font-bold tracking-wide">Marking Attendance…</span>
+                  </div>
+                )}
+
+                {/* 6. Camera Starting Overlay */}
+                {cameraStarting && !cameraError && (
+                  <div className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm flex flex-col items-center justify-center gap-2.5 p-4 text-center" style={{ zIndex: 25 }}>
+                    <RefreshCw className="w-7 h-7 text-emerald-400 animate-spin" />
+                    <p className="text-xs font-bold text-white tracking-wide">Starting camera…</p>
+                  </div>
+                )}
+
+                {/* 7. Camera Blocked / Error In-Viewport State */}
+                {(cameraError || permissionState === 'denied') && (
+                  <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center space-y-3" style={{ zIndex: 25 }}>
+                    <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center border border-rose-500/30">
+                      <Camera className="w-6 h-6 text-rose-400" />
+                    </div>
+                    <div className="space-y-1 max-w-xs">
+                      <h3 className="text-sm font-bold text-white">
+                        {permissionState === 'denied' ? 'Camera access blocked' : 'Camera unavailable'}
+                      </h3>
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        {permissionState === 'denied'
+                          ? 'Enable camera access in Safari settings and try again.'
+                          : 'Allow camera access to scan the classroom QR.'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => startCamera(1)}
+                      className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl shadow-lg transition flex items-center gap-2 cursor-pointer active:scale-95"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Try Again</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Bottom Clean Guidance & Action Area */}
+              <div className="w-full p-4 sm:p-5 flex flex-col items-center text-center space-y-2 bg-white">
+                
+                {/* Camera Permission / Error Card */}
+                {(cameraError || permissionState === 'denied' || permissionState === 'insecure_origin' || isCameraInUse) ? (
+                  <div className="w-full p-3.5 bg-rose-50 border border-rose-200 rounded-2xl text-center space-y-2 animate-in fade-in">
+                    <div className="w-8 h-8 bg-rose-100 text-rose-700 rounded-full flex items-center justify-center mx-auto">
+                      <AlertTriangle className="w-4 h-4 text-rose-600" />
+                    </div>
+                    <div>
+                      <h4 className="text-xs font-bold text-rose-950">
+                        {permissionState === 'denied' 
+                          ? 'Camera Permission Blocked' 
+                          : isCameraInUse 
+                            ? 'Camera In Use' 
+                            : 'Camera Unavailable'}
+                      </h4>
+                      <p className="text-[11px] text-rose-800 mt-0.5 leading-relaxed">
+                        {permissionState === 'denied'
+                          ? 'Please enable camera access in your browser settings to scan attendance.'
+                          : isCameraInUse
+                            ? 'Another application is using your camera. Please close it and retry.'
+                            : cameraError || 'Could not connect to camera.'}
+                      </p>
+                    </div>
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => startCamera(1)}
+                        className="flex-1 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Retry Camera</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowRollCard(true)}
+                        className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition cursor-pointer"
+                      >
+                        Show Roll No.
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <h3 className="font-extrabold text-sm text-[#001e40]">
+                      {guideText}
+                    </h3>
+                    <p className="text-xs text-slate-400 font-medium">
+                      Point your camera at the QR displayed by your faculty
+                    </p>
+
+                    {/* Clean Error Notification */}
+                    {scanError && (
+                      <div className={`w-full p-2.5 rounded-xl text-xs font-medium space-y-2 animate-in fade-in ${
+                        rateLimitSecondsLeft > 0
+                          ? 'bg-amber-50 border border-amber-300 text-amber-900'
+                          : 'bg-rose-50 border border-rose-200 text-rose-700'
+                      }`}>
+                        <div className="flex items-center justify-center gap-1.5">
+                          {rateLimitSecondsLeft > 0 ? (
+                            <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0 animate-pulse" />
+                          ) : (
+                            <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                          )}
+                          <span>{scanError}</span>
+                        </div>
+                        {rateLimitSecondsLeft > 0 && (
+                          <div className="w-full bg-amber-200/60 rounded-full h-1.5 overflow-hidden">
+                            <div
+                              className="bg-amber-500 h-1.5 rounded-full transition-all duration-1000"
+                              style={{ width: `${Math.min(100, Math.max(0, (rateLimitSecondsLeft / 20) * 100))}%` }}
+                            />
+                          </div>
+                        )}
+                        {scanErrorCode === 'no_active_binding' && (
+                          <button
+                            type="button"
+                            onClick={handleInlineEnroll}
+                            disabled={isInlineEnrolling}
+                            className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+                          >
+                            <ShieldCheck className="w-4 h-4" />
+                            <span>{isInlineEnrolling ? 'Enrolling Device…' : 'Enroll this device'}</span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Actionable Option: Having trouble -> Show Roll Number to Faculty */}
+                    <div className="pt-2 flex items-center justify-between w-full border-t border-slate-100 mt-1">
+                      <button
+                        type="button"
+                        onClick={() => setShowRollCard(true)}
+                        className="text-xs text-slate-500 hover:text-[#001e40] font-semibold transition cursor-pointer flex items-center gap-1"
+                      >
+                        <User className="w-3.5 h-3.5 text-slate-400" />
+                        <span>Can't scan? Show Roll Number</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          stopCamera();
+                          onClose();
+                        }}
+                        className="text-xs text-slate-400 hover:text-slate-600 font-medium transition cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Roll Card Modal (High-Contrast Screen for Faculty Visual Verification) */}
+          {showRollCard && (
+            <div className="fixed inset-0 z-70 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in">
+              <div className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl p-6 text-center space-y-4 font-sans animate-in zoom-in-95">
+                <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center mx-auto">
+                  <User className="w-6 h-6" />
+                </div>
+
+                <div>
+                  <h3 className="font-extrabold text-base text-[#001e40]">
+                    Faculty Manual Verification
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Show this screen to your faculty to record attendance
+                  </p>
+                </div>
+
+                {/* Big Legible Roll Card */}
+                <div className="bg-slate-950 text-white rounded-2xl p-5 border-2 border-emerald-500/80 shadow-inner space-y-1">
+                  <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-widest">
+                    Roll Number / SAP ID
+                  </span>
+                  <p className="font-mono font-black text-2xl sm:text-3xl text-amber-300 tracking-wider">
+                    {studentInfo.roll_number || studentRoll || 'STUDENT'}
+                  </p>
+                  <p className="text-xs font-bold text-slate-200 pt-1">
+                    {studentInfo.name || 'Student'}
+                  </p>
+                  {studentInfo.section && (
+                    <p className="text-[11px] text-slate-400">
+                      {studentInfo.section}
+                    </p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
                   <button
                     type="button"
-                    onClick={toggleFacingMode}
-                    className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm"
+                    onClick={() => setShowRollCard(false)}
+                    className="w-full py-3 bg-[#001e40] hover:bg-[#002d60] text-white font-bold text-xs rounded-xl shadow transition cursor-pointer"
                   >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Flip Camera</span>
+                    Return to Scanner
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowRollCard(false);
+                      stopCamera();
+                      onClose();
+                    }}
+                    className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold text-xs rounded-xl transition cursor-pointer"
+                  >
+                    Close
                   </button>
                 </div>
               </div>
-
-              {/* Camera Error & Permission Recovery */}
-              {cameraError && (
-                <div className="w-full p-4 bg-rose-50 border border-rose-200 rounded-2xl text-center space-y-3">
-                  <div className="w-9 h-9 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto">
-                    <Camera className="w-5 h-5" />
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-bold text-rose-900">Camera Permission Required</h4>
-                    <p className="text-[11px] text-rose-700 mt-1">
-                      To scan classroom QR, enable camera access in browser settings (tap the lock icon in the address bar → Site permissions → Allow camera).
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => startCamera(1)}
-                    className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 mx-auto shadow-sm active:scale-95"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Retry Camera Permission</span>
-                  </button>
-                </div>
-              )}
-
             </div>
           )}
-        </div>
 
+          {/* Device Rebind Modal (If device changed and requires email OTP) */}
+          {rebindOtpRequired && (
+            <div className="fixed inset-0 z-70 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in">
+              <div className="bg-white rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl p-6 text-center space-y-4 font-sans animate-in zoom-in-95">
+                <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-800 flex items-center justify-center mx-auto">
+                  <KeyRound className="w-6 h-6 text-amber-700" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-base text-[#001e40]">
+                    Authorize New Device
+                  </h3>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    Enter the 6-digit code sent to <strong className="font-semibold text-slate-800">{rebindMaskedEmail}</strong> to register this device.
+                  </p>
+                </div>
+
+                {rebindOtpError && (
+                  <div className="text-xs text-rose-600 font-bold bg-rose-50 border border-rose-200 rounded-xl p-2">
+                    {rebindOtpError}
+                  </div>
+                )}
+
+                <div className="space-y-3">
+                  <input
+                    type="text"
+                    maxLength={6}
+                    placeholder="123456"
+                    value={rebindOtpValue}
+                    onChange={(e) => setRebindOtpValue(e.target.value.replace(/\D/g, ''))}
+                    className="w-full py-3 text-center text-lg font-mono font-bold tracking-widest bg-slate-50 border border-slate-200 rounded-2xl focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  />
+                  <button
+                    type="button"
+                    disabled={isSubmittingRebindOtp || rebindOtpValue.length !== 6}
+                    onClick={handleConfirmRebindOtp}
+                    className="w-full py-3 bg-[#001e40] hover:bg-[#002d60] text-white font-bold text-xs rounded-xl shadow transition flex items-center justify-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                  >
+                    {isSubmittingRebindOtp ? <RefreshCw className="w-4 h-4 animate-spin" /> : <ShieldCheck className="w-4 h-4" />}
+                    <span>Verify & Link Device</span>
+                  </button>
+                  <div className="flex justify-between items-center text-xs text-slate-500 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleResendRebindOtp}
+                      className="text-amber-800 hover:text-amber-900 underline font-semibold cursor-pointer"
+                    >
+                      Resend code
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setRebindOtpRequired(false); setScanError(null); }}
+                      className="text-slate-500 hover:text-slate-700 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+        </div>
       </div>
-    </div>
+
+      {/* Stage 6: Post-Attendance Selfie Collection Modal */}
+      {showSelfieModal && selfieAttendanceId && (
+        <PostAttendanceSelfieModal
+          attendanceId={selfieAttendanceId}
+          rollNumber={studentInfo.roll_number || studentRoll || 'STUDENT'}
+          studentName={studentInfo.name}
+          subjectName={successResult?.subject_name}
+          onComplete={() => {
+            setShowSelfieModal(false);
+            onScanComplete();
+            onClose();
+          }}
+          onSkip={() => {
+            setShowSelfieModal(false);
+            onScanComplete();
+            onClose();
+          }}
+        />
+      )}
+
     </PwaInstallGuard>
   );
 };

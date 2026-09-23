@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
 
 logger = logging.getLogger("snist_erp.admin")
-from sqlalchemy import or_, func, case
+from sqlalchemy import or_, func, case, and_
 from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
@@ -148,6 +148,14 @@ def get_enrollment_analytics(
         logger.warning(f"Could not compute department defaulters in enrollment analytics: {e}")
         defaulters_by_code = {}
 
+    # Phase 5 Cutover: Promote Anti-Downgrade View (Query DeviceBinding for active keys)
+    from app.models.models import DeviceBinding
+    active_bindings_query = db.query(Student.department_id, func.count(DeviceBinding.id)).join(
+        DeviceBinding, and_(DeviceBinding.student_id == Student.id, DeviceBinding.revoked_at.is_(None))
+    ).group_by(Student.department_id).all()
+    bound_map = {row[0]: row[1] for row in active_bindings_query}
+    total_bound = sum(bound_map.values())
+
     departments = db.query(Department).order_by(Department.name).all()
     
     dept_list = []
@@ -157,6 +165,9 @@ def get_enrollment_analytics(
         count = counts_map.get(d.id, 0)
         pct = round((count / total_enrolled * 100), 1) if total_enrolled > 0 else 0.0
         d_defaulters = defaulters_by_code.get(d.code, 0)
+        dept_bound = bound_map.get(d.id, 0)
+        dept_unbound = max(0, count - dept_bound)
+        dept_cov_pct = round((dept_bound / count * 100), 1) if count > 0 else 0.0
         dept_list.append({
             "id": d.id,
             "code": d.code,
@@ -164,7 +175,11 @@ def get_enrollment_analytics(
             "count": count,
             "percentage": pct,
             "share_pct": pct,
-            "defaulters_count": d_defaulters
+            "defaulters_count": d_defaulters,
+            "hard_bound_count": dept_bound,
+            "soft_bound_count": 0,
+            "unbound_count": dept_unbound,
+            "coverage_pct": dept_cov_pct
         })
         accounted_students += count
         
@@ -172,6 +187,9 @@ def get_enrollment_analytics(
     if unassigned_count > 0:
         pct = round((unassigned_count / total_enrolled * 100), 1) if total_enrolled > 0 else 0.0
         u_defaulters = defaulters_by_code.get("UNASSIGNED", 0)
+        unassigned_bound = max(0, total_bound - sum(bound_map.get(d.id, 0) for d in departments))
+        unassigned_unbound = max(0, unassigned_count - unassigned_bound)
+        u_cov_pct = round((unassigned_bound / unassigned_count * 100), 1) if unassigned_count > 0 else 0.0
         dept_list.append({
             "id": -1,
             "code": "UNASSIGNED",
@@ -179,16 +197,28 @@ def get_enrollment_analytics(
             "count": unassigned_count,
             "percentage": pct,
             "share_pct": pct,
-            "defaulters_count": u_defaulters
+            "defaulters_count": u_defaulters,
+            "hard_bound_count": unassigned_bound,
+            "soft_bound_count": 0,
+            "unbound_count": unassigned_unbound,
+            "coverage_pct": u_cov_pct
         })
 
     return {
         "total_enrolled": total_enrolled,
         "unassigned_count": max(0, unassigned_count),
+        "enforcement_summary": {
+            "total_students": total_enrolled,
+            "hard_bound_count": total_bound,
+            "soft_bound_count": 0,
+            "unbound_count": max(0, total_enrolled - total_bound),
+            "coverage_pct": round(total_bound / total_enrolled * 100, 1) if total_enrolled > 0 else 0.0
+        },
         "departments": dept_list
     }
 
 @router.get("/analytics/enrollment/students")
+@router.get("/department-enrolled-students")
 def get_department_enrolled_students(
     dept_id: int,
     db: Session = Depends(get_db),
@@ -244,16 +274,19 @@ def get_department_enrolled_students(
 
     stats_map = {row[0]: (row[1] or 0, int(row[2] or 0)) for row in rec_aggregates}
 
-    # Batch Query 3: Device registration info for enrolled devices
-    device_ids = [s.registered_device_id for s in students if s.registered_device_id]
-    device_map = {}
-    if device_ids:
-        devices = db.query(DeviceRegistration).filter(DeviceRegistration.id.in_(device_ids)).all()
-        device_map = {d.id: d for d in devices}
+    # Batch Query 3: Phase 5 Cutover — Authoritative Cryptographic Keypair Bindings (DeviceBinding)
+    # Zero reads of legacy qr_students.registered_device_id or qr_device_registrations
+    from app.models.models import DeviceBinding
+    active_bindings = db.query(DeviceBinding).filter(
+        DeviceBinding.student_id.in_(student_ids),
+        DeviceBinding.revoked_at.is_(None)
+    ).all()
+    binding_map = {b.student_id: b for b in active_bindings}
 
     results = []
     for s in students:
-        dev = device_map.get(s.registered_device_id) if s.registered_device_id else None
+        binding_rec = binding_map.get(s.id)
+        is_hard_bound = binding_rec is not None
         tot, pres = stats_map.get(s.id, (0, 0))
         pct = round((pres / tot * 100), 1) if tot > 0 else 0.0
 
@@ -276,13 +309,15 @@ def get_department_enrolled_students(
             condonation_status = "pending"
 
         device_info = None
-        if dev:
+        if binding_rec:
             device_info = {
-                "id": dev.id,
-                "public_id": dev.device_public_id,
-                "is_active": dev.is_active,
-                "last_seen_at": dev.last_seen_at.strftime("%Y-%m-%d %H:%M:%S") if dev.last_seen_at else None,
-                "first_registered_at": dev.first_registered_at.strftime("%Y-%m-%d %H:%M:%S") if dev.first_registered_at else None
+                "id": binding_rec.id,
+                "key_id": binding_rec.key_id,
+                "public_id": f"KEY-{binding_rec.key_id[:12]}",
+                "is_active": True,
+                "enrolled_at": binding_rec.enrolled_at.strftime("%Y-%m-%d %H:%M:%S") if binding_rec.enrolled_at else None,
+                "enrolled_via": binding_rec.enrolled_via,
+                "storage_persist_granted": binding_rec.storage_persist_granted
             }
 
         sec_name = s.section.name if s.section else "N/A"
@@ -304,8 +339,10 @@ def get_department_enrolled_students(
             "email": s.email or "",
             "mobile": s.mobile or "",
             "agency": getattr(s, "agency", "Regular") or "Regular",
-            "registered_device_id": s.registered_device_id,
-            "device_bound": s.registered_device_id is not None,
+            "registered_device_id": None, # Purged in Phase 5 cutover
+            "device_bound": is_hard_bound,
+            "binding_status": "hard" if is_hard_bound else "unbound",
+            "enrolled_key_id": binding_rec.key_id if binding_rec else None,
             "device_info": device_info,
             "present_today": s.id in today_present_set,
             "total_classes": tot,

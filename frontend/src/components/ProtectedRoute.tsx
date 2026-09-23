@@ -20,7 +20,11 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({ children, allowe
   }
 
   if (!user) {
-    return <Navigate to="/login" replace />;
+    const nextPath = typeof window !== 'undefined' ? window.location.pathname + window.location.search : '';
+    const nextQuery = nextPath && nextPath !== '/login' && !nextPath.startsWith('/login')
+      ? `?next=${encodeURIComponent(nextPath)}`
+      : '';
+    return <Navigate to={`/login${nextQuery}`} replace />;
   }
 
   if (allowedRoles && !allowedRoles.includes(user.role)) {

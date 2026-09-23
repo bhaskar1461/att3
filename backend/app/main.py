@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import engine, Base
-from app.api import auth, admin, teacher, attendance, student, reports, devices, telemetry, compliance_analytics, defaulters
+from app.api import auth, admin, teacher, attendance, student, reports, devices, telemetry, compliance_analytics, defaulters, binding, attendance_devices, launch
 
 # Onboarding & Credential Dispatch routers (defensive import — never crash if module has issues)
 try:
@@ -57,7 +57,7 @@ def _run_defensive_schema_migrations():
                     pass
                 conn.commit()
 
-        # Check qr_attendance_records for is_approved_absence and approved_absence_reason
+        # Check qr_attendance_records for is_approved_absence, approved_absence_reason, GPS, and selfie fields
         if "qr_attendance_records" in tables:
             att_cols = [col["name"] for col in inspector.get_columns("qr_attendance_records")]
             with engine.connect() as conn:
@@ -67,7 +67,77 @@ def _run_defensive_schema_migrations():
                 if "approved_absence_reason" not in att_cols:
                     logger.info("Migrating schema: adding approved_absence_reason column to qr_attendance_records")
                     conn.execute(text("ALTER TABLE qr_attendance_records ADD COLUMN approved_absence_reason VARCHAR(100) NULL"))
+                for col_name, col_type in [
+                    ("student_latitude", "FLOAT NULL"),
+                    ("student_longitude", "FLOAT NULL"),
+                    ("gps_accuracy_m", "FLOAT NULL"),
+                    ("distance_m", "FLOAT NULL"),
+                    ("device_binding_id", "INT NULL"),
+                    ("selfie_status", "VARCHAR(30) NULL"),
+                    ("selfie_storage_key", "VARCHAR(255) NULL"),
+                    ("entry_method", "VARCHAR(30) NULL"),
+                ]:
+                    if col_name not in att_cols:
+                        logger.info(f"Migrating schema: adding {col_name} to qr_attendance_records")
+                        try:
+                            conn.execute(text(f"ALTER TABLE qr_attendance_records ADD COLUMN {col_name} {col_type}"))
+                        except Exception as col_err:
+                            logger.warning(f"Notice: adding {col_name} skipped: {col_err}")
                 conn.commit()
+
+        # Check qr_attendance_sessions for GPS and geofence columns
+        if "qr_attendance_sessions" in tables:
+            sess_cols = [col["name"] for col in inspector.get_columns("qr_attendance_sessions")]
+            with engine.connect() as conn:
+                for col_name, col_type in [
+                    ("faculty_latitude", "FLOAT NULL"),
+                    ("faculty_longitude", "FLOAT NULL"),
+                    ("faculty_accuracy_m", "FLOAT NULL"),
+                    ("geofence_radius_m", "FLOAT DEFAULT 100.0"),
+                ]:
+                    if col_name not in sess_cols:
+                        logger.info(f"Migrating schema: adding {col_name} to qr_attendance_sessions")
+                        try:
+                            conn.execute(text(f"ALTER TABLE qr_attendance_sessions ADD COLUMN {col_name} {col_type}"))
+                        except Exception as col_err:
+                            logger.warning(f"Notice: adding {col_name} skipped: {col_err}")
+                conn.commit()
+
+        # Ensure selfie_records table exists
+        if "selfie_records" not in tables:
+            try:
+                Base.metadata.create_all(bind=engine, tables=[Base.metadata.tables["selfie_records"]])
+                logger.info("Created missing selfie_records table.")
+            except Exception as s_tbl_err:
+                try:
+                    with engine.connect() as conn:
+                        conn.execute(text("""
+                            CREATE TABLE IF NOT EXISTS selfie_records (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                attendance_id INT NOT NULL,
+                                student_id INT NOT NULL,
+                                session_id INT NOT NULL,
+                                object_storage_key VARCHAR(255) NOT NULL UNIQUE,
+                                mime_type VARCHAR(50) DEFAULT 'image/jpeg' NOT NULL,
+                                file_size INT DEFAULT 0 NOT NULL,
+                                width INT NULL,
+                                height INT NULL,
+                                quality_status VARCHAR(30) DEFAULT 'PASSED' NOT NULL,
+                                face_count INT DEFAULT 1 NOT NULL,
+                                captured_at DATETIME NULL,
+                                uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                                status VARCHAR(30) DEFAULT 'UPLOADED' NOT NULL,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP NOT NULL,
+                                INDEX idx_selfie_att (attendance_id),
+                                INDEX idx_selfie_student (student_id),
+                                INDEX idx_selfie_session (session_id)
+                            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                        """))
+                        conn.commit()
+                    logger.info("Created missing selfie_records table via fallback DDL.")
+                except Exception as fallback_err:
+                    logger.warning(f"selfie_records table creation notice: {s_tbl_err} | Fallback: {fallback_err}")
 
         # Ensure performant composite indexes exist
         if "qr_attendance_sessions" in tables:
@@ -227,6 +297,152 @@ def _run_defensive_schema_migrations():
                         conn.commit()
                     except Exception as err:
                         logger.warning(f"Failed to add token_format: {err}")
+                if "ladder_rung" not in tel_cols:
+                    logger.info("Migrating schema: adding ladder_rung to qr_scan_telemetry_events")
+                    try:
+                        conn.execute(text("ALTER TABLE qr_scan_telemetry_events ADD COLUMN ladder_rung INT NULL"))
+                        conn.commit()
+                    except Exception as err:
+                        logger.warning(f"Failed to add ladder_rung: {err}")
+                if "from_rung" not in tel_cols:
+                    logger.info("Migrating schema: adding from_rung to qr_scan_telemetry_events")
+                    try:
+                        conn.execute(text("ALTER TABLE qr_scan_telemetry_events ADD COLUMN from_rung INT NULL"))
+                        conn.commit()
+                    except Exception as err:
+                        logger.warning(f"Failed to add from_rung: {err}")
+
+        # Check qr_attendance_records for manual mark guardrail columns (Week 8)
+        if "qr_attendance_records" in tables:
+            att_cols = [col["name"] for col in inspector.get_columns("qr_attendance_records")]
+            with engine.connect() as conn:
+                if "manual_reason" not in att_cols:
+                    logger.info("Migrating schema: adding manual_reason to qr_attendance_records")
+                    try:
+                        conn.execute(text("ALTER TABLE qr_attendance_records ADD COLUMN manual_reason VARCHAR(50) NULL"))
+                        conn.commit()
+                    except Exception as err:
+                        logger.warning(f"Failed to add manual_reason: {err}")
+                if "manual_reason_detail" not in att_cols:
+                    logger.info("Migrating schema: adding manual_reason_detail to qr_attendance_records")
+                    try:
+                        conn.execute(text("ALTER TABLE qr_attendance_records ADD COLUMN manual_reason_detail VARCHAR(255) NULL"))
+                        conn.commit()
+                    except Exception as err:
+                        logger.warning(f"Failed to add manual_reason_detail: {err}")
+                if "manual_marked_by_id" not in att_cols:
+                    logger.info("Migrating schema: adding manual_marked_by_id to qr_attendance_records")
+                    try:
+                        conn.execute(text("ALTER TABLE qr_attendance_records ADD COLUMN manual_marked_by_id INT NULL"))
+                        conn.commit()
+                    except Exception as err:
+                        logger.warning(f"Failed to add manual_marked_by_id: {err}")
+
+        # Defensive indexes for Week 9 scale optimization (telemetry rollups and historical session lists)
+        try:
+            with engine.connect() as conn:
+                try:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_scan_tel_created_at ON qr_scan_telemetry_events (created_at)"))
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.execute(text("CREATE INDEX idx_scan_tel_created_at ON qr_scan_telemetry_events (created_at)"))
+                        conn.commit()
+                    except Exception:
+                        pass
+                try:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_scan_tel_session_id ON qr_scan_telemetry_events (session_id)"))
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.execute(text("CREATE INDEX idx_scan_tel_session_id ON qr_scan_telemetry_events (session_id)"))
+                        conn.commit()
+                    except Exception:
+                        pass
+                try:
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS idx_att_sess_teacher_created ON qr_attendance_sessions (teacher_id, created_at)"))
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.execute(text("CREATE INDEX idx_att_sess_teacher_created ON qr_attendance_sessions (teacher_id, created_at)"))
+                        conn.commit()
+                    except Exception:
+                        pass
+        except Exception as idx_err:
+            logger.warning(f"Notice: defensive index creation skipped: {idx_err}")
+
+        # Ensure Binding V2 tables and database-enforced single-active invariant exist
+        try:
+            if "device_bindings" not in tables:
+                try:
+                    Base.metadata.create_all(bind=engine, tables=[Base.metadata.tables["device_bindings"]])
+                    logger.info("Created missing device_bindings table.")
+                except Exception as b_tbl_err:
+                    logger.warning(f"device_bindings create_all notice: {b_tbl_err}")
+            else:
+                try:
+                    dev_cols = [col["name"] for col in inspector.get_columns("device_bindings")]
+                    with engine.connect() as conn:
+                        for col_name, col_def in [
+                            ("public_key", "TEXT NULL"),
+                            ("key_id", "VARCHAR(64) NULL"),
+                            ("device_id", "VARCHAR(64) NULL"),
+                            ("key_algorithm", "VARCHAR(32) DEFAULT 'ECDSA_P256'"),
+                            ("key_version", "INT DEFAULT 1"),
+                            ("client_type", "VARCHAR(20) DEFAULT 'WEB'"),
+                            ("status", "VARCHAR(20) DEFAULT 'ACTIVE'"),
+                            ("enrolled_at", "DATETIME NULL"),
+                            ("enrolled_via", "VARCHAR(30) DEFAULT 'self'"),
+                            ("storage_persist_granted", "BOOLEAN DEFAULT FALSE"),
+                            ("browser_profile_tag", "VARCHAR(64) NULL"),
+                            ("last_seen_at", "DATETIME NULL"),
+                            ("last_verified_at", "DATETIME NULL"),
+                            ("device_label", "VARCHAR(100) NULL"),
+                            ("platform", "VARCHAR(50) NULL"),
+                            ("browser_family", "VARCHAR(50) NULL"),
+                            ("app_version", "VARCHAR(30) NULL"),
+                            ("registered_user_agent_metadata", "TEXT NULL"),
+                            ("revoked_at", "DATETIME NULL"),
+                            ("revoked_reason", "VARCHAR(30) NULL"),
+                            ("created_at", "DATETIME NULL"),
+                            ("updated_at", "DATETIME NULL")
+                        ]:
+                            if col_name not in dev_cols:
+                                try:
+                                    conn.execute(text(f"ALTER TABLE device_bindings ADD COLUMN {col_name} {col_def}"))
+                                    conn.commit()
+                                except Exception as col_err:
+                                    logger.warning(f"Notice: column migration {col_name} skipped: {col_err}")
+                        try:
+                            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dev_bind_device_id ON device_bindings (device_id)"))
+                            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_dev_bind_status ON device_bindings (status)"))
+                            conn.commit()
+                        except Exception:
+                            pass
+                except Exception as dev_col_err:
+                    logger.warning(f"Notice: device_bindings column check skipped: {dev_col_err}")
+
+            if "qr_device_rebind_otps" not in tables:
+                try:
+                    Base.metadata.create_all(bind=engine, tables=[Base.metadata.tables["qr_device_rebind_otps"]])
+                    logger.info("Created missing qr_device_rebind_otps table.")
+                except Exception as otp_tbl_err:
+                    logger.warning(f"qr_device_rebind_otps create_all notice: {otp_tbl_err}")
+
+            # Enforce single active binding database invariant index
+            with engine.connect() as conn:
+                try:
+                    if engine.url.drivername.startswith("sqlite"):
+                        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_student_active_binding ON device_bindings (student_id) WHERE revoked_at IS NULL"))
+                    else:
+                        conn.execute(text("CREATE UNIQUE INDEX uq_student_active_binding ON device_bindings ((CASE WHEN revoked_at IS NULL THEN student_id ELSE NULL END))"))
+                    conn.commit()
+                    logger.info("Verified single-active-binding database invariant (uq_student_active_binding).")
+                except Exception:
+                    # Index already exists or dialect variant active
+                    pass
+        except Exception as bind_mig_err:
+            logger.warning(f"Notice: Binding V2 defensive schema migration skipped: {bind_mig_err}")
     except Exception as m_err:
         logger.warning(f"Defensive schema migration notice (non-fatal): {m_err}")
 
@@ -418,6 +634,8 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     headers = dict(exc.headers or {})
     if isinstance(exc.detail, dict):
         content = dict(exc.detail)
+        if "detail" not in content or isinstance(content.get("detail"), dict):
+            content["detail"] = exc.detail.get("message", str(exc.detail))
     else:
         content = {"detail": exc.detail}
 
@@ -469,6 +687,8 @@ allowed_origins = [
     "http://127.0.0.1:8000",
     "http://127.0.0.1:8001",
     "http://127.0.0.1:5173",
+    "https://whiteleos.cc.cd",
+    "http://whiteleos.cc.cd",
 ]
 if getattr(settings, "FRONTEND_URL", None) and settings.FRONTEND_URL not in allowed_origins:
     allowed_origins.append(settings.FRONTEND_URL.rstrip("/"))
@@ -476,7 +696,7 @@ if getattr(settings, "FRONTEND_URL", None) and settings.FRONTEND_URL not in allo
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
-    allow_origin_regex=r"https?://([a-zA-Z0-9-]+\.)?de5\.net|https?://localhost(:\d+)?|https?://127\.0\.0\.1(:\d+)?",
+    allow_origin_regex=r"https?://([a-zA-Z0-9-]+\.)?(de5\.net|cc\.cd|isroot\.in)|https?://localhost(:\d+)?|https?://127\.0\.0\.1(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -493,13 +713,63 @@ for r_module, name in [
     (reports.router, "Reports"),
     (telemetry.router, "Telemetry"),
     (compliance_analytics.router, "Compliance Analytics"),
-    (defaulters.router, "Defaulters")
+    (defaulters.router, "Defaulters"),
+    (binding.router, "Device Binding V2"),
+    (attendance_devices.router, "Cryptographic Device Identity"),
+    (launch.router, "Launch")
 ]:
     try:
         app.include_router(r_module, prefix=settings.API_V1_STR)
         logger.info(f"Successfully registered router module: {name}")
     except Exception as r_err:
         logger.error(f"Failed to register router {name}: {r_err}", exc_info=True)
+
+# Defensive redirect for /a/{token} to frontend universal landing page
+import os
+from fastapi.responses import RedirectResponse, FileResponse
+from fastapi import Request
+
+_spa_candidates = [
+    os.path.join(settings.BACKEND_DIR, "frontend_dist"),
+    os.path.join(settings.BASE_DIR, "frontend", "dist"),
+    "/app/frontend_dist",
+    "/app/frontend/dist",
+    "/app/static"
+]
+_spa_dist = next((p for p in _spa_candidates if os.path.exists(p) and os.path.isdir(p)), None)
+
+@app.get("/a/{token}")
+def redirect_launch_token_to_frontend(token: str, request: Request):
+    """
+    Public entry point redirector:
+    Serves the SPA index.html so React Router renders <Route path="/a/:launchToken" element={<AttendanceLanding />} />.
+    Falls back to safe redirection only if hosted on an external frontend domain (strictly preventing self-redirect loops).
+    """
+    if _spa_dist:
+        index_file = os.path.join(_spa_dist, "index.html")
+        if os.path.exists(index_file):
+            return FileResponse(index_file)
+
+    base_url = (getattr(settings, "FRONTEND_URL", "") or getattr(settings, "ATTENDANCE_BASE_URL", "") or "").rstrip("/")
+    req_host = (request.headers.get("host") or "").lower()
+    if base_url:
+        try:
+            from urllib.parse import urlparse
+            parsed_b = urlparse(base_url if "://" in base_url else f"https://{base_url}")
+            if parsed_b.netloc and parsed_b.netloc.lower() == req_host:
+                # Same host as current request and no local SPA files: return informative JSON rather than 307 loop
+                return JSONResponse(
+                    status_code=200,
+                    content={"detail": "SNIST Attendance Landing Page. Please open inside the student portal.", "token": token}
+                )
+        except Exception:
+            pass
+        return RedirectResponse(url=f"{base_url}/a/{token}", status_code=307)
+
+    return JSONResponse(
+        status_code=200,
+        content={"detail": "SNIST Attendance Landing Page. Please open inside the student portal.", "token": token}
+    )
 
 # Register Onboarding & Credential Dispatch routers (defensive — never crash server)
 if _onboarding_modules_loaded:
@@ -588,8 +858,12 @@ def comprehensive_health_check():
 
 # SPA Frontend Static Files Mounting with graceful fallback
 import os
+import mimetypes
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+
+# Explicitly register application/wasm MIME type across all platforms (Linux/Docker/Windows)
+mimetypes.add_type("application/wasm", ".wasm")
 
 frontend_candidates = [
     os.path.join(settings.BACKEND_DIR, "frontend_dist"),
@@ -612,6 +886,12 @@ if frontend_dist:
             return JSONResponse(status_code=404, content={"detail": "Not Found"})
         target_file = os.path.join(frontend_dist, full_path)
         if full_path and os.path.exists(target_file) and os.path.isfile(target_file):
+            if target_file.endswith(".wasm"):
+                return FileResponse(
+                    target_file,
+                    media_type="application/wasm",
+                    headers={"Cache-Control": "public, max-age=31536000, immutable"}
+                )
             return FileResponse(target_file)
         index_file = os.path.join(frontend_dist, "index.html")
         if os.path.exists(index_file):
@@ -629,5 +909,8 @@ else:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("app.main:app", host=host, port=port, reload=True)
+
 

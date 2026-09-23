@@ -35,6 +35,49 @@ def admin_token():
         db.add(admin)
         db.commit()
         db.refresh(admin)
+
+    # Ensure test student 24311A6201 exists
+    student_user = db.query(User).filter(User.username == "24311A6201").first()
+    if not student_user:
+        student_user = User(
+            username="24311A6201",
+            email="24311a6201@sreenidhi.edu.in",
+            password_hash=get_password_hash("InitialPass123!"),
+            role=UserRole.STUDENT,
+            is_active=True
+        )
+        db.add(student_user)
+        db.commit()
+        db.refresh(student_user)
+
+    student = db.query(Student).filter(Student.roll_number == "24311A6201").first()
+    if not student:
+        dept = db.query(Department).first()
+        if not dept:
+            dept = Department(code="CSE", name="Computer Science")
+            db.add(dept)
+            db.commit()
+        ay = db.query(AcademicYear).first()
+        if not ay:
+            ay = AcademicYear(name="2025-2026")
+            db.add(ay)
+            db.commit()
+        sec = db.query(Section).first()
+        if not sec:
+            sec = Section(name="CSE-A", department_id=dept.id, academic_year_id=ay.id)
+            db.add(sec)
+            db.commit()
+        student = Student(
+            user_id=student_user.id,
+            roll_number="24311A6201",
+            name="Contract Test Student",
+            department_id=dept.id,
+            academic_year_id=ay.id,
+            section_id=sec.id
+        )
+        db.add(student)
+        db.commit()
+
     token = create_access_token({"sub": admin.username, "role": admin.role.value, "user_id": admin.id})
     db.close()
     return token

@@ -85,26 +85,26 @@ def invalidate_attendance_cache(student_id: Optional[int] = None, course_id: Opt
     Fast cache invalidation on attendance writes (<1 microsecond).
     Ensures scan path performance is completely uncompromised.
     """
+    clean_roll = roll_number.strip().upper() if roll_number else None
     with _CACHE_LOCK:
-        if student_id is None and course_id is None and dept_id is None and roll_number is None:
+        if student_id is None and course_id is None and dept_id is None and clean_roll is None:
             _ENGINE_CACHE.clear()
-            return
-        
-        keys_to_delete = []
-        for k in _ENGINE_CACHE.keys():
-            if student_id and (f"student:{student_id}" in k or f"student_id:{student_id}" in k or f":{student_id}:" in k):
-                keys_to_delete.append(k)
-            elif roll_number and (f":{roll_number}:" in k or f"student_full:{roll_number}" in k):
-                keys_to_delete.append(k)
-            elif course_id and f"course:{course_id}" in k:
-                keys_to_delete.append(k)
-            elif dept_id and f"dept:{dept_id}" in k:
-                keys_to_delete.append(k)
-            elif "admin_summary" in k:
-                keys_to_delete.append(k)
-                
-        for k in keys_to_delete:
-            _ENGINE_CACHE.pop(k, None)
+        else:
+            keys_to_delete = []
+            for k in _ENGINE_CACHE.keys():
+                if student_id and (f"student:{student_id}" in k or f"student_id:{student_id}" in k or f":{student_id}:" in k):
+                    keys_to_delete.append(k)
+                elif clean_roll and (f":{clean_roll}:" in k or f"student_full:{clean_roll}" in k or f":{clean_roll}" in k):
+                    keys_to_delete.append(k)
+                elif course_id and f"course:{course_id}" in k:
+                    keys_to_delete.append(k)
+                elif dept_id and f"dept:{dept_id}" in k:
+                    keys_to_delete.append(k)
+                elif "admin_summary" in k:
+                    keys_to_delete.append(k)
+                    
+            for k in keys_to_delete:
+                _ENGINE_CACHE.pop(k, None)
 
     # Defensively clear student portal summary cache if present
     try:
@@ -112,6 +112,8 @@ def invalidate_attendance_cache(student_id: Optional[int] = None, course_id: Opt
         with _STUDENT_SUMMARY_CACHE_LOCK:
             if student_id:
                 _STUDENT_SUMMARY_CACHE.pop(student_id, None)
+            elif clean_roll:
+                _STUDENT_SUMMARY_CACHE.clear()
             else:
                 _STUDENT_SUMMARY_CACHE.clear()
     except Exception:
@@ -357,13 +359,27 @@ class AttendanceEngine:
         policy_include_approved = getattr(settings, "JNTUH_INCLUDE_APPROVED_ABSENCES", True) if include_approved_absences is None else include_approved_absences
         server_today = get_server_ist_date()
 
-        # 1. Fetch conducted sessions for this student's section and course up to today
+        # 1. Fetch conducted sessions for this student's section and course up to today,
+        # plus any session for this course where the student was marked
+        recorded_sids = [
+            r[0] for r in db.query(AttendanceRecord.session_id).filter(
+                AttendanceRecord.student_id == student.id
+            ).all() if r[0] is not None
+        ]
+
+        section_filters = []
+        if recorded_sids:
+            section_filters.append(AttendanceSession.id.in_(recorded_sids))
+        if student.section_id:
+            section_filters.append(AttendanceSession.section_id == student.section_id)
+        if not section_filters:
+            section_filters.append(AttendanceSession.section_id == student.section_id)
+
         query = db.query(AttendanceSession).filter(
             AttendanceSession.subject_id == course.id,
-            AttendanceSession.session_date <= server_today
+            AttendanceSession.session_date <= server_today,
+            or_(*section_filters)
         )
-        if student.section_id:
-            query = query.filter(AttendanceSession.section_id == student.section_id)
 
         all_sessions = query.order_by(AttendanceSession.session_date.asc(), AttendanceSession.id.asc()).all()
 
@@ -664,7 +680,10 @@ class AttendanceEngine:
             "aggregate": {
                 "total_present_sessions": agg_present,
                 "total_conducted_sessions": agg_conducted,
+                "total_effective_sessions": agg_effective_denominator,
                 "percentage": agg_percentage,
+                "aggregate_percentage": agg_percentage,
+                "aggregate_display": agg_percentage_display,
                 "band": agg_band
             }
         }

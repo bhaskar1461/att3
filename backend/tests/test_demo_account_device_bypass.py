@@ -1,9 +1,17 @@
+import os
+import sys
 import pytest
 from fastapi.testclient import TestClient
+
+backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if backend_dir not in sys.path:
+    sys.path.insert(0, backend_dir)
+
 from app.main import app
 from app.core.database import SessionLocal
-from app.models.models import User, Student, DeviceRegistration, DeviceAccountBinding, BindingStatus
+from app.models.models import User, Student, Teacher, UserRole, DeviceRegistration, DeviceAccountBinding, BindingStatus
 from app.core.device_security import is_demo_account
+from app.core.security import get_password_hash
 
 client = TestClient(app)
 
@@ -19,6 +27,19 @@ def test_is_demo_account_helper():
     assert is_demo_account("") is False
 
 def test_demo_teacher_login():
+    db = SessionLocal()
+    try:
+        teacher_u = db.query(User).filter(User.username == "demoteacher").first()
+        if not teacher_u:
+            teacher_u = User(username="demoteacher", password_hash=get_password_hash("DemoTeacher@2026"), role=UserRole.TEACHER, is_active=True)
+            db.add(teacher_u)
+            db.commit()
+        else:
+            teacher_u.password_hash = get_password_hash("DemoTeacher@2026")
+            db.commit()
+    finally:
+        db.close()
+
     response = client.post(
         "/api/v1/auth/login",
         data={
@@ -35,8 +56,22 @@ def test_demo_teacher_login():
 def test_demo_student_login_and_multi_device_unbound():
     db = SessionLocal()
     try:
+        stu_u = db.query(User).filter(User.username == "demostudent").first()
+        if not stu_u:
+            stu_u = User(username="demostudent", password_hash=get_password_hash("DemoStudent@2026"), role=UserRole.STUDENT, is_active=True)
+            db.add(stu_u)
+            db.commit()
+            db.refresh(stu_u)
+        else:
+            stu_u.password_hash = get_password_hash("DemoStudent@2026")
+            db.commit()
+
         student = db.query(Student).filter(Student.roll_number == "DEMOSTUDENT").first()
-        if student:
+        if not student:
+            student = Student(user_id=stu_u.id, roll_number="DEMOSTUDENT", name="Demo Student")
+            db.add(student)
+            db.commit()
+        else:
             student.registered_device_id = None
             db.commit()
     finally:

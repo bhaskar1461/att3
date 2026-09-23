@@ -52,6 +52,8 @@ from app.services.qr_token import (
     normalize_crockford
 )
 from app.api.student import failed_token_tracker, student_scan_limiter
+from app.core.binding_crypto import create_test_binding_proof, generate_test_p256_keypair
+from app.models.models import DeviceBinding
 
 
 class TestShortTokenSecurity(unittest.TestCase):
@@ -174,6 +176,18 @@ class TestShortTokenSecurity(unittest.TestCase):
             section_id=self.sec_b.id
         )
         self.db.add(self.student_c)
+        self.db.commit()
+
+        # Phase 5 Cutover: Enroll DeviceBinding for Student A, B, C
+        from app.models.models import DeviceBinding
+        from app.core.binding_crypto import generate_test_p256_keypair, create_test_binding_proof
+        self.priv_a, spki_a, kid_a = generate_test_p256_keypair()
+        self.binding_a = DeviceBinding(student_id=self.student_a.id, public_key=spki_a, key_id=kid_a, enrolled_at=datetime.utcnow())
+        self.priv_b, spki_b, kid_b = generate_test_p256_keypair()
+        self.binding_b = DeviceBinding(student_id=self.student_b.id, public_key=spki_b, key_id=kid_b, enrolled_at=datetime.utcnow())
+        self.priv_c, spki_c, kid_c = generate_test_p256_keypair()
+        self.binding_c = DeviceBinding(student_id=self.student_c.id, public_key=spki_c, key_id=kid_c, enrolled_at=datetime.utcnow())
+        self.db.add_all([self.binding_a, self.binding_b, self.binding_c])
         self.db.commit()
 
         # Attendance Session
@@ -301,16 +315,18 @@ class TestShortTokenSecurity(unittest.TestCase):
         )
         self.assertEqual(b_res.status_code, 200)
         b_data = b_res.json()
-        short_payload = b_data["qr_payload"]
+        short_payload = b_data.get("short_payload") or b_data["qr_payload"]
         self.assertTrue(short_payload.startswith("?s="))
 
         # 2. Student A submits new short format (?s=...&v=...)
+        proof_a = create_test_binding_proof(self.student_a.id, self.student_a.roll_number, self.priv_a)
         scan_short_res = self.client.post(
             "/api/v1/student/scan-session",
             json={
                 "session_token": short_payload,
                 "token_format": "short",
-                "device_uuid": "DEV-TEST-STUDENT-A"
+                "device_uuid": "DEV-TEST-STUDENT-A",
+                **proof_a
             },
             headers=self.student_a_headers
         )
@@ -344,12 +360,14 @@ class TestShortTokenSecurity(unittest.TestCase):
         self.assertTrue(legacy_payload.startswith("SNIST-SES|"))
 
         # Student B submits legacy token format
+        proof_b = create_test_binding_proof(self.student_b.id, self.student_b.roll_number, self.priv_b)
         scan_legacy_res = self.client.post(
             "/api/v1/student/scan-session",
             json={
                 "session_token": legacy_payload,
                 "token_format": "legacy",
-                "device_uuid": "DEV-TEST-STUDENT-B"
+                "device_uuid": "DEV-TEST-STUDENT-B",
+                **proof_b
             },
             headers=self.student_b_headers
         )
@@ -409,27 +427,30 @@ class TestShortTokenSecurity(unittest.TestCase):
         payload = token_info["payload"]
 
         # First scan by Student A: SUCCESS
+        proof_a1 = create_test_binding_proof(self.student_a.id, self.student_a.roll_number, self.priv_a)
         res1 = self.client.post(
             "/api/v1/student/scan-session",
-            json={"session_token": payload, "device_uuid": "DEV-STU-A-01"},
+            json={"session_token": payload, "device_uuid": "DEV-STU-A-01", **proof_a1},
             headers=self.student_a_headers
         )
         self.assertEqual(res1.status_code, 200)
         self.assertEqual(res1.json()["status"], "SUCCESS")
 
         # Second scan by Student A: ALREADY_MARKED
+        proof_a2 = create_test_binding_proof(self.student_a.id, self.student_a.roll_number, self.priv_a)
         res2 = self.client.post(
             "/api/v1/student/scan-session",
-            json={"session_token": payload, "device_uuid": "DEV-STU-A-01"},
+            json={"session_token": payload, "device_uuid": "DEV-STU-A-01", **proof_a2},
             headers=self.student_a_headers
         )
         self.assertEqual(res2.status_code, 200)
         self.assertEqual(res2.json()["status"], "ALREADY_MARKED")
 
         # Student C (in Section B) tries to scan Section A's QR: REJECTED with 400
+        proof_c = create_test_binding_proof(self.student_c.id, self.student_c.roll_number, self.priv_c)
         res_c = self.client.post(
             "/api/v1/student/scan-session",
-            json={"session_token": payload, "device_uuid": "DEV-STU-C-01"},
+            json={"session_token": payload, "device_uuid": "DEV-STU-C-01", **proof_c},
             headers=self.student_c_headers
         )
         self.assertEqual(res_c.status_code, 400)
@@ -461,17 +482,19 @@ class TestShortTokenSecurity(unittest.TestCase):
         shared_device_id = "DEV-PHYSICAL-PHONE-42"
 
         # Student A scans from shared device -> binds phone
+        proof_a = create_test_binding_proof(self.student_a.id, self.student_a.roll_number, self.priv_a)
         res_a = self.client.post(
             "/api/v1/student/scan-session",
-            json={"session_token": token_info["payload"], "device_uuid": shared_device_id},
+            json={"session_token": token_info["payload"], "device_uuid": shared_device_id, **proof_a},
             headers=self.student_a_headers
         )
         self.assertEqual(res_a.status_code, 200)
 
         # Student B immediately attempts to scan on Student A's phone -> REJECTED with 403
+        proof_b = create_test_binding_proof(self.student_b.id, self.student_b.roll_number, self.priv_b)
         res_b = self.client.post(
             "/api/v1/student/scan-session",
-            json={"session_token": token_info["payload"], "device_uuid": shared_device_id},
+            json={"session_token": token_info["payload"], "device_uuid": shared_device_id, **proof_b},
             headers=self.student_b_headers
         )
         self.assertEqual(res_b.status_code, 403)
@@ -484,20 +507,24 @@ class TestShortTokenSecurity(unittest.TestCase):
         """Simulates rapid invalid code guesses and verifies lockout and security alert."""
         v = int(time.time() // 10)
 
-        # 1. Per-student scan attempt rate limit: max 6 attempts/min per student
-        for i in range(6):
+        # 1. Per-student scan attempt rate limit: dynamic max attempts/min per student
+        from app.api.student import student_scan_limiter
+        limit = getattr(student_scan_limiter, "max_attempts", 15)
+        for i in range(limit):
             bogus_code = f"FAKE{i:04d}"
+            proof_att = create_test_binding_proof(self.student_a.id, self.student_a.roll_number, self.priv_a)
             res = self.client.post(
                 "/api/v1/student/scan-session",
-                json={"session_token": f"?s={bogus_code}&v={v}", "device_uuid": "DEV-ATTACKER"},
+                json={"session_token": f"?s={bogus_code}&v={v}", "device_uuid": "DEV-ATTACKER", **proof_att},
                 headers=self.student_a_headers
             )
             self.assertEqual(res.status_code, 400)
 
-        # 7th scan from same student triggers HTTP 429 Too Many Requests
+        # Exceeding scan limit from same student triggers HTTP 429 Too Many Requests
+        proof_att = create_test_binding_proof(self.student_a.id, self.student_a.roll_number, self.priv_a)
         lockout_res = self.client.post(
             "/api/v1/student/scan-session",
-            json={"session_token": f"?s=FAKE9999&v={v}", "device_uuid": "DEV-ATTACKER"},
+            json={"session_token": f"?s=FAKE9999&v={v}", "device_uuid": "DEV-ATTACKER", **proof_att},
             headers=self.student_a_headers
         )
         self.assertEqual(lockout_res.status_code, 429)

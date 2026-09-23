@@ -85,6 +85,9 @@ export interface AttendanceSession {
   total_students: number;
   present_count: number;
   absent_count: number;
+  manual_count?: number;
+  manual_pct?: number;
+  anomaly_status?: 'NORMAL' | 'AMBER' | 'RED';
   students: StudentAttendanceStatus[];
 }
 
@@ -94,6 +97,8 @@ export interface StudentAttendanceStatus {
   name: string;
   status: 'PRESENT' | 'ABSENT' | '4' | 'A';
   is_scanned: boolean;
+  is_manual?: boolean;
+  manual_reason?: string;
 }
 
 export interface DashboardStats {
@@ -122,4 +127,6 @@ export interface HistoricalAttendanceSession {
   absent_count: number;
   created_at?: string;
 }
+
+export * from './calendar.ts';
 

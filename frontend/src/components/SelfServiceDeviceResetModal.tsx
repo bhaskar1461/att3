@@ -3,7 +3,9 @@ import {
   X, Smartphone, KeyRound, Mail, ArrowRight, CheckCircle2, 
   AlertTriangle, RefreshCw, Clock, ShieldCheck 
 } from 'lucide-react';
-import { getOrCreateDeviceCredentials } from '../services/deviceCredential';
+import { unbindDevice } from '../services/binding';
+import { useAuth } from '../context/AuthContext';
+import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/deviceCredential';
 
 interface SelfServiceDeviceResetModalProps {
   initialRollNumber?: string;
@@ -16,6 +18,7 @@ export const SelfServiceDeviceResetModal: React.FC<SelfServiceDeviceResetModalPr
   onClose,
   onSuccess
 }) => {
+  const { login } = useAuth();
   const [step, setStep] = useState<'CREDENTIALS' | 'OTP' | 'SUCCESS'>('CREDENTIALS');
   const [rollNumber, setRollNumber] = useState<string>(initialRollNumber);
   const [password, setPassword] = useState<string>('');
@@ -87,15 +90,18 @@ export const SelfServiceDeviceResetModal: React.FC<SelfServiceDeviceResetModalPr
     setErrorMsg(null);
 
     try {
-      const deviceCreds = getOrCreateDeviceCredentials();
+      const creds = getOrCreateDeviceCredentials();
       const res = await fetch('/api/v1/devices/verify-reset', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          ...getDeviceHeaders()
+        },
         body: JSON.stringify({
           roll_number: rollNumber.trim().toUpperCase(),
           otp: otp.trim(),
-          new_device_public_id: deviceCreds.device_public_id,
-          new_device_secret: deviceCreds.device_secret
+          new_device_public_id: creds.device_public_id,
+          new_device_secret: creds.device_secret
         })
       });
 
@@ -104,10 +110,22 @@ export const SelfServiceDeviceResetModal: React.FC<SelfServiceDeviceResetModalPr
         throw new Error(data.detail || data.message || 'Verification failed.');
       }
 
+      // Wipe local keypair handles to ensure fresh enrollment ceremony on next scan
+      await unbindDevice();
+
       setStep('SUCCESS');
-      setTimeout(() => {
-        onSuccess(rollNumber.trim().toUpperCase());
-      }, 2000);
+
+      // If backend returned access token and user info, log in immediately
+      if (data.access_token && data.user) {
+        login(data.access_token, data.user, data.refresh_token);
+        setTimeout(() => {
+          window.location.href = '/student?scan=true';
+        }, 1500);
+      } else {
+        setTimeout(() => {
+          onSuccess(rollNumber.trim().toUpperCase());
+        }, 1800);
+      }
     } catch (err: any) {
       setErrorMsg(err.message || 'Invalid verification code. Please try again.');
     } finally {

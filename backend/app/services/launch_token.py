@@ -132,6 +132,8 @@ def validate_launch_token(
     Raises:
         TokenValidationError: With code='expired' or code='invalid'.
     """
+    from app.core.config import settings
+
     if now_ts is None:
         now_ts = time.time()
 
@@ -168,15 +170,16 @@ def validate_launch_token(
     if not hmac.compare_digest(provided_sig, expected_sig):
         raise TokenValidationError(code="invalid", message="Invalid launch token: signature verification failed (tampered).", server_now=now_ts)
 
-    # Strictly accept only the current window (current_step) and previous window (current_step - 1)
+    # Accept current window and previous window (max_grace_steps=1 by default)
     current_step = int(now_ts // 10)
-    if v < current_step - 1:
+    max_grace_steps = int(getattr(settings, "LAUNCH_TOKEN_MAX_GRACE_STEPS", 1))
+    if v < current_step - max_grace_steps or (exp_ts and now_ts > exp_ts):
         raise TokenValidationError(
             code="expired",
             message="Launch token has expired. Please scan the refreshed QR code on the projector.",
             server_now=now_ts
         )
-    if v > current_step:
+    if v > current_step + 1:
         raise TokenValidationError(
             code="invalid",
             message="Launch token counter is in the future. Check clock synchronization.",

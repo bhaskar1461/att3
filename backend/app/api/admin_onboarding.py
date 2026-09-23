@@ -252,7 +252,7 @@ async def import_onboarding_excel(
                 section_id=section_id,
                 department_code=department_code,
                 student_count=created,
-                frontend_url=settings.FRONTEND_URL,
+                frontend_url=settings.public_frontend_url,
                 trigger_context="IMPORT",
             )
             if t_res.get("status") in ("SENT", "DEV_MODE"):
@@ -328,11 +328,7 @@ def dispatch_magic_links(
         )
 
     # Determine frontend URL
-    frontend_url = settings.FRONTEND_URL
-    if not frontend_url:
-        host = request.headers.get("host", "localhost:8000")
-        scheme = request.headers.get("x-forwarded-proto", "https")
-        frontend_url = f"{scheme}://{host}"
+    frontend_url = settings.public_frontend_url
 
     # Generate tokens and queue emails (synchronous for now — batch ≤ 500)
     dispatched = 0
@@ -608,11 +604,7 @@ def resend_magic_link(
     if not record:
         raise HTTPException(status_code=404, detail=f"No onboarding record for {clean_roll}")
 
-    frontend_url = settings.FRONTEND_URL
-    if not frontend_url:
-        host = request.headers.get("host", "localhost:8000")
-        scheme = request.headers.get("x-forwarded-proto", "https")
-        frontend_url = f"{scheme}://{host}"
+    frontend_url = settings.public_frontend_url
 
     # Generate 1-click magic link and permanent login link
     from app.core.security import create_magic_login_token, get_password_hash
@@ -789,11 +781,7 @@ def reset_student_pin(
     db.commit()
 
     # 4. Dispatch Email with new PIN, 1-click magic link and permanent login link
-    frontend_url = settings.FRONTEND_URL
-    if not frontend_url:
-        host = request.headers.get("host", "localhost:8000")
-        scheme = request.headers.get("x-forwarded-proto", "https")
-        frontend_url = f"{scheme}://{host}"
+    frontend_url = settings.public_frontend_url
     login_url = f"{frontend_url}/login"
     magic_token = create_magic_login_token(username=clean_roll, role="STUDENT", expires_days=7)
     magic_login_url = f"{frontend_url}/login?magic_token={magic_token}"
@@ -857,11 +845,7 @@ def get_student_login_link(
     Permitted for Super Admin and Teachers to copy/hand over in person.
     """
     clean_roll = roll_number.upper().strip()
-    frontend_url = settings.FRONTEND_URL
-    if not frontend_url:
-        host = request.headers.get("host", "localhost:8000")
-        scheme = request.headers.get("x-forwarded-proto", "https")
-        frontend_url = f"{scheme}://{host}"
+    frontend_url = settings.public_frontend_url
 
     return {
         "roll_number": clean_roll,
