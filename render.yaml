@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: snist-attendance
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: singapore
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: SECRET_KEY
+        generateValue: true
+      - key: QR_SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        value: sqlite:////app/data/snist_fast.db
+      - key: JNTUH_ELIGIBLE_THRESHOLD
+        value: "75.0"
+      - key: JNTUH_CONDONABLE_THRESHOLD
+        value: "65.0"
+      - key: JNTUH_INCLUDE_APPROVED_ABSENCES
+        value: "True"
+      - key: LAUNCH_TOKEN_GRACE_SECONDS
+        value: "30"
