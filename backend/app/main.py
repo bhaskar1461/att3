@@ -1,3 +1,5 @@
+from typing import Optional, Any, Dict, List
+from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
@@ -785,6 +787,41 @@ if _onboarding_modules_loaded:
             logger.error(f"Failed to register onboarding router {name}: {r_err}", exc_info=True)
 else:
     logger.warning("Onboarding modules not loaded — onboarding/credential endpoints disabled")
+
+# --- Phase 7 Stage 2: Display Heartbeat Beacon & Status ---
+class QRDisplayHeartbeatRequest(BaseModel):
+    session_id: int
+    epoch: int
+    ts: Optional[float] = None
+
+@app.post(f"{settings.API_V1_STR}/qr-display-heartbeat")
+@app.post("/api/v1/qr-display-heartbeat")
+def qr_display_heartbeat_beacon(req: QRDisplayHeartbeatRequest, request: Request):
+    """
+    Phase 7 Stage 2: Display heartbeat beacon sent every rotation from projector modal.
+    Enables real-time detection of frozen or dead classroom displays.
+    """
+    try:
+        from app.services.display_heartbeat import record_display_heartbeat
+        ip = request.client.host if request.client else None
+        return record_display_heartbeat(
+            session_id=req.session_id,
+            epoch=req.epoch,
+            client_ts=req.ts,
+            ip_address=ip
+        )
+    except Exception as e:
+        logger.warning(f"Error recording display heartbeat: {e}")
+        return {"status": "ERROR", "message": str(e)}
+
+@app.get(f"{settings.API_V1_STR}/qr-display-heartbeat/status")
+@app.get("/api/v1/qr-display-heartbeat/status")
+def qr_display_heartbeat_status(session_id: Optional[int] = None):
+    """
+    Admin & Faculty inspection of display heartbeat status.
+    """
+    from app.services.display_heartbeat import get_display_heartbeat_status
+    return get_display_heartbeat_status(session_id=session_id)
 
 @app.api_route("/health/liveness", methods=["GET", "HEAD"])
 @app.api_route(f"{settings.API_V1_STR}/health/liveness", methods=["GET", "HEAD"])

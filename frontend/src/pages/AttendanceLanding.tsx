@@ -156,12 +156,21 @@ export const AttendanceLanding: React.FC = () => {
         }
       } catch (err: any) {
         if (isMounted) {
-          const code = err?.code || (err.message?.toLowerCase().includes('expired') ? 'expired' : 'invalid');
+          const rawMsg = err?.message || err?.detail || '';
+          const lowerMsg = rawMsg.toLowerCase();
+          const p7Code = err?.phase7_code || err?.error_code || err?.qr_error_code;
+          const code = p7Code || err?.code || (
+            lowerMsg.includes('qr-session-end') || lowerMsg.includes('session has ended') ? 'QR-SESSION-END' :
+            lowerMsg.includes('qr-old') || lowerMsg.includes('outdated') ? 'QR-OLD' :
+            lowerMsg.includes('expired') ? 'expired' : 'invalid'
+          );
           setValidateErrorCode(code);
-          if (code === 'expired') {
-            setValidateError('This QR code launch token has expired. Projector QRs rotate every 10 seconds. Please scan the current live QR code using the in-app scanner.');
+          if (code === 'QR-SESSION-END' || lowerMsg.includes('session has ended')) {
+            setValidateError('This class session has ended. See your faculty if you believe this is wrong. (Code: QR-SESSION-END)');
+          } else if (code === 'QR-OLD' || code === 'expired' || lowerMsg.includes('outdated')) {
+            setValidateError('The QR on the screen is outdated. Ask faculty to bring the QR window to the front / refresh it, then rescan. (Code: QR-OLD)');
           } else {
-            setValidateError(err.message || 'Attendance link is invalid or has expired.');
+            setValidateError(rawMsg || 'Attendance link is invalid or has expired.');
           }
           setIsValidating(false);
         }
@@ -308,24 +317,30 @@ export const AttendanceLanding: React.FC = () => {
       } catch {}
       setSubmissionSuccess(res);
     } catch (err: any) {
-      const rawMsg = err?.message || '';
+      const rawMsg = err?.message || err?.detail || '';
       const lowerMsg = rawMsg.toLowerCase();
-      const code = err?.code || (
+      const p7Code = err?.phase7_code || err?.error_code || err?.qr_error_code;
+      const code = p7Code || err?.code || (
+        lowerMsg.includes('qr-session-end') || lowerMsg.includes('session has ended') ? 'QR-SESSION-END' :
         lowerMsg.includes('binding') || lowerMsg.includes('device') ? 'no_active_binding' :
+        lowerMsg.includes('qr-old') || lowerMsg.includes('outdated') ? 'QR-OLD' :
         lowerMsg.includes('expired') ? 'expired' :
         lowerMsg.includes('geofence') ? 'geofence_failed' :
         'error'
       );
       setSubmitErrorCode(code);
-      if (code === 'expired') {
+      if (code === 'QR-SESSION-END' || lowerMsg.includes('session has ended')) {
         try { sessionStorage.removeItem('snist_launch_claim'); } catch {}
-        setSubmitError('Launch token has expired. Please open the camera scanner and scan the current QR code on the projector.');
+        setSubmitError('This class session has ended. See your faculty if you believe this is wrong. (Code: QR-SESSION-END)');
+      } else if (code === 'QR-OLD' || code === 'expired' || lowerMsg.includes('outdated')) {
+        try { sessionStorage.removeItem('snist_launch_claim'); } catch {}
+        setSubmitError('The QR on the screen is outdated. Ask faculty to bring the QR window to the front / refresh it, then rescan. (Code: QR-OLD)');
       } else if (code === 'no_active_binding') {
         setSubmitError('This device is not linked. Please enroll this device once to record attendance.');
       } else if (code === 'geofence_failed') {
         setSubmitError('Location verification failed. Please make sure GPS is enabled and you are inside the classroom.');
       } else {
-        setSubmitError(err.message || 'Attendance submission failed. Please try again or scan the refreshed QR.');
+        setSubmitError(rawMsg || 'Attendance submission failed. Please try again or scan the refreshed QR.');
       }
     } finally {
       setIsSubmitting(false);

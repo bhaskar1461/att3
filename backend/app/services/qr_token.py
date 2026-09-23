@@ -309,13 +309,17 @@ class ShortTokenService:
                         server_now=now_ts
                     )
             else:
-                # Live online submission: Strictly accept only current window and previous window (default max 1 window grace)
+                # Live online submission: Strictly accept only current window and previous window (gated by QR_GRACE_EPOCH)
+                grace_allowed = getattr(settings, "QR_GRACE_EPOCH", True)
+                current_slot = int(now_ts // step_window)
+                epoch_delta = current_slot - slot_v if slot_v is not None else 0
+
                 if grace_seconds is not None:
-                    effective_grace = float(grace_seconds)
-                elif max_grace_steps is not None and max_grace_steps > 0:
-                    effective_grace = float(max_grace_steps * step_window)
+                    effective_grace = float(grace_seconds) if grace_allowed else 0.0
+                elif max_grace_steps is not None:
+                    effective_grace = float(max_grace_steps * step_window) if grace_allowed else 0.0
                 else:
-                    effective_grace = float(step_window)
+                    effective_grace = float(step_window) if grace_allowed else 0.0
 
                 slot_start_ts = slot_v * step_window
                 slot_end_ts = (slot_v + 1) * step_window
@@ -323,16 +327,23 @@ class ShortTokenService:
                 min_valid_ts = slot_start_ts - 2.0  # 2s clock skew allowance
 
                 if now_ts > max_valid_ts:
+                    msg = (
+                        "The QR on the screen is outdated. Ask faculty to bring the QR window to the front / refresh it, then rescan. (Code: QR-OLD)"
+                        if epoch_delta >= 2 else
+                        "Projector QR token has expired. Please scan the newly refreshed QR on screen. (Code: QR-OLD)"
+                    )
                     raise TokenValidationError(
-                        code="expired",
-                        message="Projector QR token has expired. Please scan the newly refreshed QR on screen.",
-                        server_now=now_ts
+                        code="QR-OLD",
+                        message=msg,
+                        server_now=now_ts,
+                        epoch_delta=epoch_delta
                     )
                 if now_ts < min_valid_ts:
                     raise TokenValidationError(
                         code="invalid",
                         message="Projector QR token timestamp is in the future. Check clock synchronization.",
-                        server_now=now_ts
+                        server_now=now_ts,
+                        epoch_delta=epoch_delta
                     )
 
             # Resolve session_id: Step 1 O(1) in-memory cache
@@ -405,9 +416,12 @@ class ShortTokenService:
             sess = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
             if not sess or sess.status == SessionStatus.LOCKED:
                 raise TokenValidationError(
-                    code="expired",
-                    message="Attendance session has been locked or closed by the instructor.",
-                    server_now=now_ts
+                    code="QR-SESSION-END",
+                    message="This class session has ended (locked). See your faculty if you believe this is wrong. (Code: QR-SESSION-END)",
+                    server_now=now_ts,
+                    epoch_delta=launch_data.get("epoch_delta", 0),
+                    session_status="LOCKED",
+                    session_id=session_id
                 )
 
             # Check if token or session has been deactivated
@@ -426,9 +440,12 @@ class ShortTokenService:
 
             if not is_active:
                 raise TokenValidationError(
-                    code="expired",
-                    message="Attendance token is no longer active for this session.",
-                    server_now=now_ts
+                    code="QR-SESSION-END",
+                    message="This class session has ended (locked). See your faculty if you believe this is wrong. (Code: QR-SESSION-END)",
+                    server_now=now_ts,
+                    epoch_delta=launch_data.get("epoch_delta", 0),
+                    session_status="LOCKED",
+                    session_id=session_id
                 )
 
             from app.api.teacher import _extract_period_count
@@ -438,6 +455,7 @@ class ShortTokenService:
                 "session_id": session_id,
                 "period_count": period_count,
                 "step": slot_v,
+                "epoch_delta": launch_data.get("epoch_delta", 0),
                 "token_format": "launch",
                 "is_active": True,
                 "short_code": code,

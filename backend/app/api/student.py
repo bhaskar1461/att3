@@ -977,19 +977,44 @@ async def student_scan_session(
         t_hmac_ms = (time.perf_counter() - t_hmac_start) * 1000
     except TokenValidationError as tve:
         failed_token_tracker.record_failure(tracker_key)
+        client_epoch_ms = request.headers.get("x-client-epoch-ms")
+        skew_ms = None
+        if client_epoch_ms:
+            try:
+                skew_ms = round(float(client_epoch_ms) - (now_ts * 1000), 2)
+            except Exception:
+                pass
+
+        if (tve.code in ("QR-OLD", "expired") or getattr(tve, "code", None) == "QR-OLD") and getattr(tve, "session_id", None):
+            try:
+                from app.services.display_heartbeat import record_qr_old_event
+                record_qr_old_event(tve.session_id)
+            except Exception:
+                pass
+
+        p7_code = "QR-SESSION-END" if str(tve.code) == "QR-SESSION-END" else "QR-OLD"
         try:
             log_security_audit_event(
                 db=db,
                 event_type=SecurityEventType.ATTENDANCE_REJECTED,
                 action="PROJECTOR_TOKEN_REJECTED",
-                details=f"Projector token validation error for student {current_student.roll_number}: {tve.message}",
+                details=f"Projector token validation error for student {current_student.roll_number}: {tve.message} | epoch_delta={tve.epoch_delta}, session_status={tve.session_status}, skew_ms={skew_ms}",
                 roll_number=current_student.roll_number
             )
         except Exception:
             pass
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": tve.code, "message": tve.message, "serverNow": tve.server_now}
+            detail={
+                "code": "expired",
+                "error_code": p7_code,
+                "phase7_code": p7_code,
+                "message": tve.message, 
+                "serverNow": tve.server_now,
+                "epoch_delta": tve.epoch_delta,
+                "session_status": tve.session_status,
+                "skew_ms": skew_ms
+            }
         )
     except ValueError as val_err:
         failed_token_tracker.record_failure(tracker_key)
@@ -1106,7 +1131,14 @@ async def student_scan_session(
             else:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Attendance session is locked. No further scans allowed."
+                    detail={
+                        "code": "expired",
+                        "error_code": "QR-SESSION-END",
+                        "phase7_code": "QR-SESSION-END",
+                        "message": "This class session has ended. Attendance session is locked. See your faculty if you believe this is wrong. (Code: QR-SESSION-END)",
+                        "session_status": "LOCKED",
+                        "serverNow": time.time()
+                    }
                 )
 
         # 2. Check section membership (in-memory)

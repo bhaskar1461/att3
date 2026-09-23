@@ -32,6 +32,14 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
   const [wakeLockActive, setWakeLockActive] = useState<boolean>(false);
   const [wakeLockSupported, setWakeLockSupported] = useState<boolean>(true);
 
+  // Phase 7 Stage 2: Display Hardening & Watchdog States
+  const [isSessionEnded, setIsSessionEnded] = useState<boolean>(false);
+  const isSessionEndedRef = useRef<boolean>(false);
+  const [showResyncedToast, setShowResyncedToast] = useState<boolean>(false);
+  const renderedEpochRef = useRef<number | null>(null);
+  const lagStartTimeRef = useRef<number | null>(null);
+  const refreshIntervalSecRef = useRef<number>(10);
+
   // Server-authoritative timing refs (Never trust client laptop clock)
   const serverOffsetRef = useRef<number>(0);
   const expiresAtRef = useRef<number>(0);
@@ -71,6 +79,10 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
   useEffect(() => {
     dataRef.current = data;
   }, [data]);
+
+  useEffect(() => {
+    isSessionEndedRef.current = isSessionEnded;
+  }, [isSessionEnded]);
 
   // Handle auto-hiding chrome when in fullscreen presentation mode
   const handleUserActivity = () => {
@@ -133,9 +145,10 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
     };
   }, []);
 
-  // Fetch rotating token from backend with dynamic period_count and dark_mode
-  const fetchBroadcastToken = async (overridePeriod?: number, overrideDarkMode?: boolean) => {
-    if (isFetchingRef.current) return;
+  // Fetch rotating token from backend (Server-driven rotation)
+  const fetchBroadcastToken = async (overridePeriod?: number, overrideDarkMode?: boolean, force?: boolean) => {
+    if (isSessionEndedRef.current) return;
+    if (isFetchingRef.current && !force) return;
     isFetchingRef.current = true;
     const currentP = overridePeriod !== undefined ? overridePeriod : periodCountRef.current;
     const currentDark = overrideDarkMode !== undefined ? overrideDarkMode : isDarkRoom;
@@ -152,6 +165,19 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
         }
       );
 
+      // 5. SESSION ENDED Check: Stop immediately if session has ended or locked
+      if (res?.is_ended || res?.session_status === 'LOCKED') {
+        console.warn('[Projector] Session is locked or ended. Stopping broadcast.');
+        setIsSessionEnded(true);
+        isSessionEndedRef.current = true;
+        setCurrentQr(null);
+        setIncomingQr(null);
+        currentQrRef.current = null;
+        if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+        return;
+      }
+
       // Server time drift correction: compute server clock offset
       const clientResTime = Date.now();
       const serverNowSec = res.server_now ?? res.serverNow;
@@ -166,6 +192,14 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
         expiresAtRef.current = expSec * 1000;
       } else {
         expiresAtRef.current = (Date.now() + serverOffsetRef.current) + 10000;
+      }
+
+      // Record rendered epoch and refresh interval from server
+      if (res?.step !== undefined) {
+        renderedEpochRef.current = Number(res.step);
+      }
+      if (res?.refresh_interval) {
+        refreshIntervalSecRef.current = Number(res.refresh_interval);
       }
 
       setData(res);
@@ -196,8 +230,46 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
           };
         }
       }
+
+      // 6. Display Heartbeat Beacon: send every rotation
+      try {
+        const beaconPayload = JSON.stringify({
+          session_id: sessionId,
+          epoch: res.step ?? 0,
+          ts: Date.now() / 1000
+        });
+        if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+          const blob = new Blob([beaconPayload], { type: 'application/json' });
+          navigator.sendBeacon('/api/v1/qr-display-heartbeat', blob);
+        } else {
+          fetch('/api/v1/qr-display-heartbeat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: beaconPayload,
+            keepalive: true
+          }).catch(() => {});
+        }
+      } catch (hbErr) {
+        console.debug('[Projector] Heartbeat beacon suppressed:', hbErr);
+      }
     } catch (err: any) {
       console.error('Failed to fetch broadcast token:', err);
+
+      // Check if server indicated session ended/locked
+      const errStr = String(err?.message || err?.detail?.message || err?.detail || '').toLowerCase();
+      const isEnded = errStr.includes('locked') || errStr.includes('ended') || err?.code === 'session_ended' || err?.detail?.code === 'session_ended';
+      if (isEnded) {
+        console.warn('[Projector] Received locked session error from server. Displaying SESSION ENDED overlay.');
+        setIsSessionEnded(true);
+        isSessionEndedRef.current = true;
+        setCurrentQr(null);
+        setIncomingQr(null);
+        currentQrRef.current = null;
+        if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+        return;
+      }
+
       failCountRef.current += 1;
       const estServerTime = Date.now() + serverOffsetRef.current;
       const isPastExpiry = expiresAtRef.current > 0 && estServerTime >= expiresAtRef.current;
@@ -226,21 +298,56 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
 
     // High frequency drift-free server countdown ticker (runs every 250ms)
     countdownIntervalRef.current = setInterval(() => {
+      if (isSessionEndedRef.current) return;
       if (!expiresAtRef.current) return;
       const currentServerNow = Date.now() + serverOffsetRef.current;
       const secRemaining = Math.max(0, Math.ceil((expiresAtRef.current - currentServerNow) / 1000));
       setSecondsRemaining(secRemaining);
+
+      // 3. Rotation WATCHDOG: Detect if rendered epoch lags server epoch
+      const stepWindow = refreshIntervalSecRef.current || 10;
+      const expectedServerEpoch = Math.floor((currentServerNow / 1000) / stepWindow);
+      const renderedEpoch = renderedEpochRef.current;
+
+      if (renderedEpoch !== null && expectedServerEpoch > renderedEpoch) {
+        const lag = expectedServerEpoch - renderedEpoch;
+        if (lag >= 1) {
+          if (!lagStartTimeRef.current) {
+            lagStartTimeRef.current = Date.now();
+          } else if (Date.now() - lagStartTimeRef.current > 5000) {
+            // Lags for > 5 seconds
+            if (lag >= 2) {
+              console.warn(`[WATCHDOG] Critical rotation lag (${lag} >= 2) for >5s. Reloading page...`);
+              window.location.reload();
+              return;
+            } else if (lag >= 1) {
+              console.warn(`[WATCHDOG] Rotation lag (${lag} >= 1) for >5s. Auto re-fetching...`);
+              lagStartTimeRef.current = null;
+              isFetchingRef.current = false;
+              fetchBroadcastToken(periodCountRef.current, isDarkRoom, true);
+              setShowResyncedToast(true);
+              setTimeout(() => setShowResyncedToast(false), 3000);
+            }
+          }
+        } else {
+          lagStartTimeRef.current = null;
+        }
+      } else {
+        lagStartTimeRef.current = null;
+      }
 
       if (currentServerNow >= expiresAtRef.current && !isFetchingRef.current) {
         fetchBroadcastToken(periodCountRef.current, isDarkRoom);
       }
     }, 250);
 
-    // Re-sync immediately on visibilitychange
+    // 2. Visibilitychange handler: on return to foreground, force immediate re-fetch + re-render
     const handleVisibilitySync = () => {
-      if (document.visibilityState === 'visible') {
-        console.log('[Projector] Window became visible — re-syncing broadcast token with server time');
-        fetchBroadcastToken(periodCountRef.current, isDarkRoom);
+      if (document.visibilityState === 'visible' && !isSessionEndedRef.current) {
+        console.log('[Projector] Window returned to foreground — forcing immediate re-fetch + re-render');
+        if (pollTimerRef.current) clearTimeout(pollTimerRef.current);
+        isFetchingRef.current = false;
+        fetchBroadcastToken(periodCountRef.current, isDarkRoom, true);
       }
     };
     document.addEventListener('visibilitychange', handleVisibilitySync);
@@ -318,8 +425,24 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
         isDarkRoom ? 'bg-black text-white' : 'bg-[#000d1a] text-white'
       }`}
     >
+      {/* Phase 7: Transient Re-synced Toast from Watchdog */}
+      {showResyncedToast && (
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 bg-emerald-600 text-white px-5 py-2.5 rounded-full shadow-2xl flex items-center gap-2 text-xs sm:text-sm font-bold animate-bounce border border-emerald-400">
+          <CheckCircle className="w-4 h-4 text-emerald-200" />
+          <span>Re-synced with Server Time</span>
+        </div>
+      )}
+
+      {/* Wake Lock Inactive Hint Banner */}
+      {!wakeLockActive && !isSessionEnded && showControls && (
+        <div className="z-40 bg-amber-500/20 text-amber-200 border-b border-amber-500/30 px-4 py-1.5 text-center text-xs flex items-center justify-center gap-2 font-medium">
+          <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+          <span>Keep this window open & screen awake to ensure uninterrupted classroom scanning.</span>
+        </div>
+      )}
+
       {/* Red STALE Banner: Displayed if token refresh fails or network stalled */}
-      {isStale && (
+      {isStale && !isSessionEnded && (
         <div className="z-50 bg-rose-600 text-white px-6 py-2.5 flex items-center justify-between shadow-2xl font-sans border-b border-rose-400 animate-pulse">
           <div className="flex items-center gap-2.5">
             <AlertCircle className="w-5 h-5 text-amber-200 shrink-0" />
@@ -342,8 +465,39 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
         </div>
       )}
 
-      {/* FULL SCREEN ATTENDANCE QR MODE: Maximum projector pixel footprint (92-96% viewport) */}
-      {isFullScreenQrMode ? (
+      {/* 5. SESSION ENDED State: Stops rendering QR and displays prominent overlay */}
+      {isSessionEnded ? (
+        <div className="flex-1 flex flex-col items-center justify-center p-8 text-center bg-slate-950 text-white select-none z-40">
+          <div className="w-24 h-24 rounded-3xl bg-rose-500/10 border-2 border-rose-500/40 flex items-center justify-center mb-6 shadow-2xl animate-pulse">
+            <Lock className="w-12 h-12 text-rose-400" />
+          </div>
+          <h1 className="text-3xl sm:text-5xl md:text-6xl font-black text-white tracking-tight uppercase mb-4">
+            SESSION ENDED
+          </h1>
+          <p className="text-lg sm:text-2xl font-bold text-rose-300 max-w-xl mb-4">
+            No further scans are accepted. Attendance window has closed.
+          </p>
+          <p className="text-sm text-slate-400 max-w-md mb-8">
+            This class session has been locked by the instructor. See your faculty if you require manual attendance reconciliation.
+          </p>
+          <div className="flex flex-wrap items-center justify-center gap-3 text-slate-300 font-mono text-xs sm:text-sm bg-white/5 px-6 py-3 rounded-xl border border-white/10 mb-8">
+            <span>Session #{sessionId}</span>
+            <span>•</span>
+            <span>{data?.subject_name || 'Class'}</span>
+            <span>•</span>
+            <span>{data?.section_name || 'Section'}</span>
+            <span>•</span>
+            <span>{data?.session_date || 'Today'}</span>
+          </div>
+          <button
+            onClick={onClose}
+            className="px-8 py-3.5 bg-rose-600 hover:bg-rose-700 text-white font-black rounded-xl text-sm transition shadow-2xl flex items-center gap-2"
+          >
+            <X className="w-4 h-4" />
+            <span>Close Projector Screen</span>
+          </button>
+        </div>
+      ) : isFullScreenQrMode ? (
         <div className="flex-1 relative flex flex-col h-full justify-between">
           
           {/* Top Header bar with auto-hide slide transition */}
@@ -368,19 +522,17 @@ export const ProjectorBroadcastModal: React.FC<ProjectorBroadcastModalProps> = (
 
             <div className="flex items-center gap-2">
               {/* Screen Wake Lock Status / Unsupported Warning */}
-              <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-white/5 text-[11px] text-slate-300">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-white/5 text-[11px] text-slate-300 border border-white/10">
                 {wakeLockActive ? (
                   <>
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
                     <span className="text-emerald-300 font-medium">Screen Awake ✓</span>
                   </>
-                ) : !wakeLockSupported ? (
-                  <span className="text-amber-300 flex items-center gap-1">
-                    <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
-                    Set display sleep to Never
-                  </span>
                 ) : (
-                  <span className="text-slate-400">WakeLock Inactive</span>
+                  <span className="text-amber-300 flex items-center gap-1 font-medium" title="Wake Lock Inactive">
+                    <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>Keep this window open & screen awake</span>
+                  </span>
                 )}
               </div>
 

@@ -162,6 +162,11 @@ class Settings:
     # Extended grace window (seconds) for URL-based flow (student needs time to tap URL, load page, auth)
     LAUNCH_TOKEN_GRACE_SECONDS: int = int(os.getenv("LAUNCH_TOKEN_GRACE_SECONDS", "30"))
 
+    # --- Phase 7: QR Freshness & Faculty Display Hardening Feature Flags ---
+    DISPLAY_HARDENING: bool = os.getenv("DISPLAY_HARDENING", "True").lower() == "true"
+    QR_GRACE_EPOCH: bool = os.getenv("QR_GRACE_EPOCH", "True").lower() == "true"
+    ROTATION_INTERVAL_SECONDS: int = int(os.getenv("ROTATION_INTERVAL_SECONDS", "45"))
+
     # --- Geofence Configuration (Disabled for indoor classroom scanning) ---
     GEOFENCE_ENABLED: bool = os.getenv("GEOFENCE_ENABLED", "False").lower() == "true"
 

@@ -66,9 +66,24 @@ def claim_launch_token(
     try:
         token_data = validate_launch_token(req.launch_token, now_ts=now_ts)
     except TokenValidationError as tve:
+        if (tve.code in ("QR-OLD", "expired") or getattr(tve, "code", None) == "QR-OLD") and getattr(tve, "session_id", None):
+            try:
+                from app.services.display_heartbeat import record_qr_old_event
+                record_qr_old_event(tve.session_id)
+            except Exception:
+                pass
+        p7_code = "QR-SESSION-END" if str(tve.code) == "QR-SESSION-END" else "QR-OLD"
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": tve.code, "message": tve.message, "serverNow": tve.server_now}
+            detail={
+                "code": "expired",
+                "error_code": p7_code,
+                "phase7_code": p7_code,
+                "message": tve.message, 
+                "serverNow": tve.server_now,
+                "epoch_delta": tve.epoch_delta,
+                "session_status": tve.session_status
+            }
         )
     except ValueError as e:
         raise HTTPException(
@@ -87,7 +102,15 @@ def claim_launch_token(
     if session.status == SessionStatus.LOCKED:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "expired", "message": "Attendance session has been locked or closed by the instructor.", "serverNow": now_ts}
+            detail={
+                "code": "expired",
+                "error_code": "QR-SESSION-END",
+                "phase7_code": "QR-SESSION-END",
+                "message": "This class session has ended. Attendance session is locked. See your faculty if you believe this is wrong. (Code: QR-SESSION-END)", 
+                "serverNow": now_ts,
+                "session_status": "LOCKED",
+                "epoch_delta": token_data.get("epoch_delta", 0)
+            }
         )
 
     claim_info = create_claim_ticket(

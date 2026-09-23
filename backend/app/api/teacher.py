@@ -584,7 +584,15 @@ def get_session_broadcast_token(
         raise HTTPException(status_code=403, detail="Not authorized to broadcast this session")
 
     if session.status != SessionStatus.OPEN:
-        raise HTTPException(status_code=400, detail="Cannot broadcast a locked session. Please unlock the session first.")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "session_ended",
+                "message": "Cannot broadcast a locked session. The session has ended.",
+                "session_status": session.status.value,
+                "is_ended": True
+            }
+        )
 
     p_count = max(1, min(8, period_count or _extract_period_count(session.period)))
 
@@ -694,6 +702,11 @@ def get_session_broadcast_token(
     step_expires_at = float((chosen_step + 1) * 10)
     int_seconds_remaining = max(1, int(math.ceil(step_expires_at - server_now)))
     precise_seconds_remaining = max(0.1, round(step_expires_at - server_now, 2))
+    from app.services.display_heartbeat import is_display_stale, clear_qr_old_events
+    is_stale = is_display_stale(session.id)
+    if is_stale:
+        # Self-heal once faculty fetches fresh token
+        clear_qr_old_events(session.id)
 
     return {
         "session_id": session.id,
@@ -730,7 +743,11 @@ def get_session_broadcast_token(
         "manual_count": manual_count,
         "manual_pct": manual_pct,
         "anomaly_status": anomaly_status,
-        "attendance_pct": attendance_pct
+        "attendance_pct": attendance_pct,
+        "session_status": session.status.value,
+        "is_ended": (session.status != SessionStatus.OPEN),
+        "display_stale_alert": is_stale,
+        "display_stale_notice": "Your QR screen is outdated — click to re-sync" if is_stale else None
     }
 
 from app.api.attendance import invalidate_session_cache

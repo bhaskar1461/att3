@@ -530,13 +530,44 @@ def generate_projector_session_token(
         "step_window": step_window
     }
 
+class Phase7ErrorCode(str):
+    """
+    Subclass of str providing backward and forward compatibility between legacy
+    error codes ('expired') and Phase 7 taxonomy ('QR-OLD', 'QR-SESSION-END').
+    """
+    def __eq__(self, other):
+        if str(self) in ("QR-OLD", "QR-SESSION-END", "expired") and other in ("QR-OLD", "QR-SESSION-END", "expired"):
+            return True
+        return super().__eq__(other)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    def __hash__(self):
+        return hash(str(self))
+
+
 class TokenValidationError(ValueError):
     """Exception raised when QR / launch token validation fails."""
-    def __init__(self, code: str, message: str, server_now: Optional[float] = None):
+    def __init__(
+        self, 
+        code: str, 
+        message: str, 
+        server_now: Optional[float] = None,
+        epoch_delta: int = 0,
+        session_status: Optional[str] = None,
+        session_id: Optional[int] = None
+    ):
         super().__init__(message)
-        self.code = code
+        if code in ("QR-OLD", "QR-SESSION-END", "expired"):
+            self.code = Phase7ErrorCode(code)
+        else:
+            self.code = code
         self.message = message
         self.server_now = server_now if server_now is not None else time.time()
+        self.epoch_delta = epoch_delta
+        self.session_status = session_status
+        self.session_id = session_id
 
 
 def validate_projector_session_token(
@@ -574,7 +605,10 @@ def validate_projector_session_token(
         raise TokenValidationError(code="invalid", message=f"Malformed fields in projector token: {parse_err}", server_now=now_ts)
 
     if period_count < 1 or period_count > 8:
-        raise TokenValidationError(code="invalid", message="Invalid period count in projector token (must be between 1 and 8)", server_now=now_ts)
+        raise TokenValidationError(code="invalid", message="Invalid period count in projector token (must be between 1 and 8)", server_now=now_ts, session_id=session_id)
+
+    current_step = int(now_ts // step_window)
+    epoch_delta = current_step - token_step
 
     # Window check:
     if is_offline_submission:
@@ -586,46 +620,71 @@ def validate_projector_session_token(
         min_valid_ts = slot_start_ts - 2.0
         if now_ts > max_valid_ts:
             raise TokenValidationError(
-                code="expired",
+                code="QR-OLD",
                 message=f"Projector QR token expired beyond offline submit grace window ({getattr(settings, 'SUBMIT_GRACE_MINUTES', 10)}m).",
-                server_now=now_ts
+                server_now=now_ts,
+                epoch_delta=epoch_delta,
+                session_id=session_id
             )
         if now_ts < min_valid_ts:
             raise TokenValidationError(
                 code="invalid",
                 message="Projector QR token timestamp is in the future. Check clock synchronization.",
-                server_now=now_ts
+                server_now=now_ts,
+                epoch_delta=epoch_delta,
+                session_id=session_id
             )
     else:
         slot_end_ts = (token_step + 1) * step_window
         slot_start_ts = token_step * step_window
+        grace_allowed = getattr(settings, "QR_GRACE_EPOCH", True)
+        allowed_grace_steps = (max_grace_steps if max_grace_steps is not None else 1) if grace_allowed else 0
+
         if grace_seconds is not None:
-            if now_ts > slot_end_ts + grace_seconds:
+            effective_grace = float(grace_seconds) if grace_allowed else 0.0
+            if now_ts > slot_end_ts + effective_grace:
+                code = "QR-OLD" if epoch_delta >= 2 else "expired"
+                msg = (
+                    "The QR on the screen is outdated. Ask faculty to bring the QR window to the front / refresh it, then rescan. (Code: QR-OLD)"
+                    if epoch_delta >= 2 else
+                    "Projector QR token has expired beyond grace period. Please scan the newly refreshed QR on screen. (Code: QR-OLD)"
+                )
                 raise TokenValidationError(
-                    code="expired",
-                    message="Projector QR token has expired beyond grace period. Please scan the newly refreshed QR on screen.",
-                    server_now=now_ts
+                    code=code,
+                    message=msg,
+                    server_now=now_ts,
+                    epoch_delta=epoch_delta,
+                    session_id=session_id
                 )
             if now_ts < slot_start_ts - 2.0:
                 raise TokenValidationError(
                     code="invalid",
                     message="Projector QR token timestamp is in the future. Check clock synchronization.",
-                    server_now=now_ts
+                    server_now=now_ts,
+                    epoch_delta=epoch_delta,
+                    session_id=session_id
                 )
         else:
-            allowed_grace_steps = max_grace_steps if max_grace_steps is not None else 1
-            current_step = int(now_ts // step_window)
-            if token_step < current_step - allowed_grace_steps:
+            if epoch_delta > allowed_grace_steps:
+                msg = (
+                    "The QR on the screen is outdated (expired). Ask faculty to bring the QR window to the front / refresh it, then rescan. (Code: QR-OLD)"
+                    if epoch_delta >= 2 else
+                    "Projector QR token has expired. Please scan the newly refreshed QR on screen. (Code: QR-OLD)"
+                )
                 raise TokenValidationError(
-                    code="expired",
-                    message="Projector QR token has expired. Please scan the newly refreshed QR on screen.",
-                    server_now=now_ts
+                    code="QR-OLD",
+                    message=msg,
+                    server_now=now_ts,
+                    epoch_delta=epoch_delta,
+                    session_id=session_id
                 )
             if token_step > current_step:
                 raise TokenValidationError(
                     code="invalid",
                     message="Projector QR token timestamp is in the future. Check clock synchronization.",
-                    server_now=now_ts
+                    server_now=now_ts,
+                    epoch_delta=epoch_delta,
+                    session_id=session_id
                 )
         
     # Verify HMAC for token_step
@@ -634,12 +693,13 @@ def validate_projector_session_token(
     expected_mac = hmac.new(key, base_str.encode('utf-8'), hashlib.sha256).hexdigest()[:12]
     
     if not hmac.compare_digest(mac, expected_mac):
-        raise TokenValidationError(code="invalid", message="Invalid projector QR signature (Tampered token)", server_now=now_ts)
+        raise TokenValidationError(code="invalid", message="Invalid projector QR signature (Tampered token)", server_now=now_ts, epoch_delta=epoch_delta, session_id=session_id)
         
     return {
         "session_id": session_id,
         "period_count": period_count,
         "step": token_step,
+        "epoch_delta": epoch_delta,
         "is_grace_window": (now_ts >= slot_end_ts)
     }
 

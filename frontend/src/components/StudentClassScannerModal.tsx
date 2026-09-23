@@ -724,10 +724,13 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       lastFailedPayloadRef.current = payloadToken;
 
       // ── Clean Error Handling ──
-      const rawMsg = err?.message || '';
+      const rawMsg = err?.message || err?.detail || '';
       const lowerMsg = rawMsg.toLowerCase();
-      const code: string = err?.code || (
+      const p7Code = err?.phase7_code || err?.error_code || err?.qr_error_code;
+      const code: string = p7Code || err?.code || (
         err?.status === 429 || lowerMsg.includes('too many') || lowerMsg.includes('rate_limited') ? 'rate_limited' :
+        lowerMsg.includes('qr-session-end') || lowerMsg.includes('session has ended') ? 'QR-SESSION-END' :
+        lowerMsg.includes('qr-old') || lowerMsg.includes('outdated') ? 'QR-OLD' :
         lowerMsg.includes('expired') ? 'expired' :
         lowerMsg.includes('invalid') ? 'invalid' :
         (lowerMsg.includes('no_active_binding') || lowerMsg.includes('binding_required') || lowerMsg.includes('device')) ? 'no_active_binding' :
@@ -797,10 +800,17 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
       triggerFeedback(false);
 
-      if (code === 'expired' || lowerMsg.includes('expired')) {
+      if (code === 'QR-SESSION-END' || lowerMsg.includes('qr-session-end') || lowerMsg.includes('session has ended')) {
+        setScanError('This class session has ended. See your faculty if you believe this is wrong. (Code: QR-SESSION-END)');
+        setGuideText('Session ended — scanning halted');
+        stopCamera();
+        return;
+      }
+
+      if (code === 'QR-OLD' || code === 'expired' || lowerMsg.includes('outdated') || lowerMsg.includes('expired')) {
         lastExpiredPayloadRef.current = payloadToken;
-        setGuideText('Old QR — waiting for the projector to refresh');
-        setScanError('QR expired. Please scan the current classroom QR.');
+        setGuideText('QR outdated — waiting for projector refresh');
+        setScanError('The QR on the screen is outdated. Ask faculty to bring the QR window to the front / refresh it, then rescan. (Code: QR-OLD)');
         return;
       }
 

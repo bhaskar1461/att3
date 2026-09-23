@@ -170,26 +170,40 @@ def validate_launch_token(
     if not hmac.compare_digest(provided_sig, expected_sig):
         raise TokenValidationError(code="invalid", message="Invalid launch token: signature verification failed (tampered).", server_now=now_ts)
 
-    # Accept current window and previous window (max_grace_steps=1 by default)
+    # Accept current window and previous window (max_grace_steps=1 by default, gated by QR_GRACE_EPOCH)
     current_step = int(now_ts // 10)
-    max_grace_steps = int(getattr(settings, "LAUNCH_TOKEN_MAX_GRACE_STEPS", 1))
+    grace_allowed = getattr(settings, "QR_GRACE_EPOCH", True)
+    default_grace = 1 if grace_allowed else 0
+    max_grace_steps = int(getattr(settings, "LAUNCH_TOKEN_MAX_GRACE_STEPS", default_grace)) if grace_allowed else 0
+    epoch_delta = current_step - v
+
     if v < current_step - max_grace_steps or (exp_ts and now_ts > exp_ts):
+        msg = (
+            "The QR on the screen is outdated (expired). Ask faculty to bring the QR window to the front / refresh it, then rescan. (Code: QR-OLD)"
+            if epoch_delta >= 2 else
+            "Launch token has expired. Please scan the refreshed QR code on the projector. (Code: QR-OLD)"
+        )
         raise TokenValidationError(
-            code="expired",
-            message="Launch token has expired. Please scan the refreshed QR code on the projector.",
-            server_now=now_ts
+            code="QR-OLD",
+            message=msg,
+            server_now=now_ts,
+            epoch_delta=epoch_delta,
+            session_id=session_id
         )
     if v > current_step + 1:
         raise TokenValidationError(
             code="invalid",
             message="Launch token counter is in the future. Check clock synchronization.",
-            server_now=now_ts
+            server_now=now_ts,
+            epoch_delta=epoch_delta,
+            session_id=session_id
         )
 
     return {
         "session_id": session_id,
         "short_code": short_code,
         "v": v,
+        "epoch_delta": epoch_delta,
         "nonce": nonce,
         "exp_ts": exp_ts
     }
