@@ -13,7 +13,11 @@ logger = logging.getLogger("snist_erp.scan_telemetry")
 from app.core.database import get_db
 from app.core.config import settings
 from app.api.auth import get_current_user
-from app.models.models import User, UserRole, Student, AttendanceRecord, AttendanceSession, Subject, DeviceRegistration, DeviceBinding
+from app.models.models import (
+    User, UserRole, Student, AttendanceRecord, AttendanceSession, 
+    Subject, Teacher, Section, SessionStatus, DeviceRegistration, 
+    DeviceBinding, TeacherAssignment
+)
 from app.services.qr_service import QRService
 from app.core.security import get_server_ist_date
 from app.core.device_security import validate_active_binding_for_student
@@ -269,6 +273,19 @@ def get_student_today_schedule(
 
     active_p_count = _extract_period_count(today_session.period) if today_session else 4
 
+    # Resolve student's section and teacher assignments dynamically from DB
+    sec_name = current_student.section.name if current_student.section else "Classroom"
+    default_room = f"{sec_name} Classroom"
+
+    assignments = db.query(TeacherAssignment).filter(
+        TeacherAssignment.section_id == current_student.section_id
+    ).all() if current_student.section_id else []
+
+    primary_assignment = assignments[0] if assignments else None
+    default_subject_name = primary_assignment.subject.name if (primary_assignment and primary_assignment.subject) else "Class Attendance Session"
+    default_subject_code = primary_assignment.subject.code if (primary_assignment and primary_assignment.subject) else ""
+    default_teacher_name = primary_assignment.teacher.name if (primary_assignment and primary_assignment.teacher) else "Class Faculty"
+
     my_attendance = {
         "is_marked": is_marked,
         "status": "PRESENT" if is_marked else "UNMARKED",
@@ -276,48 +293,115 @@ def get_student_today_schedule(
         "marked_at": ist_marked_time,
         "session_id": today_session.id if today_session else None,
         "scan_mode": my_record.scan_mode if my_record else None,
-        "subject_name": today_session.subject.name if today_session and today_session.subject else "Career Enhancement Training (CET)",
-        "teacher_name": today_session.teacher.name if today_session and today_session.teacher else "Mrs. N. Sowjanya"
+        "subject_name": (today_session.subject.name if today_session and today_session.subject else None) or (default_subject_name if is_marked else None),
+        "teacher_name": (today_session.teacher.name if today_session and today_session.teacher else None) or (default_teacher_name if is_marked else None)
     }
 
-    schedule_items = [
-        {
-            "subject_name": "Career Enhancement Training (CET)",
-            "subject_code": "CS(CET)",
-            "teacher_name": "Mrs. N. Sowjanya",
-            "timing": "09:30 AM - 01:00 PM",
-            "period": f"{active_p_count} Periods",
+    # Query all sessions created today for this section
+    today_sessions = db.query(AttendanceSession).filter(
+        AttendanceSession.section_id == current_student.section_id,
+        AttendanceSession.session_date == server_today
+    ).order_by(AttendanceSession.id.asc()).all() if current_student.section_id else []
+
+    schedule_items = []
+    if today_sessions:
+        for s in today_sessions:
+            s_p_count = _extract_period_count(s.period)
+            s_rec = db.query(AttendanceRecord).filter(
+                AttendanceRecord.session_id == s.id,
+                AttendanceRecord.student_id == current_student.id
+            ).first()
+            s_marked = s_rec is not None and s_rec.status.value in [
+                "PRESENT", "4", "1", "2", "3", "5", "6", "7", "8"
+            ]
+            schedule_items.append({
+                "subject_name": s.subject.name if s.subject else "Class Attendance Session",
+                "subject_code": s.subject.code if s.subject else "",
+                "teacher_name": s.teacher.name if s.teacher else "Class Faculty",
+                "timing": "Today",
+                "period": s.period or f"{s_p_count} Periods",
+                "period_count": s_p_count,
+                "room": default_room,
+                "is_live": s.status == SessionStatus.OPEN,
+                "is_marked": s_marked,
+                "session_id": s.id,
+                "status": f"Marked Present ({s_p_count} Periods)" if s_marked else ("Live In-Class" if s.status == SessionStatus.OPEN else "Completed")
+            })
+    elif assignments:
+        for idx, assign in enumerate(assignments):
+            schedule_items.append({
+                "subject_name": assign.subject.name if assign.subject else "Class Session",
+                "subject_code": assign.subject.code if assign.subject else "",
+                "teacher_name": assign.teacher.name if assign.teacher else "Class Faculty",
+                "timing": f"Period {idx + 1}",
+                "period": f"Period {idx + 1}",
+                "period_count": 1,
+                "room": default_room,
+                "is_live": False,
+                "is_marked": False,
+                "session_id": None,
+                "status": "Scheduled"
+            })
+    else:
+        schedule_items = [
+            {
+                "subject_name": "No Classes Scheduled Today",
+                "subject_code": "",
+                "teacher_name": "Faculty Standby",
+                "timing": "Standby",
+                "period": "Standby",
+                "period_count": 0,
+                "room": default_room,
+                "is_live": False,
+                "is_marked": False,
+                "session_id": None,
+                "status": "Standby"
+            }
+        ]
+
+    active_session_payload = None
+    if active_session:
+        active_session_payload = {
+            "session_id": active_session.id,
+            "subject_name": active_session.subject.name if active_session.subject else "Class Attendance Session",
+            "subject_code": active_session.subject.code if active_session.subject else "",
+            "teacher_name": active_session.teacher.name if active_session.teacher else "Class Faculty",
+            "period": active_session.period or f"{active_p_count} Periods",
             "period_count": active_p_count,
-            "room": "CSE-CS Projector Lab",
-            "is_live": active_session is not None,
-            "is_marked": is_marked,
-            "session_id": active_session.id if active_session else None,
-            "status": f"Marked Present ({active_p_count} Periods)" if is_marked else ("Live In-Class" if active_session else "Scheduled")
+            "room": default_room,
+            "status": "LIVE IN-CLASS",
+            "is_marked": is_marked
         }
-    ]
+    elif today_session:
+        active_session_payload = {
+            "session_id": today_session.id,
+            "subject_name": today_session.subject.name if today_session.subject else "Class Attendance Session",
+            "subject_code": today_session.subject.code if today_session.subject else "",
+            "teacher_name": today_session.teacher.name if today_session.teacher else "Class Faculty",
+            "period": today_session.period or f"{active_p_count} Periods",
+            "period_count": active_p_count,
+            "room": default_room,
+            "status": "COMPLETED" if today_session.status == SessionStatus.LOCKED else "Scheduled",
+            "is_marked": is_marked
+        }
+    else:
+        active_session_payload = {
+            "session_id": None,
+            "subject_name": default_subject_name if assignments else "No Active Class Session",
+            "subject_code": default_subject_code,
+            "teacher_name": default_teacher_name if assignments else "Faculty Standby",
+            "period": "Period 1" if assignments else "Standby",
+            "period_count": 1 if assignments else 0,
+            "room": default_room,
+            "status": "Scheduled" if assignments else "Standby",
+            "is_marked": False
+        }
 
     return {
         "today_date": server_today,
         "schedule": schedule_items,
         "my_attendance": my_attendance,
-        "active_session": {
-            "session_id": active_session.id,
-            "subject_name": active_session.subject.name if active_session.subject else "Career Enhancement Training (CET)",
-            "teacher_name": active_session.teacher.name if active_session.teacher else "Mrs. N. Sowjanya",
-            "period": active_session.period or f"{active_p_count} Periods",
-            "period_count": active_p_count,
-            "room": "CSE-CS Projector Lab",
-            "status": "LIVE IN-CLASS",
-            "is_marked": is_marked
-        } if active_session else {
-            "subject_name": "Career Enhancement Training (CET)",
-            "teacher_name": "Mrs. N. Sowjanya",
-            "period": f"{active_p_count} Periods",
-            "period_count": active_p_count,
-            "room": "CSE-CS Projector Lab",
-            "status": "Scheduled",
-            "is_marked": is_marked
-        }
+        "active_session": active_session_payload
     }
 
 
@@ -1083,7 +1167,7 @@ async def student_scan_session(
             if sess_p > period_count:
                 period_count = sess_p
 
-        resolved_subject_name = (session_meta.get("subject_name") or "").strip() or "Career Enhancement Training (CET)"
+        resolved_subject_name = (session_meta.get("subject_name") or "").strip() or "Class Attendance Session"
         session_meta["subject_name"] = resolved_subject_name
 
         status_str = getattr(session_meta["status"], "value", str(session_meta["status"]))

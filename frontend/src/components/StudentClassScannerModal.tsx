@@ -791,7 +791,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
           setIsOfflineQueued(true);
           setQueuedSessionInfo({
             token: payloadToken,
-            sessionPreview: 'Career Enhancement Training (CET)',
+            sessionPreview: 'Class Attendance Session',
             queuedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
           });
         } catch {}
@@ -820,7 +820,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
         setSuccessResult({
           status: 'ALREADY_MARKED',
           message: 'Attendance already recorded for this session.',
-          subject_name: err?.subject_name || 'Career Enhancement Training (CET)',
+          subject_name: err?.subject_name || 'Class Attendance Session',
           roll_number: studentInfo.roll_number || studentRoll,
           session_date: new Date().toISOString().split('T')[0]
         });
@@ -1876,7 +1876,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                   {successResult.status === 'ALREADY_MARKED' ? 'Already Present' : 'Present!'}
                 </h2>
                 <p className="text-sm text-slate-600 font-medium">
-                  Present for <span className="font-bold text-slate-900">{successResult.subject_name || 'Career Enhancement Training (CET)'}</span>
+                  Present for <span className="font-bold text-slate-900">{successResult.subject_name || 'Class Attendance Session'}</span>
                 </p>
               </div>
 

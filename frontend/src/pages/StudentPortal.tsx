@@ -137,6 +137,20 @@ export const StudentPortal: React.FC = () => {
   // Circle SVG calculations (radius = 45, circumference = 2 * pi * 45 = 282.7)
   const strokeDashoffset = 282.7 - (282.7 * Math.min(100, Math.max(0, overallPercent || 0))) / 100;
 
+  const getGreeting = () => {
+    const hour = new Date().getHours();
+    if (hour < 12) return 'Good morning';
+    if (hour < 17) return 'Good afternoon';
+    return 'Good evening';
+  };
+
+  const activeSession = schedule?.active_session;
+  const isLiveSession = Boolean(activeSession?.session_id && (activeSession?.status === 'LIVE IN-CLASS' || activeSession?.status?.includes('Live')));
+  const primarySubject = activeSession?.subject_name || schedule?.schedule?.[0]?.subject_name || (isLiveSession ? 'Active Class Session' : 'No Active Class Session');
+  const primaryTeacher = activeSession?.teacher_name || schedule?.schedule?.[0]?.teacher_name || (isLiveSession ? 'Class Faculty' : 'Faculty Standby');
+  const primaryRoom = activeSession?.room || schedule?.schedule?.[0]?.room || (profile?.section ? `${profile.section} Classroom` : 'Classroom');
+  const periodCount = myAttendance?.period_count || activeSession?.period_count || schedule?.schedule?.[0]?.period_count || 4;
+
   return (
     <div className="bg-[#FBFBFD] text-[#1b1b1d] min-h-screen flex flex-col font-sans">
       
@@ -169,7 +183,7 @@ export const StudentPortal: React.FC = () => {
             {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase()}
           </p>
           <h1 className="text-2xl sm:text-3xl font-bold text-[#001e40] font-geist">
-            Good morning, {profile?.name ? profile.name.split(' ')[0] : 'Student'}
+            {getGreeting()}, {profile?.name ? profile.name.split(' ')[0] : 'Student'}
           </h1>
           <p className="text-xs text-[#5e5e63] mt-0.5">
             {profile ? `${profile.department} • ${profile.section} (${profile.year})` : 'Sreenidhi Institute of Science & Technology'}
@@ -256,20 +270,22 @@ export const StudentPortal: React.FC = () => {
             <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-6">
               <div>
                 <div className="flex items-center gap-2 mb-3">
-                  <span className={`w-2 h-2 rounded-full ${isMarkedToday ? 'bg-emerald-400' : 'bg-emerald-400 animate-pulse'}`}></span>
+                  <span className={`w-2 h-2 rounded-full ${isMarkedToday ? 'bg-emerald-400' : isLiveSession ? 'bg-emerald-400 animate-pulse' : 'bg-slate-400'}`}></span>
                   <span className="text-xs font-bold text-[#a7c8ff] uppercase tracking-wider font-mono">
                     {isMarkedToday 
-                      ? `✅ Attendance Credited (${myAttendance?.period_count || 4} Periods)` 
-                      : (schedule?.active_session?.status || 'Active Session (4 Periods)')}
+                      ? `✅ Attendance Credited (${periodCount} Periods)` 
+                      : isLiveSession
+                        ? `• Live Session (${periodCount} Periods)`
+                        : `Session Standby (${periodCount} Periods)`}
                   </span>
                 </div>
                 <h3 className="text-xl sm:text-2xl font-bold font-geist mb-2 text-white">
-                  Career Enhancement Training (CET)
+                  {primarySubject}
                 </h3>
                 <p className="text-xs text-[#a7c8ff] flex flex-wrap items-center gap-3">
-                  <span className="flex items-center gap-1"><User className="w-3.5 h-3.5" /> Mrs. N. Sowjanya</span>
+                  <span className="flex items-center gap-1"><User className="w-3.5 h-3.5" /> {primaryTeacher}</span>
                   <span className="opacity-40">•</span>
-                  <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5" /> CSE-CS Projector Lab</span>
+                  <span className="flex items-center gap-1"><MapPin className="w-3.5 h-3.5" /> {primaryRoom}</span>
                 </p>
               </div>
 
@@ -278,8 +294,8 @@ export const StudentPortal: React.FC = () => {
                   <span className="block text-[10px] font-bold text-[#a7c8ff] mb-1">
                     {isMarkedToday ? 'STATUS' : 'SESSION CREDIT'}
                   </span>
-                  <span className={`block text-lg font-extrabold font-mono ${isMarkedToday ? 'text-emerald-300' : 'text-amber-300'}`}>
-                    {isMarkedToday ? 'PRESENT ✅' : `${myAttendance?.period_count || 4} Periods`}
+                  <span className={`block text-lg font-extrabold font-mono ${isMarkedToday ? 'text-emerald-300' : isLiveSession ? 'text-amber-300' : 'text-slate-300'}`}>
+                    {isMarkedToday ? 'PRESENT ✅' : isLiveSession ? `${periodCount} Periods` : 'STANDBY'}
                   </span>
                 </div>
               </div>
@@ -313,7 +329,7 @@ export const StudentPortal: React.FC = () => {
                   Marked Present ✅
                 </h3>
                 <p className="text-xs text-emerald-100/90 leading-relaxed font-medium">
-                  Verified for <strong className="text-white">{myAttendance?.subject_name || 'Career Enhancement Training (CET)'}</strong> ({myAttendance?.period_count || 4} Periods Credited).
+                  Verified for <strong className="text-white">{myAttendance?.subject_name || primarySubject}</strong> ({periodCount} Periods Credited).
                 </p>
               </div>
 
@@ -327,7 +343,7 @@ export const StudentPortal: React.FC = () => {
                 <div className="flex items-center justify-center gap-2 mt-2 text-[10px] text-emerald-200/80 font-mono">
                   <span>🔐 Device Locked</span>
                   <span>•</span>
-                  <span>⚡ {myAttendance?.period_count || 4} Credits Saved</span>
+                  <span>⚡ {periodCount} Credits Saved</span>
                 </div>
               </div>
             </div>
@@ -337,27 +353,29 @@ export const StudentPortal: React.FC = () => {
 
               <div>
                 <div className="flex items-center justify-between gap-2 mb-3">
-                  <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono font-bold flex items-center gap-1.5">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
-                    LIVE IN-CLASS
+                  <span className={`px-2.5 py-0.5 rounded-full ${isLiveSession ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30' : 'bg-slate-500/20 text-slate-300 border-slate-500/30'} border text-[10px] font-mono font-bold flex items-center gap-1.5`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${isLiveSession ? 'bg-emerald-400 animate-pulse' : 'bg-slate-400'}`}></span>
+                    {isLiveSession ? 'LIVE IN-CLASS' : 'SESSION STANDBY'}
                   </span>
-                  <span className="text-amber-300 text-xs font-bold">⚡ 10s Token Sync</span>
+                  <span className="text-amber-300 text-xs font-bold font-mono">{isLiveSession ? '⚡ 10s Token Sync' : 'IST Clock Synced'}</span>
                 </div>
 
                 <h3 className="text-xl font-bold font-geist mb-1.5 text-white">
-                  Class Attendance
+                  {isLiveSession ? 'Class Attendance' : 'Awaiting Session'}
                 </h3>
                 <p className="text-xs text-blue-200 leading-relaxed font-medium">
-                  Scan the classroom projector screen to mark attendance for today's active periods.
+                  {isLiveSession 
+                    ? "Scan the classroom projector screen to mark attendance for today's active periods."
+                    : "No active attendance session is currently open. Camera scanner is ready when faculty launches QR."}
                 </p>
               </div>
 
               <div className="pt-4 mt-2">
                 <button
                   onClick={() => setShowClassScannerModal(true)}
-                  className="w-full py-3 px-4 bg-gradient-to-r from-amber-400 via-[#FF9F0A] to-orange-500 hover:from-amber-300 hover:to-orange-400 text-[#001e40] font-black text-xs sm:text-sm rounded-xl shadow-xl transition active:scale-98 flex items-center justify-center gap-2"
+                  className={`w-full py-3 px-4 ${isLiveSession ? 'bg-gradient-to-r from-amber-400 via-[#FF9F0A] to-orange-500 hover:from-amber-300 hover:to-orange-400 text-[#001e40]' : 'bg-white/20 hover:bg-white/30 text-white'} font-black text-xs sm:text-sm rounded-xl shadow-xl transition active:scale-98 flex items-center justify-center gap-2`}
                 >
-                  <Camera className="w-4 h-4 text-[#001e40]" /> Open Camera Scanner
+                  <Camera className={`w-4 h-4 ${isLiveSession ? 'text-[#001e40]' : 'text-white'}`} /> Open Camera Scanner
                 </button>
                 <div className="flex items-center justify-center gap-2 mt-2 text-[10px] text-blue-200/80 font-mono">
                   <span>🔐 Device Bound</span>
@@ -478,7 +496,65 @@ export const StudentPortal: React.FC = () => {
             </div>
 
             <div className="space-y-3">
-              {summary?.subjects && summary.subjects.length > 0 ? (
+              {schedule?.schedule && schedule.schedule.length > 0 ? (
+                schedule.schedule.map((item: any, sIdx: number) => {
+                  const isItemMarked = (item.session_id && item.is_marked) || (isMarkedToday && item.session_id === schedule?.my_attendance?.session_id);
+                  const isItemLive = Boolean(item.is_live);
+                  return (
+                    <div 
+                      key={item.session_id || sIdx} 
+                      onClick={() => setShowSubjectModal(true)}
+                      className={`p-4 rounded-xl border transition-colors cursor-pointer flex items-center justify-between ${
+                        isItemLive 
+                          ? 'bg-emerald-50/60 border-emerald-300 shadow-sm' 
+                          : isItemMarked 
+                          ? 'bg-[#F0FDF4] border-emerald-200' 
+                          : 'bg-white border-[#D2D2D7] hover:bg-[#F5F5F7]'
+                      }`}
+                    >
+                      <div className="flex-1 mr-3">
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="px-2 py-0.5 bg-[#d5e3ff] text-[#001b3c] font-bold text-[10px] rounded uppercase font-mono">
+                            {item.period || `Period ${sIdx + 1}`}
+                          </span>
+                          {isItemMarked ? (
+                            <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 font-bold text-[10px] rounded flex items-center gap-1 font-mono">
+                              <CheckCircle className="w-3 h-3 text-emerald-600" />
+                              Marked Present
+                            </span>
+                          ) : isItemLive ? (
+                            <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-700 font-bold text-[10px] rounded flex items-center gap-1 font-mono border border-emerald-300">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
+                              Live In-Class
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 bg-slate-100 text-slate-700 font-bold text-[10px] rounded font-mono">
+                              Scheduled
+                            </span>
+                          )}
+                        </div>
+                        <h4 className="font-bold text-base text-[#001e40]">{item.subject_name}</h4>
+                        <p className="text-xs text-[#5e5e63] mt-1 flex flex-wrap items-center gap-2 font-medium">
+                          <span>Faculty: <strong className="text-slate-800">{item.teacher_name}</strong></span>
+                          <span className="opacity-40">•</span>
+                          <span>{item.room || primaryRoom}</span>
+                        </p>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <span className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border ${
+                          isItemMarked 
+                            ? 'bg-emerald-100 text-emerald-900 border-emerald-300' 
+                            : isItemLive 
+                            ? 'bg-amber-100 text-amber-900 border-amber-300' 
+                            : 'bg-slate-100 text-slate-700 border-slate-200'
+                        }`}>
+                          {item.period_count || 1} {(item.period_count || 1) === 1 ? 'Period' : 'Periods'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })
+              ) : summary?.subjects && summary.subjects.length > 0 ? (
                 summary.subjects.map((subj: any, sIdx: number) => {
                   const pct = subj.percentage ?? 0;
                   const isGood = pct >= 75;
@@ -514,25 +590,29 @@ export const StudentPortal: React.FC = () => {
                   <div className="flex-1 mr-3">
                     <div className="flex items-center gap-2 mb-1.5">
                       <span className="px-2.5 py-0.5 bg-[#001e40] text-white font-bold text-[10px] rounded uppercase font-mono tracking-wider">
-                        {myAttendance?.period_count || 4} Periods Block
+                        {periodCount} {periodCount === 1 ? 'Period' : 'Periods'}
                       </span>
                       {isMarkedToday ? (
                         <span className="px-2.5 py-0.5 bg-emerald-100 text-emerald-800 font-bold text-[10px] rounded flex items-center gap-1 font-mono">
                           <CheckCircle className="w-3 h-3 text-emerald-600" />
-                          Marked Present ({myAttendance?.period_count || 4} Periods)
+                          Marked Present ({periodCount} {periodCount === 1 ? 'Period' : 'Periods'})
                         </span>
-                      ) : (
+                      ) : isLiveSession ? (
                         <span className="px-2.5 py-0.5 bg-emerald-100 text-emerald-800 font-bold text-[10px] rounded flex items-center gap-1 font-mono">
                           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
                           Live In-Class
                         </span>
+                      ) : (
+                        <span className="px-2.5 py-0.5 bg-slate-100 text-slate-700 font-bold text-[10px] rounded flex items-center gap-1 font-mono">
+                          Scheduled
+                        </span>
                       )}
                     </div>
-                    <h4 className="font-bold text-base text-[#001e40]">Career Enhancement Training (CET)</h4>
+                    <h4 className="font-bold text-base text-[#001e40]">{primarySubject}</h4>
                     <p className="text-xs text-[#5e5e63] mt-1 flex flex-wrap items-center gap-2 font-medium">
-                      <span>Faculty: <strong className="text-slate-800">Mrs. N. Sowjanya</strong></span>
+                      <span>Faculty: <strong className="text-slate-800">{primaryTeacher}</strong></span>
                       <span className="opacity-40">•</span>
-                      <span>CSE-CS Projector Lab</span>
+                      <span>{primaryRoom}</span>
                     </p>
                   </div>
                   <div className="text-right shrink-0">
@@ -541,7 +621,7 @@ export const StudentPortal: React.FC = () => {
                         ? 'bg-emerald-100 text-emerald-900 border-emerald-300' 
                         : 'bg-amber-400/20 text-amber-900 border-amber-400/30'
                     }`}>
-                      {isMarkedToday ? 'Credited' : `${myAttendance?.period_count || 4} Periods`}
+                      {isMarkedToday ? 'Credited' : `${periodCount} ${periodCount === 1 ? 'Period' : 'Periods'}`}
                     </span>
                   </div>
                 </div>
@@ -786,7 +866,7 @@ export const StudentPortal: React.FC = () => {
                     ...prev?.my_attendance,
                     is_marked: true,
                     marked_at: scanResult.session_date || 'Today',
-                    subject_name: scanResult.subject_name || prev?.my_attendance?.subject_name || 'Career Enhancement Training (CET)',
+                    subject_name: scanResult.subject_name || prev?.my_attendance?.subject_name || primarySubject,
                     period_count: scanResult.period_count || prev?.my_attendance?.period_count || 4,
                   }
                 }));
