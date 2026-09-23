@@ -13,7 +13,11 @@ services:
       - key: QR_SECRET_KEY
         generateValue: true
       - key: DATABASE_URL
-        value: sqlite:////app/data/snist_fast.db
+        value: mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo
+      - key: SECONDARY_DATABASE_URL
+        value: mysql+pymysql://snist_admin:SnistAdmin2026Secure@snist-attendance-db.cngk2i8i29dn.ap-south-1.rds.amazonaws.com:3306/seg_demo
+      - key: ENABLE_DUAL_DB
+        value: "True"
       - key: JNTUH_ELIGIBLE_THRESHOLD
         value: "75.0"
       - key: JNTUH_CONDONABLE_THRESHOLD
