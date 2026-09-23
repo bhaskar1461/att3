@@ -184,6 +184,8 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
     if (!response.ok) {
       let msg = `Request failed (${response.status})`;
       let code: string | undefined;
+      let phase7Code: string | undefined;
+      let errorCode: string | undefined;
       let serverNow: number | undefined;
       let retryAfter: number | undefined;
       if (text) {
@@ -194,6 +196,8 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
           } else if (errData.detail && typeof errData.detail === 'object') {
             msg = errData.detail.message || errData.detail.msg || msg;
             code = errData.detail.code;
+            phase7Code = errData.detail.phase7_code;
+            errorCode = errData.detail.error_code;
             serverNow = errData.detail.serverNow;
             retryAfter = errData.detail.retry_after;
           } else if (typeof errData.message === 'string') {
@@ -202,6 +206,8 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
             msg = errData.detail.map((d: any) => d.msg || d).join(', ');
           }
           if (!code && errData.code) code = errData.code;
+          if (!phase7Code && errData.phase7_code) phase7Code = errData.phase7_code;
+          if (!errorCode && errData.error_code) errorCode = errData.error_code;
           if (!serverNow && errData.serverNow) serverNow = errData.serverNow;
           if (!retryAfter && errData.retry_after) retryAfter = errData.retry_after;
         } catch {
@@ -215,6 +221,8 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
       const apiErr: any = new Error(msg);
       apiErr.status = response.status;
       if (code) apiErr.code = code;
+      if (phase7Code) apiErr.phase7_code = phase7Code;
+      if (errorCode) apiErr.error_code = errorCode;
       if (serverNow) apiErr.serverNow = serverNow;
       if (retryAfter) apiErr.retry_after = retryAfter;
       throw apiErr;
@@ -232,14 +240,24 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
       throw new Error('Server returned invalid data format. Please refresh and try again.');
     }
   } catch (err: any) {
+    if (err?.name === 'AbortError' || err?.message?.toLowerCase().includes('abort')) {
+      const abortErr: any = new Error('Request was aborted.');
+      abortErr.name = 'AbortError';
+      abortErr.code = 'aborted';
+      throw abortErr;
+    }
     let message = err?.message || 'Network request failed';
     if (message.includes('pattern') || message.includes('SyntaxError') || message.includes('Unexpected token')) {
       message = 'Connection error. Please refresh the page.';
     }
     const finalErr: any = new Error(message);
+    if (err?.name) finalErr.name = err.name;
     if (err?.code) finalErr.code = err.code;
+    if (err?.phase7_code) finalErr.phase7_code = err.phase7_code;
+    if (err?.error_code) finalErr.error_code = err.error_code;
     if (err?.status) finalErr.status = err.status;
     if (err?.serverNow) finalErr.serverNow = err.serverNow;
+    if (err?.retry_after) finalErr.retry_after = err.retry_after;
     throw finalErr;
   }
 }

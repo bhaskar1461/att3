@@ -52,7 +52,15 @@ def require_student(current_user: User = Depends(get_current_user)) -> Student:
     return current_user.student_profile
 
 @router.get("/profile")
-def get_student_profile(current_student: Student = Depends(require_student)):
+def get_student_profile(
+    db: Session = Depends(get_db),
+    current_student: Student = Depends(require_student)
+):
+    active_binding = db.query(DeviceBinding).filter(
+        DeviceBinding.student_id == current_student.id,
+        DeviceBinding.revoked_at.is_(None),
+        DeviceBinding.status == "ACTIVE"
+    ).first()
     return {
         "id": current_student.id,
         "roll_number": current_student.roll_number,
@@ -61,7 +69,9 @@ def get_student_profile(current_student: Student = Depends(require_student)):
         "year": current_student.academic_year.name if current_student.academic_year else "",
         "section": current_student.section.name if current_student.section else "",
         "email": current_student.email,
-        "mobile": current_student.mobile
+        "mobile": current_student.mobile,
+        "has_active_binding": active_binding is not None,
+        "bound_device_key_id": active_binding.key_id if active_binding else None
     }
 
 @router.get("/qr-code")

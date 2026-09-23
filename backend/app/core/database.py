@@ -7,28 +7,44 @@ from app.core.config import settings
 
 logger = logging.getLogger("snist_erp.database")
 
-# Engine configuration — strictly MySQL
+# Engine configuration — supports PostgreSQL and MySQL
 if settings.DATABASE_URL.startswith("sqlite"):
     logger.warning("[DATABASE ENFORCEMENT] SQLite is completely disabled. Defaulting to authoritative MySQL server.")
     db_url = "mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo"
 else:
     db_url = settings.DATABASE_URL
 
-is_sqlite = False
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql://", 1)
 
-logger.info("[DATABASE INTEGRITY GUARD] Connecting to authoritative MySQL server (%s)", db_url.split("@")[-1] if "@" in db_url else "configured")
-connect_args = {
-    "connect_timeout": 5,
-    "read_timeout": 8,
-    "write_timeout": 8
-}
-# Tuned connection pool for MySQL (seg-dev.sreenidhi.edu.in)
-pool_kwargs = {
-    "pool_size": 30,        # Sized for 50-60 concurrent student scans per worker
-    "max_overflow": 15,     # Peak burst allowance (max 45 total per worker)
-    "pool_timeout": 5,      # Fast-fail timeout to prevent worker starvation and cascade failure
-    "pool_recycle": 300     # 5-minute recycle to safely handle remote TCP keepalives
-}
+is_sqlite = False
+is_postgres = db_url.startswith("postgresql://") or db_url.startswith("postgres://")
+
+if is_postgres:
+    logger.info("[DATABASE INTEGRITY GUARD] Connecting to PostgreSQL server (%s)", db_url.split("@")[-1] if "@" in db_url else "configured")
+    connect_args = {
+        "connect_timeout": 5
+    }
+    pool_kwargs = {
+        "pool_size": 25,
+        "max_overflow": 15,
+        "pool_timeout": 5,
+        "pool_recycle": 300
+    }
+else:
+    logger.info("[DATABASE INTEGRITY GUARD] Connecting to authoritative MySQL server (%s)", db_url.split("@")[-1] if "@" in db_url else "configured")
+    connect_args = {
+        "connect_timeout": 5,
+        "read_timeout": 8,
+        "write_timeout": 8
+    }
+    # Tuned connection pool for MySQL (seg-dev.sreenidhi.edu.in)
+    pool_kwargs = {
+        "pool_size": 30,        # Sized for 50-60 concurrent student scans per worker
+        "max_overflow": 15,     # Peak burst allowance (max 45 total per worker)
+        "pool_timeout": 5,      # Fast-fail timeout to prevent worker starvation and cascade failure
+        "pool_recycle": 300     # 5-minute recycle to safely handle remote TCP keepalives
+    }
 
 engine = create_engine(
     db_url,

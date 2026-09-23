@@ -42,7 +42,11 @@ class Settings:
     BACKEND_DIR: str = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     BASE_DIR: str = os.path.dirname(BACKEND_DIR)
     _raw_db_url: str = os.getenv("DATABASE_URL", "mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo")
-    # Strict MySQL enforcement: SQLite is completely disallowed in this application
+    # Normalize Postgres URLs (Antideploy, Heroku, Neon send postgres://)
+    if _raw_db_url.startswith("postgres://"):
+        _raw_db_url = _raw_db_url.replace("postgres://", "postgresql://", 1)
+
+    # SQLite is completely disallowed in this application
     if "sqlite" in _raw_db_url.lower():
         DATABASE_URL: str = "mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo"
     else:

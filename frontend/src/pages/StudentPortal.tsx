@@ -10,6 +10,7 @@ const StudentClassScannerModal = React.lazy(() =>
 );
 import { Toast } from '../components/Toast';
 import { SmartInstallCard } from '../components/SmartInstallCard';
+import { getBindingState } from '../services/binding';
 
 export const StudentPortal: React.FC = () => {
   const [profile, setProfile] = useState<any>(null);
@@ -21,6 +22,7 @@ export const StudentPortal: React.FC = () => {
   const [showClassScannerModal, setShowClassScannerModal] = useState<boolean>(false);
   const [activeNavTab, setActiveNavTab] = useState<'home' | 'attendance' | 'timetable'>('home');
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const [isDeviceBound, setIsDeviceBound] = useState<boolean | null>(null);
 
   useEffect(() => {
     // Pre-warm WASM scanner runtime in background so scanning starts instantly on modal open
@@ -32,6 +34,27 @@ export const StudentPortal: React.FC = () => {
       setShowClassScannerModal(true);
     }
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const storedUser = localStorage.getItem('user');
+        const roll = profile?.roll_number || (storedUser ? JSON.parse(storedUser).roll_number : undefined);
+        const serverBoundKeyId = profile?.bound_device_key_id ?? (profile?.has_active_binding === false ? null : undefined);
+        const state = await getBindingState(roll, {
+          verifyWithServer: true,
+          serverBoundKeyId
+        });
+        if (!cancelled) {
+          setIsDeviceBound(state === 'enrolled');
+        }
+      } catch {
+        if (!cancelled) setIsDeviceBound(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [profile?.roll_number, profile?.has_active_binding, profile?.bound_device_key_id, showClassScannerModal]);
 
   const fetchStudentData = async () => {
     try {
@@ -377,10 +400,28 @@ export const StudentPortal: React.FC = () => {
                 >
                   <Camera className={`w-4 h-4 ${isLiveSession ? 'text-[#001e40]' : 'text-white'}`} /> Open Camera Scanner
                 </button>
-                <div className="flex items-center justify-center gap-2 mt-2 text-[10px] text-blue-200/80 font-mono">
-                  <span>🔐 Device Bound</span>
-                  <span>•</span>
-                  <span>⚡ Instant IST Mark</span>
+                <div className="flex items-center justify-center gap-2 mt-2 text-[10px] font-mono">
+                  {isDeviceBound === true ? (
+                    <>
+                      <span className="text-emerald-300 font-bold">🔐 Device Bound</span>
+                      <span className="text-blue-200/80">•</span>
+                      <span className="text-blue-200/80">⚡ Instant IST Mark</span>
+                    </>
+                  ) : isDeviceBound === false ? (
+                    <>
+                      <span className="text-amber-300 font-bold">⚠️ Device Not Linked</span>
+                      <span className="text-blue-200/80">•</span>
+                      <button
+                        type="button"
+                        onClick={() => setShowClassScannerModal(true)}
+                        className="text-amber-200 hover:text-white underline cursor-pointer font-bold"
+                      >
+                        Enroll This Device
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-blue-200/60">Checking device status…</span>
+                  )}
                 </div>
               </div>
             </div>
@@ -856,9 +897,13 @@ export const StudentPortal: React.FC = () => {
       {showClassScannerModal && (
         <React.Suspense fallback={null}>
           <StudentClassScannerModal
-            studentRoll={profile?.roll_number}
-            onClose={() => setShowClassScannerModal(false)}
+            studentRoll={profile?.roll_number || (localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user') || '{}').roll_number : undefined)}
+            onClose={() => {
+              setShowClassScannerModal(false);
+              fetchStudentData();
+            }}
             onScanComplete={(scanResult?: any) => {
+              fetchStudentData();
               if (scanResult) {
                 setSchedule((prev: any) => ({
                   ...prev,

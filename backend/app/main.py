@@ -49,9 +49,13 @@ def _run_defensive_schema_migrations():
                 if "join_date" not in student_cols:
                     logger.info("Migrating schema: adding join_date column to qr_students")
                     conn.execute(text("ALTER TABLE qr_students ADD COLUMN join_date VARCHAR(20) NULL"))
-                # Make department_id nullable in MySQL/MariaDB if currently not null
+                # Make department_id nullable in MySQL/MariaDB or PostgreSQL if currently not null
                 try:
-                    if not engine.url.drivername.startswith("sqlite"):
+                    if engine.url.drivername.startswith("postgresql") or engine.url.drivername.startswith("postgres"):
+                        conn.execute(text("ALTER TABLE qr_students ALTER COLUMN department_id DROP NOT NULL"))
+                        conn.execute(text("ALTER TABLE qr_students ALTER COLUMN academic_year_id DROP NOT NULL"))
+                        conn.execute(text("ALTER TABLE qr_students ALTER COLUMN section_id DROP NOT NULL"))
+                    elif not engine.url.drivername.startswith("sqlite"):
                         conn.execute(text("ALTER TABLE qr_students MODIFY COLUMN department_id INT NULL"))
                         conn.execute(text("ALTER TABLE qr_students MODIFY COLUMN academic_year_id INT NULL"))
                         conn.execute(text("ALTER TABLE qr_students MODIFY COLUMN section_id INT NULL"))

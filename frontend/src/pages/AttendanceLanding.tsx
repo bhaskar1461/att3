@@ -16,7 +16,7 @@ import {
   RefreshCw,
   Camera
 } from 'lucide-react';
-import { getBindingState, signChallenge, generateKeyPair } from '../services/binding';
+import { getBindingState, signChallenge, generateKeyPair, commitBindingRecord } from '../services/binding';
 import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/deviceCredential';
 
 interface SessionMetadata {
@@ -268,17 +268,22 @@ export const AttendanceLanding: React.FC = () => {
       try {
         let bindingState = await getBindingState(studentRoll);
         if (bindingState !== 'enrolled') {
-          // Seamlessly auto-enroll device on first confirmation
+          // Seamlessly auto-enroll device on first confirmation with deferred commitment
           try {
-            const payload = await generateKeyPair(studentRoll);
-            await apiRequest('/binding/enroll', {
+            const payload = await generateKeyPair(studentRoll, false);
+            const enrollRes: any = await apiRequest('/binding/enroll', {
               method: 'POST',
               body: JSON.stringify({
                 public_key_spki_b64: payload.public_key_spki_b64,
                 key_id: payload.key_id
               })
             });
-            bindingState = await getBindingState(studentRoll);
+            if (enrollRes?.status === 'DEVICE_ENROLLED' || enrollRes?.message?.toLowerCase().includes('enrolled')) {
+              if (payload.stored_record) {
+                await commitBindingRecord(payload.stored_record);
+              }
+              bindingState = 'enrolled';
+            }
           } catch (autoEnrollErr) {
             console.warn('[Launch Attendance] Auto-enroll fallback:', autoEnrollErr);
           }
@@ -298,19 +303,27 @@ export const AttendanceLanding: React.FC = () => {
         console.warn('[Launch Attendance] Binding sign warning:', bindErr?.message || bindErr);
       }
 
-      // 3. Submit Attendance
-      const res: any = await apiRequest('/launch/attend', {
-        method: 'POST',
-        body: JSON.stringify({
-          claim_token: claimToken || undefined,
-          launch_token: launchToken,
-          entry_method: 'NORMAL_CAMERA',
-          scan_mode: 'PROJECTOR_SCAN',
-          ...(geo ? { latitude: geo.latitude, longitude: geo.longitude, accuracy_m: geo.accuracy_m } : {}),
-          ...(bindingChallengeToken ? { challenge_token: bindingChallengeToken } : {}),
-          ...(bindingSignature ? { binding_signature: bindingSignature } : {})
-        })
-      });
+      // 3. Submit Attendance with 5-second Abort Watchdog
+      const attendAbortCtrl = new AbortController();
+      const attendTimeoutId = setTimeout(() => attendAbortCtrl.abort(), 5000);
+      let res: any;
+      try {
+        res = await apiRequest('/launch/attend', {
+          method: 'POST',
+          signal: attendAbortCtrl.signal,
+          body: JSON.stringify({
+            claim_token: claimToken || undefined,
+            launch_token: launchToken,
+            entry_method: 'NORMAL_CAMERA',
+            scan_mode: 'PROJECTOR_SCAN',
+            ...(geo ? { latitude: geo.latitude, longitude: geo.longitude, accuracy_m: geo.accuracy_m } : {}),
+            ...(bindingChallengeToken ? { challenge_token: bindingChallengeToken } : {}),
+            ...(bindingSignature ? { binding_signature: bindingSignature } : {})
+          })
+        });
+      } finally {
+        clearTimeout(attendTimeoutId);
+      }
 
       try {
         sessionStorage.removeItem('snist_launch_claim');
@@ -326,6 +339,7 @@ export const AttendanceLanding: React.FC = () => {
         lowerMsg.includes('qr-old') || lowerMsg.includes('outdated') ? 'QR-OLD' :
         lowerMsg.includes('expired') ? 'expired' :
         lowerMsg.includes('geofence') ? 'geofence_failed' :
+        err?.name === 'AbortError' ? 'timeout' :
         'error'
       );
       setSubmitErrorCode(code);
@@ -339,6 +353,8 @@ export const AttendanceLanding: React.FC = () => {
         setSubmitError('This device is not linked. Please enroll this device once to record attendance.');
       } else if (code === 'geofence_failed') {
         setSubmitError('Location verification failed. Please make sure GPS is enabled and you are inside the classroom.');
+      } else if (code === 'timeout' || err?.name === 'AbortError') {
+        setSubmitError('Attendance submission timed out. Please tap Confirm Attendance again.');
       } else {
         setSubmitError(rawMsg || 'Attendance submission failed. Please try again or scan the refreshed QR.');
       }
@@ -347,7 +363,7 @@ export const AttendanceLanding: React.FC = () => {
     }
   };
 
-  // Inline Device Enrollment
+  // Inline Device Enrollment with Deferred Commitment
   const handleEnrollDevice = async () => {
     const studentRoll = user?.username || loginRoll.trim().toUpperCase();
     if (!studentRoll) {
@@ -355,22 +371,37 @@ export const AttendanceLanding: React.FC = () => {
       return;
     }
     setIsEnrollingDevice(true);
+    const enrollAbortCtrl = new AbortController();
+    const enrollTimeoutId = setTimeout(() => enrollAbortCtrl.abort(), 6500);
     try {
-      const payload = await generateKeyPair(studentRoll);
-      await apiRequest('/binding/enroll', {
+      const payload = await generateKeyPair(studentRoll, false);
+      const res: any = await apiRequest('/binding/enroll', {
         method: 'POST',
+        signal: enrollAbortCtrl.signal,
         body: JSON.stringify({
           public_key_spki_b64: payload.public_key_spki_b64,
           key_id: payload.key_id
         })
       });
-      setSubmitErrorCode(null);
-      setSubmitError(null);
-      // Automatically retry attendance with newly enrolled device
-      await handleConfirmAttendance();
+      if (res?.status === 'DEVICE_ENROLLED' || res?.message?.toLowerCase().includes('enrolled')) {
+        if (payload.stored_record) {
+          await commitBindingRecord(payload.stored_record);
+        }
+        setSubmitErrorCode(null);
+        setSubmitError(null);
+        // Automatically retry attendance with newly enrolled device
+        await handleConfirmAttendance();
+      } else {
+        throw new Error(res?.detail?.message || res?.message || 'Device enrollment rejected by server.');
+      }
     } catch (e: any) {
-      setSubmitError(e.message || 'Device enrollment failed. Please try again.');
+      if (e?.name === 'AbortError' || enrollAbortCtrl.signal.aborted) {
+        setSubmitError('Device enrollment timed out. Please check your connection and try again.');
+      } else {
+        setSubmitError(e.message || 'Device enrollment failed. Please try again.');
+      }
     } finally {
+      clearTimeout(enrollTimeoutId);
       setIsEnrollingDevice(false);
     }
   };

@@ -12,8 +12,22 @@ import { FailureErrorType, DisplayType } from '../types/telemetry';
 import { decodeFrame, getActiveScannerEngine, syncScannerEngineFromServer, ScannerEngine } from '../services/qrEngine';
 import { initWasmScanner } from '../services/wasmScanner';
 import { offlineSubmissionQueue } from '../services/offlineSubmissionQueue';
-import { BINDING_V2_ENABLED, signChallenge, getBindingState, generateKeyPair } from '../services/binding';
+import { BINDING_V2_ENABLED, signChallenge, getBindingState, generateKeyPair, commitBindingRecord } from '../services/binding';
 import { PostAttendanceSelfieModal } from './PostAttendanceSelfieModal';
+
+export type ScannerFlowState = 
+  | 'INITIALIZING'
+  | 'IDLE_SCANNING'
+  | 'DECODED'
+  | 'ENROLLING'
+  | 'REBIND_OTP'
+  | 'SUBMITTING'
+  | 'SUCCESS'
+  | 'TIMEOUT'
+  | 'STALE_QR'
+  | 'RATE_LIMITED'
+  | 'ERROR'
+  | 'BLOCKED';
 
 interface StudentClassScannerModalProps {
   onClose: () => void;
@@ -28,6 +42,10 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
   displayType = 'projector',
   studentRoll
 }) => {
+  const [flowState, setFlowState] = useState<ScannerFlowState>('INITIALIZING');
+  const inFlightTokenStepRef = useRef<number | null>(null);
+  const inFlightTokenStrRef = useRef<string | null>(null);
+  const failedTokensCacheRef = useRef<Map<string, number>>(new Map());
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -102,6 +120,8 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
   // 3. Scanner: Track last expired and failed payloads to prevent rapid duplicate frame submissions
   const lastExpiredPayloadRef = useRef<string | null>(null);
   const lastFailedPayloadRef = useRef<string | null>(null);
+  const lastExpiredStepRef = useRef<number | null>(null);
+  const currentAbortCtrlRef = useRef<AbortController | null>(null);
   const rateLimitCooldownTimerRef = useRef<any>(null);
   const [rateLimitSecondsLeft, setRateLimitSecondsLeft] = useState<number>(0);
   const [scanErrorCode, setScanErrorCode] = useState<string | null>(null);
@@ -221,33 +241,63 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
   const handleInlineEnroll = async () => {
     setIsInlineEnrolling(true);
+    setFlowState('ENROLLING');
     setRebindOtpError(null);
+    setScanError(null);
+    const enrollAbortCtrl = new AbortController();
+    const enrollTimeoutId = setTimeout(() => enrollAbortCtrl.abort(), 6500);
+
     try {
-      const payload = await generateKeyPair(studentRoll);
+      const activeRoll = studentRoll || studentInfo.roll_number || (localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user') || '{}').roll_number : '');
+      // Generate keypair with deferred commitment (autoCommit = false)
+      const payload = await generateKeyPair(activeRoll, false);
       setCachedEnrollPayload(payload);
       const res: any = await apiRequest('/binding/enroll', {
         method: 'POST',
+        signal: enrollAbortCtrl.signal,
         body: JSON.stringify({
           public_key_spki_b64: payload.public_key_spki_b64,
-          key_id: payload.key_id
+          key_id: payload.key_id,
+          corroboration_nonce: (payload as any).nonce || undefined,
+          browser_profile_tag: (payload as any).browser_profile_tag || undefined
         })
       });
 
       if (res?.status === 'REBIND_REQUIRED' && res?.otp_required) {
         setRebindOtpRequired(true);
+        setFlowState('REBIND_OTP');
         setRebindMaskedEmail(res.email_masked || 'your registered college email');
+        setScanError(null);
+        setScanErrorCode(null);
         setGuideText('Verification code sent to your email to link this device.');
         return;
       }
 
-      setScanError(null);
-      setRebindOtpRequired(false);
-      isScanningLockedRef.current = false;
-      setIsSubmitting(false);
-      setGuideText('Device enrolled securely! Rescan the attendance QR now.');
+      if (res?.status === 'DEVICE_ENROLLED' || res?.message?.toLowerCase().includes('enrolled')) {
+        // Commit to persistent IndexedDB ONLY upon server confirmation!
+        if (payload.stored_record) {
+          await commitBindingRecord(payload.stored_record);
+        }
+        setScanError(null);
+        setScanErrorCode(null);
+        setRebindOtpRequired(false);
+        isScanningLockedRef.current = false;
+        setIsSubmitting(false);
+        setFlowState('IDLE_SCANNING');
+        setGuideText('Device enrolled securely! Rescan the attendance QR now.');
+        triggerFeedback(true);
+      } else {
+        throw new Error(res?.detail?.message || res?.message || 'Device enrollment rejected by server.');
+      }
     } catch (err: any) {
-      setScanError(err.message || 'Inline enrollment failed. Please try again.');
+      if (err?.name === 'AbortError' || enrollAbortCtrl.signal.aborted) {
+        setScanError('Device enrollment timed out. Please check connection and try again.');
+      } else {
+        setScanError(err.message || 'Inline enrollment failed. Please try again.');
+      }
+      setFlowState('ERROR');
     } finally {
+      clearTimeout(enrollTimeoutId);
       setIsInlineEnrolling(false);
     }
   };
@@ -260,6 +310,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
     if (!cachedEnrollPayload) {
       setRebindOtpError('Enrollment state missing. Please click Enroll again.');
       setRebindOtpRequired(false);
+      setFlowState('IDLE_SCANNING');
       return;
     }
 
@@ -271,17 +322,25 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
         body: JSON.stringify({
           public_key_spki_b64: cachedEnrollPayload.public_key_spki_b64,
           key_id: cachedEnrollPayload.key_id,
-          rebind_otp: rebindOtpValue.trim()
+          rebind_otp: rebindOtpValue.trim(),
+          corroboration_nonce: (cachedEnrollPayload as any).nonce || undefined
         })
       });
 
-      if (res?.status === 'DEVICE_ENROLLED') {
+      if (res?.status === 'DEVICE_ENROLLED' || res?.message?.toLowerCase().includes('enrolled')) {
+        // Commit to persistent IndexedDB upon OTP confirmation
+        if (cachedEnrollPayload?.stored_record) {
+          await commitBindingRecord(cachedEnrollPayload.stored_record);
+        }
         setRebindOtpRequired(false);
         setScanError(null);
+        setScanErrorCode(null);
         setRebindOtpValue('');
         isScanningLockedRef.current = false;
         setIsSubmitting(false);
+        setFlowState('IDLE_SCANNING');
         setGuideText('New device verified & linked! Rescan the attendance QR now.');
+        triggerFeedback(true);
       } else {
         throw new Error(res?.detail?.message || res?.message || 'Rebind verification failed.');
       }
@@ -485,6 +544,45 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
     sourceType: 'launch_url' | 'launch_path' | 'short_code' | 'legacy' | 'raw_token';
   }
 
+  /**
+   * Robust step counter & session extractor for rotating QR tokens.
+   * Recognizes:
+   * - Crockford URL query ?s=...&v=123 or ?v=123
+   * - Base64 URL-safe launch tokens: {session_id}:{short_code}:{v}:{nonce}:{exp_ts}:{hmac}
+   */
+  const extractPayloadStep = (payload: string): { step: number | null; sessionId: string | null } => {
+    try {
+      if (!payload) return { step: null, sessionId: null };
+      const vMatch = payload.match(/[?&]v=(\d+)/);
+      const sMatch = payload.match(/[?&]s=([A-Za-z0-9_-]+)/);
+      if (vMatch) {
+        return { step: parseInt(vMatch[1], 10), sessionId: sMatch ? sMatch[1] : null };
+      }
+
+      let rawToken = payload;
+      if (payload.includes('/a/')) {
+        const match = payload.match(/\/a\/([A-Za-z0-9_-]+)/);
+        if (match) rawToken = match[1];
+      }
+      const cleanToken = rawToken.replace(/^[?&]/, '').split(/[?#&]/)[0];
+      if (cleanToken.length >= 20 && /^[A-Za-z0-9_-]+$/.test(cleanToken)) {
+        try {
+          let b64 = cleanToken.replace(/-/g, '+').replace(/_/g, '/');
+          while (b64.length % 4 !== 0) b64 += '=';
+          const decoded = atob(b64);
+          const parts = decoded.split(':');
+          if (parts.length >= 4) {
+            const step = parseInt(parts[2], 10);
+            if (!isNaN(step)) {
+              return { step, sessionId: parts[0] || null };
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+    return { step: null, sessionId: null };
+  };
+
   const parseAttendanceQrPayload = (decodedText: string): ParsedQrPayload | null => {
     const trimmed = decodedText.trim();
     if (!trimmed || trimmed.length < 6) return null;
@@ -580,13 +678,31 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       console.warn('[QR] Unrecognized QR structure:', trimmed.slice(0, 40));
       setScanError('QR not recognized. Please scan the current classroom QR.');
       setGuideText('QR not recognized — scan classroom QR');
+      setFlowState('ERROR');
       triggerFeedback(false);
       return;
     }
 
     const payloadToken = parsed.token;
+    const { step: scannedStep } = extractPayloadStep(trimmed.includes('?') ? trimmed : payloadToken);
 
-    // 3. Scanner: Never resubmit a payload that just failed or expired until the projector QR refreshes
+    // 1. Step-level freshness guard: if we know the token belongs to an expired rotation step, reject client-side!
+    if (scannedStep != null && lastExpiredStepRef.current != null) {
+      if (scannedStep <= lastExpiredStepRef.current) {
+        setGuideText('Old QR — waiting for the projector to refresh');
+        diagHudRef.current = { ...diagHudRef.current, qr: 'FOUND', submit: 'WAIT_REFRESH' };
+        if (isDebugMode) setDiagHud({ ...diagHudRef.current });
+        setFlowState('STALE_QR');
+        return;
+      } else {
+        // Step has advanced! Clear expired trackers because we have a genuinely fresh token!
+        lastExpiredStepRef.current = null;
+        lastExpiredPayloadRef.current = null;
+        lastFailedPayloadRef.current = null;
+      }
+    }
+
+    // 2. Exact token payload guard: Never resubmit a payload that just failed or expired until the projector QR refreshes
     if (
       payloadToken === lastExpiredPayloadRef.current || trimmed === lastExpiredPayloadRef.current ||
       payloadToken === lastFailedPayloadRef.current || trimmed === lastFailedPayloadRef.current
@@ -594,6 +710,16 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       setGuideText('Waiting for classroom QR to refresh...');
       diagHudRef.current = { ...diagHudRef.current, qr: 'FOUND', submit: 'WAIT_REFRESH' };
       if (isDebugMode) setDiagHud({ ...diagHudRef.current });
+      setFlowState('STALE_QR');
+      return;
+    }
+
+    // 3. Deduplication window check: If this exact token failed/timed out in last 12s, reject client-side
+    const now = Date.now();
+    const lastFailedAt = failedTokensCacheRef.current.get(payloadToken);
+    if (lastFailedAt && (now - lastFailedAt < 12000)) {
+      setGuideText('Waiting for classroom QR to refresh...');
+      setFlowState('STALE_QR');
       return;
     }
 
@@ -610,8 +736,12 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
     // Lock scanner atomically before making network request
     isScanningLockedRef.current = true;
     setIsSubmitting(true);
+    setFlowState('SUBMITTING');
+    inFlightTokenStepRef.current = scannedStep;
+    inFlightTokenStrRef.current = payloadToken;
     setScanError(null);
     setScanErrorCode(null);
+    setGuideText('Submitting Attendance…');
     console.log(`[QR] Token extracted (${payloadToken.length}ch, type=${parsed.sourceType}) — submitting directly to attendance API`);
     diagHudRef.current = { ...diagHudRef.current, qr: 'FOUND', submit: 'SENDING…' };
     if (isDebugMode) setDiagHud({ ...diagHudRef.current });
@@ -636,6 +766,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       } catch {
         isScanningLockedRef.current = false;
         setIsSubmitting(false);
+        setFlowState('IDLE_SCANNING');
       }
       return;
     }
@@ -647,10 +778,11 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       // Use pre-cached binding proof (signed at mount, never blocks scan)
       const binding = bindingProofRef.current;
 
-      // 8-second submission watchdog: prevents the scanner from freezing
-      // if the server or network hangs. On timeout, we recover to scanning state.
+      // 4.0-second submission watchdog: Prevents client from lagging behind 10s QR rotation interval.
+      // On timeout or slow network, aborts instantly, discards stale token, and transitions state cleanly.
       const abortCtrl = new AbortController();
-      const timeoutId = setTimeout(() => abortCtrl.abort(), 8000);
+      currentAbortCtrlRef.current = abortCtrl;
+      const timeoutId = setTimeout(() => abortCtrl.abort('timeout_4s'), 4000);
 
       let res: any;
       try {
@@ -675,25 +807,43 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
         });
       } catch (abortErr: any) {
         if (abortErr?.name === 'AbortError' || abortCtrl.signal.aborted) {
-          console.warn('[QR] Submission timed out after 8s — returning to scanning');
-          isScanningLockedRef.current = false;
-          setIsSubmitting(false);
-          setScanError('Submission timed out. Please try scanning again.');
-          setGuideText('Timed out — scan again');
-          diagHudRef.current = { ...diagHudRef.current, submit: 'TIMEOUT 8s' };
-          if (isDebugMode) setDiagHud({ ...diagHudRef.current });
-          if (mediaStreamRef.current && isMountedRef.current) {
-            animationFrameIdRef.current = requestAnimationFrame(processFrame);
+          console.warn('[QR] Submission timed out after 4s — returning to scanning');
+          failedTokensCacheRef.current.set(payloadToken, Date.now());
+          lastFailedPayloadRef.current = payloadToken;
+          const { step } = extractPayloadStep(payloadToken);
+          if (step != null) {
+            lastExpiredStepRef.current = Math.max(lastExpiredStepRef.current ?? 0, step);
           }
+          inFlightTokenStepRef.current = null;
+          inFlightTokenStrRef.current = null;
+          setIsSubmitting(false);
+          setFlowState('TIMEOUT');
+          setScanError('Attendance request timed out. The 10s rotating QR token expired during submission.');
+          setGuideText('Timed out — waiting for refreshed QR');
+          diagHudRef.current = { ...diagHudRef.current, submit: 'TIMEOUT 4s' };
+          if (isDebugMode) setDiagHud({ ...diagHudRef.current });
+          setTimeout(() => {
+            if (!rateLimitCooldownTimerRef.current && isMountedRef.current) {
+              isScanningLockedRef.current = false;
+              if (mediaStreamRef.current) {
+                animationFrameIdRef.current = requestAnimationFrame(processFrame);
+              }
+            }
+          }, 1500);
           return;
         }
         throw abortErr; // Re-throw non-abort errors to the outer catch
       } finally {
         clearTimeout(timeoutId);
+        currentAbortCtrlRef.current = null;
       }
 
       // ── Success! ──
       isSuccess = true;
+      inFlightTokenStepRef.current = null;
+      inFlightTokenStrRef.current = null;
+      setIsSubmitting(false);
+      setFlowState('SUCCESS');
       console.log('[QR] Server response: SUCCESS —', res?.status || 'MARKED');
       diagHudRef.current = { ...diagHudRef.current, qr: 'FOUND', submit: 'SUCCESS ✓' };
       if (isDebugMode) setDiagHud({ ...diagHudRef.current });
@@ -721,7 +871,11 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
     } catch (err: any) {
       // Record failed token immediately so the camera won't immediately refire against this same QR frame
+      failedTokensCacheRef.current.set(payloadToken, Date.now());
       lastFailedPayloadRef.current = payloadToken;
+      const { step: failedStep } = extractPayloadStep(payloadToken);
+      inFlightTokenStepRef.current = null;
+      inFlightTokenStrRef.current = null;
 
       // ── Clean Error Handling ──
       const rawMsg = err?.message || err?.detail || '';
@@ -747,6 +901,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       if (code === 'rate_limited' || err?.status === 429 || lowerMsg.includes('too many scan attempts')) {
         const retrySec = Math.max(1, Number(err?.retry_after || 20));
         isScanningLockedRef.current = true;
+        setFlowState('RATE_LIMITED');
         setRateLimitSecondsLeft(retrySec);
         setScanError(`Too many scan attempts. Please wait ${retrySec}s before scanning again.`);
         setGuideText(`Rate limit active — cooldown ${retrySec}s`);
@@ -760,6 +915,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
             rateLimitCooldownTimerRef.current = null;
             setRateLimitSecondsLeft(0);
             setScanError(null);
+            setFlowState('IDLE_SCANNING');
             setGuideText('Align the QR inside the frame');
             isScanningLockedRef.current = false;
             if (mediaStreamRef.current && isMountedRef.current) {
@@ -802,6 +958,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
       if (code === 'QR-SESSION-END' || lowerMsg.includes('qr-session-end') || lowerMsg.includes('session has ended')) {
         lastFailedPayloadRef.current = payloadToken;
+        setFlowState('ERROR');
         setScanError('This class session has ended. If faculty refreshed or started attendance, please scan the active projector QR. (Code: QR-SESSION-END)');
         setGuideText('Session ended — point camera at active QR');
         return;
@@ -809,8 +966,12 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
       if (code === 'QR-OLD' || code === 'expired' || lowerMsg.includes('outdated') || lowerMsg.includes('expired')) {
         lastExpiredPayloadRef.current = payloadToken;
-        setGuideText('QR outdated — waiting for projector refresh');
-        setScanError('The QR on the screen is outdated. Ask faculty to bring the QR window to the front / refresh it, then rescan. (Code: QR-OLD)');
+        if (failedStep != null) {
+          lastExpiredStepRef.current = Math.max(lastExpiredStepRef.current ?? 0, failedStep);
+        }
+        setFlowState('STALE_QR');
+        setGuideText('Old QR — waiting for the projector to refresh');
+        setScanError('The QR on the screen has expired. Waiting for projector rotation. (Code: QR-OLD)');
         return;
       }
 
@@ -824,12 +985,14 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
           roll_number: studentInfo.roll_number || studentRoll,
           session_date: new Date().toISOString().split('T')[0]
         });
+        setFlowState('SUCCESS');
         stopCamera();
         return;
       }
 
       // Geofence / Location failure
       if (code === 'geofence_failed' || lowerMsg.includes('location') || lowerMsg.includes('geofence') || lowerMsg.includes('gps')) {
+        setFlowState('ERROR');
         setScanError(rawMsg || 'Location verification failed. Please ensure you are inside the classroom.');
         setGuideText('Location check failed');
         return;
@@ -837,6 +1000,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
       // Binding not enrolled → show clean device link message & action
       if (code === 'no_active_binding' || lowerMsg.includes('no_active_binding') || lowerMsg.includes('binding_required')) {
+        setFlowState('BLOCKED');
         setScanError('This device is not linked. Please enroll this device to record attendance.');
         setGuideText('Device not linked — enroll below');
         return;
@@ -861,6 +1025,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
             }
           } catch {}
         })();
+        setFlowState('IDLE_SCANNING');
         setGuideText('Align the QR inside the frame');
         isScanningLockedRef.current = false;
         if (mediaStreamRef.current && isMountedRef.current) {
@@ -870,13 +1035,16 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       }
 
       // Generic error: never show ERR_FAILED or raw crash
+      setFlowState('ERROR');
       setScanError(rawMsg || 'Unable to mark attendance. Please try again.');
       setGuideText('Scan failed — please try again');
     } finally {
       // Release processing lock in a finally block after every API result
       setIsSubmitting(false);
+      inFlightTokenStepRef.current = null;
+      inFlightTokenStrRef.current = null;
       if (!isSuccess && !rateLimitCooldownTimerRef.current) {
-        // Debounce camera frame unlock by 2.5s to prevent millisecond frame floods
+        // Debounce camera frame unlock by 1.5s to allow scanning next rotation promptly
         setTimeout(() => {
           if (!rateLimitCooldownTimerRef.current) {
             isScanningLockedRef.current = false;
@@ -884,7 +1052,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
               animationFrameIdRef.current = requestAnimationFrame(processFrame);
             }
           }
-        }, 2500);
+        }, 1500);
       }
     }
   };
@@ -1719,6 +1887,12 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
     return () => {
       isMountedRef.current = false;
+      if (currentAbortCtrlRef.current) {
+        try {
+          currentAbortCtrlRef.current.abort('unmount');
+        } catch {}
+        currentAbortCtrlRef.current = null;
+      }
       if (permStatusRef.current) {
         try {
           permStatusRef.current.onchange = null;
@@ -1734,8 +1908,9 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
     setFacingMode((prev) => (prev === 'environment' ? 'user' : 'environment'));
   };
 
-  // Pinch-to-zoom gesture handlers
+  // Pinch-to-zoom gesture handlers with propagation stop (prevents mobile sheet drag collapse)
   const handleTouchStart = (e: React.TouchEvent) => {
+    e.stopPropagation();
     if (e.touches.length === 2 && hasZoomCapability) {
       const dist = Math.hypot(
         e.touches[0].clientX - e.touches[1].clientX,
@@ -1747,6 +1922,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
   };
 
   const handleTouchMove = (e: React.TouchEvent) => {
+    e.stopPropagation();
     if (e.touches.length === 2 && pinchStartDistanceRef.current !== null && hasZoomCapability) {
       const dist = Math.hypot(
         e.touches[0].clientX - e.touches[1].clientX,
@@ -1766,7 +1942,8 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
     applyZoom(target);
   };
 
-  const handleTouchEnd = () => {
+  const handleTouchEnd = (e?: React.TouchEvent) => {
+    if (e) e.stopPropagation();
     const now = Date.now();
     if (now - lastTapTimeRef.current < 300) {
       handleDoubleTap();
@@ -1777,8 +1954,14 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
   return (
     <PwaInstallGuard onDismiss={() => { stopCamera(); onClose(); }}>
-      <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4">
-        <div className="bg-white text-slate-900 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl flex flex-col max-h-[92vh] font-sans border border-slate-100">
+      <div 
+        className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-4"
+        style={{ overscrollBehavior: 'contain' }}
+      >
+        <div 
+          className="bg-white text-slate-900 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl flex flex-col max-h-[92vh] sm:max-h-[90vh] font-sans border border-slate-100 flex-shrink-0"
+          style={{ overscrollBehavior: 'contain' }}
+        >
           
           {isOfflineQueued ? (
             /* Offline Buffered Confirmation Screen */
@@ -1934,6 +2117,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
               {/* Dominant Camera Viewport */}
               <div 
                 className="relative w-full h-[58vh] sm:h-[420px] min-h-[320px] bg-black overflow-hidden select-none flex items-center justify-center"
+                style={{ touchAction: 'none' }}
                 onTouchStart={handleTouchStart}
                 onTouchMove={handleTouchMove}
                 onTouchEnd={handleTouchEnd}
@@ -1950,7 +2134,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                 />
 
                 {/* 2. Top Floating Control Bar */}
-                <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-auto" style={{ zIndex: 20 }}>
+                <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-auto" style={{ zIndex: 50 }}>
                   <div className="flex items-center gap-1.5 px-3 py-1.5 bg-black/50 backdrop-blur-md rounded-full text-white/90 text-xs font-medium border border-white/10 shadow-sm">
                     <Camera className="w-3.5 h-3.5 text-emerald-400" />
                     <span>Scan Classroom QR</span>
@@ -2044,11 +2228,28 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                   </div>
                 )}
 
-                {/* 5. Submitting Overlay */}
-                {isSubmitting && (
-                  <div className="absolute inset-0 bg-black/75 backdrop-blur-sm flex flex-col items-center justify-center gap-3 text-white animate-in fade-in duration-150" style={{ zIndex: 30 }}>
+                {/* 5. Submitting Overlay (strictly tied to flowState === 'SUBMITTING') */}
+                {flowState === 'SUBMITTING' && (
+                  <div className="absolute inset-0 bg-black/80 backdrop-blur-sm flex flex-col items-center justify-center gap-3 text-white animate-in fade-in duration-150 px-4 text-center" style={{ zIndex: 40 }}>
                     <div className="w-10 h-10 rounded-full border-3 border-emerald-400 border-t-transparent animate-spin" />
                     <span className="text-xs font-bold tracking-wide">Marking Attendance…</span>
+                    <p className="text-[11px] text-white/70 max-w-xs">Contacting attendance server securely…</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (currentAbortCtrlRef.current) {
+                          try { currentAbortCtrlRef.current.abort('user_cancelled'); } catch {}
+                          currentAbortCtrlRef.current = null;
+                        }
+                        setIsSubmitting(false);
+                        setFlowState('IDLE_SCANNING');
+                        isScanningLockedRef.current = false;
+                        setGuideText('Submission cancelled — scan again');
+                      }}
+                      className="mt-1 px-3 py-1 bg-white/15 hover:bg-white/25 text-white/90 text-[11px] font-semibold rounded-full border border-white/20 transition active:scale-95 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
                   </div>
                 )}
 
@@ -2119,7 +2320,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
               </div>
 
               {/* Bottom Clean Guidance & Action Area */}
-              <div className="w-full p-4 sm:p-5 flex flex-col items-center text-center space-y-2 bg-white">
+              <div className="w-full p-4 sm:p-5 flex flex-col items-center text-center space-y-2 bg-white flex-shrink-0">
                 
                 {/* Camera Permission / Error Card */}
                 {(cameraError || permissionState === 'denied' || permissionState === 'insecure_origin' || isCameraInUse) ? (
@@ -2179,35 +2380,99 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                 ) : (
                   <>
                     <h3 className="font-extrabold text-sm text-[#001e40]">
-                      {guideText}
+                      {flowState === 'SUBMITTING' && 'Marking Attendance…'}
+                      {flowState === 'TIMEOUT' && 'Submission Timed Out'}
+                      {flowState === 'STALE_QR' && 'Expired QR Code'}
+                      {flowState === 'RATE_LIMITED' && 'Scan Cooldown Active'}
+                      {flowState === 'BLOCKED' && 'Device Not Linked'}
+                      {flowState === 'ENROLLING' && 'Enrolling Device…'}
+                      {flowState === 'REBIND_OTP' && 'Verify New Device'}
+                      {(flowState === 'IDLE_SCANNING' || flowState === 'INITIALIZING' || flowState === 'DECODED' || flowState === 'ERROR') && guideText}
                     </h3>
                     <p className="text-xs text-slate-400 font-medium">
-                      Point your camera at the QR displayed by your faculty
+                      {flowState === 'SUBMITTING' && 'Contacting attendance server securely...'}
+                      {flowState === 'TIMEOUT' && 'Network delayed; token expired. Scan the current screen QR.'}
+                      {flowState === 'STALE_QR' && 'Projector rotated. Point camera at the refreshed classroom QR.'}
+                      {flowState === 'RATE_LIMITED' && `Please wait ${rateLimitSecondsLeft}s before scanning again.`}
+                      {flowState === 'BLOCKED' && 'Link this device to record attendance for your roll number.'}
+                      {flowState === 'ENROLLING' && 'Generating crypto keys and registering with college server...'}
+                      {flowState === 'REBIND_OTP' && `Enter 6-digit code sent to ${rebindMaskedEmail}`}
+                      {(flowState === 'IDLE_SCANNING' || flowState === 'INITIALIZING' || flowState === 'DECODED' || flowState === 'ERROR') && 'Point your camera at the QR displayed by your faculty'}
                     </p>
 
-                    {/* Clean Error Notification */}
-                    {scanError && (
-                      <div className={`w-full p-2.5 rounded-xl text-xs font-medium space-y-2 animate-in fade-in ${
-                        rateLimitSecondsLeft > 0
-                          ? 'bg-amber-50 border border-amber-300 text-amber-900'
-                          : 'bg-rose-50 border border-rose-200 text-rose-700'
-                      }`}>
+                    {/* State-specific Alert / Action Banner */}
+                    {flowState === 'TIMEOUT' && (
+                      <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-300 text-amber-900 space-y-2 animate-in fade-in">
                         <div className="flex items-center justify-center gap-1.5">
-                          {rateLimitSecondsLeft > 0 ? (
-                            <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0 animate-pulse" />
-                          ) : (
-                            <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                          )}
+                          <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                          <span>Attendance request timed out. Discarded stale token.</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFlowState('IDLE_SCANNING');
+                            setScanError(null);
+                            setGuideText('Align the QR inside the frame');
+                            isScanningLockedRef.current = false;
+                            if (mediaStreamRef.current && isMountedRef.current) {
+                              animationFrameIdRef.current = requestAnimationFrame(processFrame);
+                            }
+                          }}
+                          className="w-full py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          <span>Scan Current QR</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {flowState === 'STALE_QR' && (
+                      <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-blue-50 border border-blue-200 text-blue-800 flex items-center justify-center gap-1.5 animate-in fade-in">
+                        <RefreshCw className="w-3.5 h-3.5 text-blue-600 shrink-0 animate-spin" />
+                        <span>The 10s token sync rotated. Aim camera at the newly updated QR.</span>
+                      </div>
+                    )}
+
+                    {flowState === 'RATE_LIMITED' && (
+                      <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-300 text-amber-900 space-y-2 animate-in fade-in">
+                        <div className="flex items-center justify-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0 animate-pulse" />
+                          <span>Too many scan attempts. Cooldown: {rateLimitSecondsLeft}s</span>
+                        </div>
+                        <div className="w-full bg-amber-200/60 rounded-full h-1.5 overflow-hidden">
+                          <div
+                            className="bg-amber-500 h-1.5 rounded-full transition-all duration-1000"
+                            style={{ width: `${Math.min(100, Math.max(0, (rateLimitSecondsLeft / 20) * 100))}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {flowState === 'BLOCKED' && (
+                      <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-indigo-50 border border-indigo-200 text-indigo-900 space-y-2 animate-in fade-in">
+                        <div className="flex items-center justify-center gap-1.5">
+                          <ShieldCheck className="w-4 h-4 text-indigo-600 shrink-0" />
+                          <span>This device is not linked. Please enroll this device to record attendance.</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleInlineEnroll}
+                          disabled={isInlineEnrolling}
+                          className="w-full py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-1.5 shadow-sm active:scale-95 cursor-pointer"
+                        >
+                          <ShieldCheck className="w-4 h-4" />
+                          <span>{isInlineEnrolling ? 'Enrolling Device…' : 'Enroll this device'}</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Generic Error (only when flowState === 'ERROR' and NOT in submitting/timeout/stale/rate-limited/blocked) */}
+                    {flowState === 'ERROR' && scanError && (
+                      <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-700 space-y-2 animate-in fade-in">
+                        <div className="flex items-center justify-center gap-1.5">
+                          <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
                           <span>{scanError}</span>
                         </div>
-                        {rateLimitSecondsLeft > 0 && (
-                          <div className="w-full bg-amber-200/60 rounded-full h-1.5 overflow-hidden">
-                            <div
-                              className="bg-amber-500 h-1.5 rounded-full transition-all duration-1000"
-                              style={{ width: `${Math.min(100, Math.max(0, (rateLimitSecondsLeft / 20) * 100))}%` }}
-                            />
-                          </div>
-                        )}
                         {scanErrorCode === 'no_active_binding' && (
                           <button
                             type="button"

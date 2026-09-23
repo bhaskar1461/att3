@@ -88,6 +88,7 @@ export interface DeviceEnrollmentRequestPayload {
   binding_nonce: string;
   storage_persisted: boolean;
   keygen_duration_ms: number;
+  stored_record?: StoredBindingRecord;
 }
 
 // ============================================================================

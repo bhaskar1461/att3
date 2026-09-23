@@ -31,6 +31,30 @@ services:
       - snist_dev_net
 
   # ----------------------------------------------------------------------------
+  # 1b. DATABASE: PostgreSQL 15 (Local Development / Testing)
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: snist_dev_postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: dev
+      POSTGRES_PASSWORD: dev_pass
+      POSTGRES_DB: snist_dev
+    volumes:
+      - dev_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev -d snist_dev"]
+      interval: 4s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
+    networks:
+      - snist_dev_net
+
+  # ----------------------------------------------------------------------------
   # 2. BACKEND: FastAPI with Hot Reload on Port 8001
   # ----------------------------------------------------------------------------
   backend:
@@ -91,4 +115,6 @@ networks:
 
 volumes:
   dev_mariadb_data:
+    driver: local
+  dev_postgres_data:
     driver: local

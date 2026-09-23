@@ -118,12 +118,13 @@ class RebindOtpRequest(BaseModel):
 # HELPER: OTP DISPATCH FOR REBIND
 # ============================================================
 
-def dispatch_rebind_otp_internal(student: Student, db: Session) -> Tuple[bool, str]:
+def create_rebind_otp_record(student: Student, db: Session) -> Tuple[Optional[str], Optional[str]]:
     """
-    Generates, hashes, stores, and dispatches a 6-digit OTP to student's email.
+    Generates, hashes, and stores a 6-digit OTP in the database synchronously.
+    Returns (otp_code, error_message).
     """
     if not student.email:
-        return False, "No email address registered for student."
+        return None, "No email address registered for student."
 
     now = datetime.utcnow()
     # Rate limit: max 5 OTP requests per hour
@@ -134,7 +135,7 @@ def dispatch_rebind_otp_internal(student: Student, db: Session) -> Tuple[bool, s
     ).count()
 
     if recent_otps >= 5:
-        return False, "Too many verification code requests. Please wait 1 hour."
+        return None, "Too many verification code requests. Please wait 1 hour."
 
     # Generate 6-digit code using CSPRNG
     otp_code = "".join(secrets.choice(string.digits) for _ in range(6))
@@ -150,43 +151,126 @@ def dispatch_rebind_otp_internal(student: Student, db: Session) -> Tuple[bool, s
     )
     db.add(record)
     db.commit()
+    return otp_code, None
 
-    # Send email
-    html_body = render_email_template("otp_email.html", {
-        "student_name": student.name,
-        "otp_code": otp_code,
-        "expiry_minutes": 10
-    })
-    if "Template rendering unavailable" in html_body or "Template rendering error" in html_body:
-        html_body = f"""
-        <html><body>
-        <h3>SNIST ERP — Device Rebind Verification Code</h3>
-        <p>Dear {student.name},</p>
-        <p>Your verification code to link a new attendance device is: <strong>{otp_code}</strong></p>
-        <p>This code expires in 10 minutes. If you did not initiate this request, contact support immediately.</p>
-        </body></html>
-        """
 
-    send_res = send_single_email(
-        to_email=student.email,
-        subject=f"SNIST ERP — Device Rebind Verification Code: {otp_code}",
-        html_body=html_body,
-        channel="OTP"
+def dispatch_rebind_otp_email_bg(
+    student_id: int,
+    user_id: int,
+    roll_number: str,
+    name: str,
+    email: str,
+    otp_code: str
+):
+    """
+    Background worker task: Dispatches 6-digit OTP email with isolated DB session.
+    Prevents remote SMTP handshakes from blocking HTTP request threads.
+    """
+    try:
+        from app.core.database import SessionLocal
+        html_body = render_email_template("otp_email.html", {
+            "student_name": name,
+            "otp_code": otp_code,
+            "expiry_minutes": 10
+        })
+        if "Template rendering unavailable" in html_body or "Template rendering error" in html_body:
+            html_body = f"""
+            <html><body>
+            <h3>SNIST ERP — Device Rebind Verification Code</h3>
+            <p>Dear {name},</p>
+            <p>Your verification code to link a new attendance device is: <strong>{otp_code}</strong></p>
+            <p>This code expires in 10 minutes. If you did not initiate this request, contact support immediately.</p>
+            </body></html>
+            """
+
+        send_res = send_single_email(
+            to_email=email,
+            subject=f"SNIST ERP — Device Rebind Verification Code: {otp_code}",
+            html_body=html_body,
+            channel="OTP"
+        )
+
+        with SessionLocal() as bg_db:
+            audit = AuditLog(
+                user_id=user_id,
+                roll_number=roll_number,
+                event_type="REBIND_OTP_SENT",
+                action="REBIND_OTP_DISPATCH",
+                details=f"Rebind OTP dispatched to {mask_email(email)} (status={send_res.get('status')})",
+                created_at=datetime.utcnow()
+            )
+            bg_db.add(audit)
+            bg_db.commit()
+    except Exception as ex:
+        logger.error(f"[REBIND OTP BG] Failed to send OTP email to {email}: {ex}")
+
+
+def dispatch_rebind_otp_internal(student: Student, db: Session) -> Tuple[bool, str]:
+    """
+    Synchronous OTP generation & dispatch (maintained for backward-compatible test calls).
+    """
+    otp_code, err = create_rebind_otp_record(student, db)
+    if err or not otp_code:
+        return False, err or "Failed to generate OTP"
+    dispatch_rebind_otp_email_bg(
+        student.id,
+        student.user_id,
+        student.roll_number,
+        student.name,
+        student.email,
+        otp_code
     )
-
-    # Security audit event (Zero OTP in log)
-    audit = AuditLog(
-        user_id=student.user_id,
-        roll_number=student.roll_number,
-        event_type="REBIND_OTP_SENT",
-        action="REBIND_OTP_DISPATCH",
-        details=f"Rebind OTP dispatched to {mask_email(student.email)} (status={send_res.get('status')})",
-        created_at=now
-    )
-    db.add(audit)
-    db.commit()
-
     return True, "Code sent"
+
+
+# ============================================================
+# API ENDPOINT 0: BINDING STATUS INSPECTION (SERVER-AUTHORITATIVE)
+# ============================================================
+
+@router.get("/status", dependencies=[Depends(check_binding_v2_enabled)])
+def get_device_binding_status(
+    key_id: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Server-authoritative binding inspection.
+    Validates whether the student has an active non-revoked binding in the database,
+    and checks if the client's current key_id matches the enrolled key.
+    """
+    student = db.query(Student).filter(Student.user_id == current_user.id).first()
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only students can query device binding status."
+        )
+
+    active_binding = db.query(DeviceBinding).filter(
+        DeviceBinding.student_id == student.id,
+        DeviceBinding.revoked_at.is_(None),
+        DeviceBinding.status == "ACTIVE"
+    ).first()
+
+    if not active_binding:
+        return {
+            "enrolled": False,
+            "status": "NOT_ENROLLED",
+            "roll_number": student.roll_number,
+            "active_key_id": None,
+            "device_matches": False
+        }
+
+    clean_key_id = key_id.strip().upper() if key_id else None
+    device_matches = bool(clean_key_id and active_binding.key_id == clean_key_id)
+
+    return {
+        "enrolled": True,
+        "status": "BOUND" if (not clean_key_id or device_matches) else "MISMATCH",
+        "roll_number": student.roll_number,
+        "active_key_id": active_binding.key_id,
+        "device_matches": device_matches if clean_key_id else True,
+        "enrolled_at": active_binding.enrolled_at.isoformat() if active_binding.enrolled_at else None
+    }
 
 
 # ============================================================
@@ -196,6 +280,7 @@ def dispatch_rebind_otp_internal(student: Student, db: Session) -> Tuple[bool, s
 @router.post("/enroll", dependencies=[Depends(check_binding_v2_enabled)])
 def enroll_device_key(
     req: DeviceEnrollmentRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -292,8 +377,19 @@ def enroll_device_key(
     # --------------------------------------------------------------------------
     if active_binding and not is_recovery_case:
         if not req.rebind_otp:
-            # Trigger OTP dispatch automatically
-            success, msg = dispatch_rebind_otp_internal(student, db)
+            # Trigger OTP creation synchronously and email dispatch in background
+            otp_code, err = create_rebind_otp_record(student, db)
+            if err or not otp_code:
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=err or "Too many verification requests.")
+            background_tasks.add_task(
+                dispatch_rebind_otp_email_bg,
+                student.id,
+                student.user_id,
+                student.roll_number,
+                student.name,
+                student.email,
+                otp_code
+            )
             return {
                 "status": "REBIND_REQUIRED",
                 "otp_required": True,
@@ -548,6 +644,7 @@ def verify_binding_signature(
 
 @router.post("/request-rebind-otp", dependencies=[Depends(check_binding_v2_enabled)])
 def request_rebind_otp(
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -558,9 +655,19 @@ def request_rebind_otp(
     if not student:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only students can request device rebind codes.")
 
-    ok, msg = dispatch_rebind_otp_internal(student, db)
-    if not ok:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+    otp_code, err = create_rebind_otp_record(student, db)
+    if err or not otp_code:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err or "Too many verification requests.")
+
+    background_tasks.add_task(
+        dispatch_rebind_otp_email_bg,
+        student.id,
+        student.user_id,
+        student.roll_number,
+        student.name,
+        student.email,
+        otp_code
+    )
 
     return {
         "status": "SENT",

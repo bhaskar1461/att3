@@ -37,6 +37,30 @@ services:
       - snist_net
 
   # ----------------------------------------------------------------------------
+  # 1b. DATABASE: High-Performance Local PostgreSQL 15 Database
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:15-alpine
+    container_name: snist_local_postgres
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: snist_user
+      POSTGRES_PASSWORD: snist_postgres_pass
+      POSTGRES_DB: snist_attendance_db
+    volumes:
+      - snist_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snist_user -d snist_attendance_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks:
+      - snist_net
+
+  # ----------------------------------------------------------------------------
   # 2. BACKEND: FastAPI Server connected to local low-latency DB
   # ----------------------------------------------------------------------------
   backend:
@@ -93,5 +117,7 @@ networks:
 
 volumes:
   snist_mysql_fast_data:
+    driver: local
+  snist_postgres_data:
     driver: local
 

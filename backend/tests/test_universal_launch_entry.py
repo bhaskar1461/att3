@@ -275,17 +275,21 @@ class TestUniversalLaunchEntry:
         print(f"\nDEBUG res_data: {res_data}")
 
         # Verify DB record created (allowing for async batch writer flush)
-        time.sleep(0.5)
+        from app.api.student import async_attendance_writer
+        try:
+            async_attendance_writer._queue.join()
+        except Exception:
+            pass
         verify_db = SessionLocal()
         rec = None
-        for _ in range(5):
+        for _ in range(10):
             rec = verify_db.query(AttendanceRecord).filter(
                 AttendanceRecord.session_id == self.session.id,
                 AttendanceRecord.student_id == self.student.id
             ).first()
             if rec:
                 break
-            time.sleep(0.2)
+            time.sleep(0.3)
         assert rec is not None
         assert rec.status == AttendanceStatus.PRESENT
         verify_db.close()

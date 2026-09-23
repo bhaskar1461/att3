@@ -86,7 +86,7 @@ export async function sha256Hex(text: string): Promise<string> {
  * Generates an immutable, non-extractable ECDSA P-256 keypair, stores it in IndexedDB,
  * sets the paired corroboration cookie, and returns the public enrollment payload.
  */
-export async function generateKeyPair(studentRollOrId: string = ''): Promise<DeviceEnrollmentRequestPayload> {
+export async function generateKeyPair(studentRollOrId: string = '', autoCommit: boolean = false): Promise<DeviceEnrollmentRequestPayload> {
   const t0 = performance.now();
   const subtle = getSubtle();
 
@@ -147,9 +147,11 @@ export async function generateKeyPair(studentRollOrId: string = ''): Promise<Dev
     binding_nonce: nonce
   };
 
-  // 7. Save to IndexedDB and set paired cookie
-  await saveBindingRecord(storedRecord);
-  setBindingNonceCookie(nonce, 365);
+  // 7. Save to IndexedDB and set paired cookie only if autoCommit requested
+  if (autoCommit) {
+    await saveBindingRecord(storedRecord);
+    setBindingNonceCookie(nonce, 365);
+  }
 
   const keygenMs = performance.now() - t0;
 
@@ -164,8 +166,20 @@ export async function generateKeyPair(studentRollOrId: string = ''): Promise<Dev
     corroboration_tag: corroborationTag,
     binding_nonce: nonce,
     storage_persisted: persisted,
-    keygen_duration_ms: Math.round(keygenMs * 100) / 100
+    keygen_duration_ms: Math.round(keygenMs * 100) / 100,
+    stored_record: storedRecord
   };
+}
+
+/**
+ * Commits a generated binding record to persistent storage (IndexedDB & Cookie).
+ * Must ONLY be called once the server confirms successful enrollment (HTTP 200).
+ */
+export async function commitBindingRecord(record: StoredBindingRecord): Promise<void> {
+  await saveBindingRecord(record);
+  if (record.binding_nonce) {
+    setBindingNonceCookie(record.binding_nonce, 365);
+  }
 }
 
 /**
