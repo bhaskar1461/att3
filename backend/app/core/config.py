@@ -41,7 +41,13 @@ class Settings:
     # config.py is at backend/app/core/config.py -> 3 dirnames = backend, 4 dirnames = project root
     BACKEND_DIR: str = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     BASE_DIR: str = os.path.dirname(BACKEND_DIR)
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo")
+    _raw_db_url: str = os.getenv("DATABASE_URL", "mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo")
+    # Strict MySQL enforcement: SQLite is completely disallowed in this application
+    if "sqlite" in _raw_db_url.lower():
+        DATABASE_URL: str = "mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo"
+    else:
+        DATABASE_URL: str = _raw_db_url
+
     
     # Storage Paths
     DATA_DIR: str = os.path.join(BACKEND_DIR, "data")

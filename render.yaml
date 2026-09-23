@@ -8,6 +8,8 @@ services:
     envVars:
       - key: ENVIRONMENT
         value: production
+      - key: PORT
+        value: "8000"
       - key: SECRET_KEY
         generateValue: true
       - key: QR_SECRET_KEY

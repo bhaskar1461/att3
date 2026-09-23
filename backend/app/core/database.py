@@ -7,36 +7,36 @@ from app.core.config import settings
 
 logger = logging.getLogger("snist_erp.database")
 
-# Engine configuration (supporting both MySQL and SQLite)
-is_sqlite = settings.DATABASE_URL.startswith("sqlite")
-if is_sqlite:
-    # Diagnostic alert: Ensure SQLite is only used during explicit local test runs
-    logger.warning("[DATABASE INTEGRITY GUARD] Running with SQLite database engine (%s). Verify this is a test environment.", settings.DATABASE_URL)
-    connect_args = {"check_same_thread": False}
-    pool_kwargs = {}
+# Engine configuration — strictly MySQL
+if settings.DATABASE_URL.startswith("sqlite"):
+    logger.warning("[DATABASE ENFORCEMENT] SQLite is completely disabled. Defaulting to authoritative MySQL server.")
+    db_url = "mysql+pymysql://demo:Admin%40321%23@seg-dev.sreenidhi.edu.in:3306/seg_demo"
 else:
-    logger.info("[DATABASE INTEGRITY GUARD] Connecting to authoritative remote MySQL server (%s)", settings.DATABASE_URL.split("@")[-1] if "@" in settings.DATABASE_URL else "configured")
-    connect_args = {
-        "connect_timeout": 5,
-        "read_timeout": 8,
-        "write_timeout": 8
-    }
-    # Tuned connection pool for remote MySQL (seg-dev.sreenidhi.edu.in)
-    # Server max_connections is 151; setting max 45 connections per worker prevents exhaustion across multiple uvicorn workers
-    # Fast-fail pool_timeout (5s) prevents prolonged request queue hangs when remote DB is slow
-    pool_kwargs = {
-        "pool_size": 30,        # Sized for 50-60 concurrent student scans per worker
-        "max_overflow": 15,     # Peak burst allowance (max 45 total per worker)
-        "pool_timeout": 5,      # Fast-fail timeout to prevent worker starvation and cascade failure
-        "pool_recycle": 300     # 5-minute recycle to safely handle remote TCP keepalives
-    }
+    db_url = settings.DATABASE_URL
+
+is_sqlite = False
+
+logger.info("[DATABASE INTEGRITY GUARD] Connecting to authoritative MySQL server (%s)", db_url.split("@")[-1] if "@" in db_url else "configured")
+connect_args = {
+    "connect_timeout": 5,
+    "read_timeout": 8,
+    "write_timeout": 8
+}
+# Tuned connection pool for MySQL (seg-dev.sreenidhi.edu.in)
+pool_kwargs = {
+    "pool_size": 30,        # Sized for 50-60 concurrent student scans per worker
+    "max_overflow": 15,     # Peak burst allowance (max 45 total per worker)
+    "pool_timeout": 5,      # Fast-fail timeout to prevent worker starvation and cascade failure
+    "pool_recycle": 300     # 5-minute recycle to safely handle remote TCP keepalives
+}
 
 engine = create_engine(
-    settings.DATABASE_URL,
+    db_url,
     connect_args=connect_args,
     pool_pre_ping=True,
     **pool_kwargs
 )
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
