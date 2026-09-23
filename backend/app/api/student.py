@@ -1194,7 +1194,7 @@ async def student_scan_session(
                 import hashlib
                 client_ua = request.headers.get("user-agent", "generic_student_browser")
                 client_ip = ip_addr or "127.0.0.1"
-                conn_sig = hashlib.sha256(f"{clean_roll}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+                conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
                 device_id = f"DEV-CONN-{conn_sig.upper()}"
 
             device_secret = request.headers.get("x-device-secret", "").strip() or f"{device_id}_SECRET_SALT_2026"
@@ -1269,7 +1269,7 @@ async def student_scan_session(
                 import hashlib
                 client_ua = request.headers.get("user-agent", "generic_student_browser")
                 client_ip = ip_addr or "127.0.0.1"
-                conn_sig = hashlib.sha256(f"{clean_roll}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+                conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
                 device_id = f"DEV-CONN-{conn_sig.upper()}"
 
             device_secret = request.headers.get("x-device-secret", "").strip() or f"{device_id}_SECRET_SALT_2026"

@@ -87,6 +87,12 @@ class ShortTokenService:
         Retrieves or generates an opaque short code for an active session.
         The short code identifies WHO (the session); counter v identifies WHEN (the slot).
         """
+        sess = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+        if sess and sess.period:
+            from app.api.teacher import _extract_period_count
+            derived_periods = _extract_period_count(sess.period)
+            if derived_periods > 0:
+                period_count = derived_periods
         period_count = max(1, min(8, int(period_count)))
         now_ts = time.time()
         current_step = int(now_ts // step_window)
@@ -395,17 +401,38 @@ class ShortTokenService:
             if now_ts is None:
                 now_ts = time.time()
 
-            period_count = 1
+            from app.models.models import SessionStatus
+            sess = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+            if not sess or sess.status == SessionStatus.LOCKED:
+                raise TokenValidationError(
+                    code="expired",
+                    message="Attendance session has been locked or closed by the instructor.",
+                    server_now=now_ts
+                )
+
+            # Check if token or session has been deactivated
+            is_active = True
             with _CACHE_LOCK:
                 cached = _SHORT_CODE_CACHE.get(code)
-                if cached and cached.get("is_active"):
-                    period_count = cached.get("period_count", 1)
+                if cached and not cached.get("is_active", True):
+                    is_active = False
 
-            if period_count == 1:
-                sess = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
-                if sess:
-                    from app.api.teacher import _extract_period_count
-                    period_count = _extract_period_count(sess.period)
+            if is_active:
+                reg = db.query(ShortTokenRegistry).filter(
+                    ShortTokenRegistry.short_code == code
+                ).first()
+                if reg and not reg.is_active:
+                    is_active = False
+
+            if not is_active:
+                raise TokenValidationError(
+                    code="expired",
+                    message="Attendance token is no longer active for this session.",
+                    server_now=now_ts
+                )
+
+            from app.api.teacher import _extract_period_count
+            period_count = _extract_period_count(sess.period) if sess and sess.period else 1
 
             return {
                 "session_id": session_id,

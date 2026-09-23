@@ -84,6 +84,11 @@ def claim_launch_token(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"code": "invalid", "message": "Attendance session not found.", "serverNow": now_ts}
         )
+    if session.status == SessionStatus.LOCKED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "expired", "message": "Attendance session has been locked or closed by the instructor.", "serverNow": now_ts}
+        )
 
     claim_info = create_claim_ticket(
         session_id=session_id,

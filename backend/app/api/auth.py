@@ -403,12 +403,10 @@ async def login_for_access_token(request: Request, background_tasks: BackgroundT
     # 1. Enforce Student Device Binding Security LOCKOUT BEFORE/DURING login
     if user and user.role == UserRole.STUDENT:
         if not device_public_id or not device_secret:
-            # Deterministic fallback tied to client connection + roll number to prevent
-            # Shared NAT IP collisions on campus Wi-Fi (where hundreds of students share 1 IP)
             import hashlib
             client_ua = request.headers.get("user-agent", "generic_student_browser")
             client_ip = ip_address or "127.0.0.1"
-            conn_sig = hashlib.sha256(f"{clean_roll}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+            conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
             device_public_id = f"DEV-CONN-{conn_sig.upper()}"
             device_secret = hashlib.sha256(f"{device_public_id}_SECRET_SALT_2026".encode()).hexdigest()
 
@@ -678,7 +676,7 @@ async def refresh_student_token(
             import hashlib
             client_ua = request.headers.get("user-agent", "generic_student_browser")
             client_ip = ip_address or "127.0.0.1"
-            conn_sig = hashlib.sha256(f"{roll_number}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+            conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
             device_public_id = f"DEV-CONN-{conn_sig.upper()}"
             device_secret = hashlib.sha256(f"{device_public_id}_SECRET_SALT_2026".encode()).hexdigest()
 
@@ -964,7 +962,7 @@ def login_via_magic_link(req: MagicLoginRequest, request: Request, db: Session =
             import hashlib
             client_ua = request.headers.get("user-agent", "generic_student_browser")
             client_ip = ip_address or "127.0.0.1"
-            conn_sig = hashlib.sha256(f"{clean_roll}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+            conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
             device_public_id = f"DEV-CONN-{conn_sig.upper()}"
             device_secret = hashlib.sha256(f"{device_public_id}_SECRET_SALT_2026".encode()).hexdigest()
 

@@ -525,7 +525,7 @@ def process_batch_qr_scan(
     results = []
     processed_count = 0
     now = datetime.utcnow()
-    date_formatted = datetime.now().strftime("%d/%m/%Y")
+    date_formatted = get_server_ist_datetime().strftime("%d/%m/%Y")
 
     # Step 1: Pre-decode QR payloads and collect student identifiers and session IDs
     decoded_scans = []
@@ -670,6 +670,7 @@ def process_batch_qr_scan(
         scan_mode_val = "QR_MAKEUP" if is_batch_makeup else "QR"
         if existing:
             existing.status = AttendanceStatus.PRESENT
+            existing.period_count = period_count
             existing.scanned_at = now
             existing.scan_mode = scan_mode_val
         else:
@@ -678,6 +679,7 @@ def process_batch_qr_scan(
                 student_id=student.id,
                 roll_number=roll_number,
                 session_date=session_meta["session_date"],
+                period_count=period_count,
                 status=AttendanceStatus.PRESENT,
                 scan_mode=scan_mode_val,
                 scanned_at=now
@@ -713,9 +715,13 @@ def process_batch_qr_scan(
     db.commit()
     try:
         from app.services.attendance_engine import invalidate_attendance_cache
-        invalidate_attendance_cache(course_id=session_meta.get("subject_id"))
-    except Exception:
-        pass
+        distinct_subjects = {
+            meta.get("subject_id") for meta in session_metas.values() if meta and meta.get("subject_id")
+        }
+        for sub_id in distinct_subjects:
+            invalidate_attendance_cache(course_id=sub_id)
+    except Exception as cache_err:
+        logger.warning(f"Failed to invalidate attendance cache post batch-scan: {cache_err}")
 
     return {
         "status": "SUCCESS",
@@ -876,7 +882,7 @@ def manual_mark_attendance(
         d_obj = dt.strptime(str(session.session_date).strip(), "%Y-%m-%d")
         date_formatted = d_obj.strftime("%d/%m/%Y")
     except Exception:
-        date_formatted = str(session.session_date).strip() or datetime.now().strftime("%d/%m/%Y")
+        date_formatted = str(session.session_date).strip() or get_server_ist_datetime().strftime("%d/%m/%Y")
 
     gs_id = _get_effective_gsheet_id(db, session)
 

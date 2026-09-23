@@ -517,7 +517,7 @@ def verify_device_reset(
         # Also register the incoming connection device signature as fallback reference
         client_ua = request.headers.get("user-agent", "generic_student_browser")
         client_ip = ip_address or "127.0.0.1"
-        conn_sig = hashlib.sha256(f"{clean_roll}_{client_ip}_{client_ua}".encode()).hexdigest()[:16]
+        conn_sig = hashlib.sha256(f"{client_ip}_{client_ua}".encode()).hexdigest()[:16]
         actual_conn_pub_id = f"DEV-CONN-{conn_sig.upper()}"
         actual_conn_secret = hashlib.sha256(f"{actual_conn_pub_id}_SECRET_SALT_2026".encode()).hexdigest()
         new_device = register_or_get_device(
