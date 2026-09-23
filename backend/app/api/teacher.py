@@ -1,6 +1,6 @@
 import os
 import logging
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Request
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
@@ -565,6 +565,7 @@ def get_session_broadcast_token(
     period_count: Optional[int] = None,
     dark_mode: bool = False,
     response: Response = None,
+    request: Request = None,
     db: Session = Depends(get_db),
     current_teacher: Teacher = Depends(require_teacher)
 ):
@@ -625,14 +626,28 @@ def get_session_broadcast_token(
         step_window=10
     )
 
-    # Determine canonical HTTPS base URL
+    # Determine canonical HTTPS base URL:
+    # Check if request has an authoritative external host (e.g. Cloudflare tunnel, custom domain, or public IP)
+    detected_host = None
+    if request:
+        req_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").strip()
+        proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").strip()
+        # Only use dynamic host if it is not internal docker networking (backend:8000) or test client (testserver)
+        if req_host and not any(h in req_host.lower() for h in ["backend:8000", "testserver"]):
+            detected_host = f"{proto}://{req_host}".rstrip("/")
+
     attendance_base = getattr(settings, "ATTENDANCE_BASE_URL", "").strip().rstrip("/")
-    if attendance_base:
+    if detected_host:
+        base_url = detected_host
+    elif attendance_base:
         base_url = attendance_base
     else:
         base_url = settings.public_frontend_url.strip().rstrip("/")
-    if not base_url.startswith("http://") and not base_url.startswith("https://"):
-        base_url = f"https://{base_url}"
+    if not base_url.startswith("https://"):
+        if base_url.startswith("http://"):
+            base_url = "https://" + base_url[len("http://"):]
+        else:
+            base_url = f"https://{base_url}"
     launch_url = f"{base_url}/a/{launch_token}"
 
     if active_format == "legacy":
