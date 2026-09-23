@@ -801,9 +801,9 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       triggerFeedback(false);
 
       if (code === 'QR-SESSION-END' || lowerMsg.includes('qr-session-end') || lowerMsg.includes('session has ended')) {
-        setScanError('This class session has ended. See your faculty if you believe this is wrong. (Code: QR-SESSION-END)');
-        setGuideText('Session ended — scanning halted');
-        stopCamera();
+        lastFailedPayloadRef.current = payloadToken;
+        setScanError('This class session has ended. If faculty refreshed or started attendance, please scan the active projector QR. (Code: QR-SESSION-END)');
+        setGuideText('Session ended — point camera at active QR');
         return;
       }
 

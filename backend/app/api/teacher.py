@@ -331,14 +331,30 @@ def start_attendance_session(req: StartSessionRequest, db: Session = Depends(get
     ).order_by(AttendanceSession.id.desc()).first()
 
     if existing_locked:
+        # Re-open the session so the teacher can broadcast and students can scan
+        existing_locked.status = SessionStatus.OPEN
+        existing_locked.locked_at = None
+        if req.display_type and existing_locked.display_type != req.display_type:
+            existing_locked.display_type = req.display_type
+        if req.latitude is not None:
+            existing_locked.faculty_latitude = req.latitude
+            existing_locked.faculty_longitude = req.longitude
+            existing_locked.faculty_accuracy_m = req.accuracy_m
+            existing_locked.geofence_radius_m = req.geofence_radius_m or 100.0
+        db.commit()
+        from app.services.attendance_engine import invalidate_session_cache
+        invalidate_session_cache(existing_locked.id)
         return {
             "session_id": existing_locked.id,
-            "status": existing_locked.status.value,
+            "status": "OPEN",
             "session_date": existing_locked.session_date,
             "period": existing_locked.period,
             "period_count": _extract_period_count(existing_locked.period),
             "display_type": existing_locked.display_type or "projector",
-            "message": "Attendance session already exists and is locked. Please unlock it to edit attendance."
+            "faculty_latitude": existing_locked.faculty_latitude,
+            "faculty_longitude": existing_locked.faculty_longitude,
+            "geofence_radius_m": existing_locked.geofence_radius_m or 100.0,
+            "message": "Reopened attendance session for attendance capture"
         }
 
     disp_type = req.display_type if req.display_type in ["projector", "phone_screen", "laptop"] else "projector"
