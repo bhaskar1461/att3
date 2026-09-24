@@ -180,7 +180,7 @@ def _run_defensive_schema_migrations():
                     logger.info("Backfilling default active semester in qr_semesters")
                     conn.execute(text(
                         "INSERT INTO qr_semesters (name, start_date, end_date, total_planned_sessions, is_active, created_at) "
-                        "VALUES ('Odd Semester 2026-27', '2026-07-01', '2026-11-30', 60, 1, CURRENT_TIMESTAMP)"
+                        "VALUES ('Odd Semester 2026-27', '2026-07-01', '2026-11-30', 60, TRUE, CURRENT_TIMESTAMP)"
                     ))
                     conn.commit()
 
@@ -509,7 +509,7 @@ def _auto_seed_initial_users():
                 )
                 db.add(teacher_user)
                 db.flush()
-                t_prof = Teacher(user_id=teacher_user.id, name="Mrs. N. Sowjanya", department_id=dept.id, email=teacher_user.email)
+                t_prof = Teacher(user_id=teacher_user.id, teacher_code="T_SOWJANYA", name="Mrs. N. Sowjanya", department_id=dept.id)
                 db.add(t_prof)
                 logger.info("Auto-seeded Faculty account: 'demoteacher' / 'demoteacher@2026'")
 
