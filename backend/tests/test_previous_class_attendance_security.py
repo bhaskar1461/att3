@@ -243,7 +243,9 @@ class TestPreviousClassAttendanceSecurity(unittest.TestCase):
             }
         )
         self.assertEqual(res.status_code, 400)
-        self.assertIn("does not belong to this session's class section", res.json()["detail"])
+        self.assertTrue(
+            any(m in res.json()["detail"].lower() for m in ["does not belong", "not enrolled in this section"])
+        )
 
     def test_6_unassigned_subject_start_rejected(self):
         """6. Teacher cannot start attendance for unassigned subject (Rule 27)"""

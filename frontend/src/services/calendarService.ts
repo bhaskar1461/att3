@@ -63,7 +63,7 @@ export async function fetchCalendarSummary(
   const [assignmentsResult, sessionsResult, currentClassResult] = await Promise.allSettled([
     apiRequest<TeacherAssignment[]>('/teacher/assigned-classes'),
     apiRequest<HistoricalAttendanceSession[]>(
-      dateFilter ? `/teacher/historical-sessions?date=${dateFilter}` : '/teacher/historical-sessions'
+      dateFilter ? `/teacher/historical-sessions?date=${dateFilter}&limit=500` : '/teacher/historical-sessions?limit=500'
     ),
     apiRequest<any>('/teacher/current-class')
   ]);

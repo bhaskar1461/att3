@@ -16,24 +16,25 @@ from typing import Optional, Dict, Any, List
 API_BASE = "https://antideploy.com/api/v1"
 CONFIG_PATH = os.path.expanduser("~/.antideploy/config.json")
 WORKSPACE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-APP_NAME = "snist-attendance"
+APP_NAME = "att2"
 
 EXCLUDE_DIRS = {
     ".git", ".agents", ".vscode", ".idea", "__pycache__", ".pytest_cache",
     ".coverage", "htmlcov", "node_modules", "scratch", ".wrangler",
-    "graphify", "graphify-out", "certs", "keycloak", "bin"
+    "graphify", "graphify-out", "certs", "keycloak", "bin", "fixtures"
 }
 
 EXCLUDE_EXTENSIONS = {
     ".tar.gz", ".zip", ".log", ".db", ".sqlite", ".sqlite3",
-    "-wal", "-shm", ".pyc", ".pyo", ".pyd"
+    "-wal", "-shm", ".pyc", ".pyo", ".pyd", ".bin"
 }
 
 EXCLUDE_FILES = {
     "cloudflared.exe",
     ".env",
     "backend/.env",
-    "token.pickle"
+    "token.pickle",
+    "qr_rgba.bin"
 }
 
 def is_excluded(rel_path: str) -> bool:
@@ -57,6 +58,8 @@ def is_excluded(rel_path: str) -> bool:
             return True
 
     # Check specific paths
+    if len(parts) == 1 and (filename.endswith(".png") or filename.endswith(".jpg")):
+        return True
     if "backend/data/selfies" in normalized:
         return True
     if "frontend/node_modules" in normalized:

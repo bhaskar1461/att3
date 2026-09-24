@@ -2455,9 +2455,29 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                     )}
 
                     {flowState === 'STALE_QR' && (
-                      <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-blue-50 border border-blue-200 text-blue-800 flex items-center justify-center gap-1.5 animate-in fade-in">
-                        <RefreshCw className="w-3.5 h-3.5 text-blue-600 shrink-0 animate-spin" />
-                        <span>The 10s token sync rotated. Aim camera at the newly updated QR.</span>
+                      <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-blue-50 border border-blue-200 text-blue-800 space-y-2 animate-in fade-in">
+                        <div className="flex items-center justify-center gap-1.5">
+                          <RefreshCw className="w-3.5 h-3.5 text-blue-600 shrink-0 animate-spin" />
+                          <span>QR rotated on screen. Point camera at the refreshed code.</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setFlowState('IDLE_SCANNING');
+                            setScanError(null);
+                            setGuideText('Align the QR inside the frame');
+                            lastExpiredPayloadRef.current = null;
+                            lastExpiredStepRef.current = null;
+                            isScanningLockedRef.current = false;
+                            if (mediaStreamRef.current && isMountedRef.current) {
+                              animationFrameIdRef.current = requestAnimationFrame(processFrame);
+                            }
+                          }}
+                          className="w-full py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 shadow-sm"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          <span>Tap to Rescan Now</span>
+                        </button>
                       </div>
                     )}
 

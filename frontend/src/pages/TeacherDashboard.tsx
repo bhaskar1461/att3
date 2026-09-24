@@ -17,6 +17,7 @@ import { Toast } from '../components/Toast';
 import { FacultyDefaultersTab } from '../components/FacultyDefaultersTab';
 import { TeacherCalendarContainer } from '../components/teacher/TeacherCalendarContainer.tsx';
 import { adaptSessionsToCalendarEvents, groupEventsByDate } from '../services/calendarAdapter.ts';
+import { clearCalendarSummaryCache } from '../services/calendarService.ts';
 import { getTodayIST } from '../utils/dateUtils.ts';
 import type { TeacherClassEvent } from '../types/calendar.ts';
 
@@ -267,7 +268,8 @@ export const TeacherDashboard: React.FC = () => {
 
   const fetchHistoricalSessions = async () => {
     try {
-      const data: any = await apiRequest('/teacher/historical-sessions?limit=200');
+      clearCalendarSummaryCache();
+      const data: any = await apiRequest('/teacher/historical-sessions?limit=500');
       if (Array.isArray(data)) {
         setAllHistoricalSessions(data);
       }

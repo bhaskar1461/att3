@@ -454,7 +454,7 @@ class TestShortTokenSecurity(unittest.TestCase):
             headers=self.student_c_headers
         )
         self.assertEqual(res_c.status_code, 400)
-        self.assertIn("not enrolled in this section", res_c.json()["detail"])
+        self.assertIn("not enrolled in this section", res_c.json()["detail"].lower())
 
     # -------------------------------------------------------------
     # 4. Device Binding & Account-Switch Lockout Tests

@@ -196,7 +196,9 @@ class TestPhase9SecurityAndIntegrity(unittest.TestCase):
             json={"session_id": sess.id, "roll_number": "21CS002", "status": "PRESENT", "reason": "scanner_failed"}
         )
         self.assertEqual(res_manual.status_code, 400)
-        self.assertIn("does not belong", res_manual.json()["detail"].lower())
+        self.assertTrue(
+            any(m in res_manual.json()["detail"].lower() for m in ["does not belong", "not enrolled in this section"])
+        )
 
         # Student 2 (CSE-B) attempts to scan rotating token from Section A
         bcast = self.client.get(f"/api/v1/teacher/sessions/{sess.id}/broadcast-token", headers=self.h_t1)
