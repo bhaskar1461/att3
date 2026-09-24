@@ -344,6 +344,32 @@ def _run_defensive_schema_migrations():
                     except Exception as err:
                         logger.warning(f"Failed to add manual_marked_by_id: {err}")
 
+        # Check qr_teacher_assignments for class-specific register and Google sheet columns
+        if "qr_teacher_assignments" in tables:
+            assign_cols = [col["name"] for col in inspector.get_columns("qr_teacher_assignments")]
+            with engine.connect() as conn:
+                if "excel_file_name" not in assign_cols:
+                    logger.info("Migrating schema: adding excel_file_name to qr_teacher_assignments")
+                    try:
+                        conn.execute(text("ALTER TABLE qr_teacher_assignments ADD COLUMN excel_file_name VARCHAR(255) NULL"))
+                        conn.commit()
+                    except Exception as err:
+                        logger.warning(f"Failed to add excel_file_name: {err}")
+                if "excel_file_path" not in assign_cols:
+                    logger.info("Migrating schema: adding excel_file_path to qr_teacher_assignments")
+                    try:
+                        conn.execute(text("ALTER TABLE qr_teacher_assignments ADD COLUMN excel_file_path VARCHAR(500) NULL"))
+                        conn.commit()
+                    except Exception as err:
+                        logger.warning(f"Failed to add excel_file_path: {err}")
+                if "google_sheet_id" not in assign_cols:
+                    logger.info("Migrating schema: adding google_sheet_id to qr_teacher_assignments")
+                    try:
+                        conn.execute(text("ALTER TABLE qr_teacher_assignments ADD COLUMN google_sheet_id VARCHAR(255) NULL"))
+                        conn.commit()
+                    except Exception as err:
+                        logger.warning(f"Failed to add google_sheet_id: {err}")
+
         # Defensive indexes for Week 9 scale optimization (telemetry rollups and historical session lists)
         try:
             with engine.connect() as conn:
@@ -498,6 +524,7 @@ def _auto_seed_initial_users():
                 db.flush()
 
             # 3. Ensure Demo Faculty
+            t_prof = None
             teacher_user = db.query(User).filter(User.username == "demoteacher").first()
             if not teacher_user:
                 teacher_user = User(
@@ -512,6 +539,8 @@ def _auto_seed_initial_users():
                 t_prof = Teacher(user_id=teacher_user.id, teacher_code="T_SOWJANYA", name="Mrs. N. Sowjanya", department_id=dept.id)
                 db.add(t_prof)
                 logger.info("Auto-seeded Faculty account: 'demoteacher' / 'demoteacher@2026'")
+            else:
+                t_prof = db.query(Teacher).filter(Teacher.user_id == teacher_user.id).first()
 
             # 4. Ensure Demo Student 23311A0504 (Vikram)
             v_user = db.query(User).filter(User.username == "23311A0504").first()
@@ -560,6 +589,98 @@ def _auto_seed_initial_users():
                 )
                 db.add(ds_prof)
                 logger.info("Auto-seeded Student account: 'demostudent' / 'demostudent@2026'")
+
+            # 6. Ensure multiple classes (Sections & Subjects) assigned to Faculty
+            from app.models.models import Subject, TeacherAssignment
+            from app.services.register_service import generate_class_attendance_register
+
+            sec_b = db.query(Section).filter(Section.name == "CSE-B").first()
+            if not sec_b:
+                sec_b = Section(name="CSE-B", department_id=dept.id, academic_year_id=ay.id)
+                db.add(sec_b)
+                db.flush()
+
+            subj_cet = db.query(Subject).filter(Subject.code == "CS301").first()
+            if not subj_cet:
+                subj_cet = Subject(code="CS301", name="Career Enhancement Training (CET)", department_id=dept.id, academic_year_id=ay.id)
+                db.add(subj_cet)
+                db.flush()
+
+            subj_cn = db.query(Subject).filter(Subject.code == "CS302").first()
+            if not subj_cn:
+                subj_cn = Subject(code="CS302", name="Computer Networks (CN)", department_id=dept.id, academic_year_id=ay.id)
+                db.add(subj_cn)
+                db.flush()
+
+            if t_prof:
+                # Class 1: Mrs. N. Sowjanya -> CSE-A • Career Enhancement Training
+                asgn1 = db.query(TeacherAssignment).filter(
+                    TeacherAssignment.teacher_id == t_prof.id,
+                    TeacherAssignment.section_id == sec.id,
+                    TeacherAssignment.subject_id == subj_cet.id
+                ).first()
+                if not asgn1:
+                    asgn1 = TeacherAssignment(
+                        teacher_id=t_prof.id,
+                        section_id=sec.id,
+                        subject_id=subj_cet.id
+                    )
+                    db.add(asgn1)
+                    db.flush()
+                
+                # Class 2: Mrs. N. Sowjanya -> CSE-B • Computer Networks
+                asgn2 = db.query(TeacherAssignment).filter(
+                    TeacherAssignment.teacher_id == t_prof.id,
+                    TeacherAssignment.section_id == sec_b.id,
+                    TeacherAssignment.subject_id == subj_cn.id
+                ).first()
+                if not asgn2:
+                    asgn2 = TeacherAssignment(
+                        teacher_id=t_prof.id,
+                        section_id=sec_b.id,
+                        subject_id=subj_cn.id
+                    )
+                    db.add(asgn2)
+                    db.flush()
+
+                db.commit()
+
+                # Pre-generate class Excel registers
+                try:
+                    generate_class_attendance_register(db, asgn1.id)
+                    generate_class_attendance_register(db, asgn2.id)
+                    logger.info(f"Auto-generated dedicated class attendance registers for faculty {t_prof.name}")
+                except Exception as reg_err:
+                    logger.warning(f"Class register initial generation warning: {reg_err}")
+
+            # Also ensure Mrs. N. Sowjanya (T_SOWJANYA) has multiple classes assigned if present
+            sow_prof = db.query(Teacher).filter(Teacher.teacher_code == "T_SOWJANYA").first()
+            if sow_prof and (not t_prof or sow_prof.id != t_prof.id):
+                s_asgn1 = db.query(TeacherAssignment).filter(
+                    TeacherAssignment.teacher_id == sow_prof.id,
+                    TeacherAssignment.section_id == sec.id,
+                    TeacherAssignment.subject_id == subj_cet.id
+                ).first()
+                if not s_asgn1:
+                    s_asgn1 = TeacherAssignment(teacher_id=sow_prof.id, section_id=sec.id, subject_id=subj_cet.id)
+                    db.add(s_asgn1)
+                    db.flush()
+                s_asgn2 = db.query(TeacherAssignment).filter(
+                    TeacherAssignment.teacher_id == sow_prof.id,
+                    TeacherAssignment.section_id == sec_b.id,
+                    TeacherAssignment.subject_id == subj_cn.id
+                ).first()
+                if not s_asgn2:
+                    s_asgn2 = TeacherAssignment(teacher_id=sow_prof.id, section_id=sec_b.id, subject_id=subj_cn.id)
+                    db.add(s_asgn2)
+                    db.flush()
+                db.commit()
+                try:
+                    generate_class_attendance_register(db, s_asgn1.id)
+                    generate_class_attendance_register(db, s_asgn2.id)
+                    logger.info(f"Auto-generated dedicated class attendance registers for faculty {sow_prof.name}")
+                except Exception as reg_err2:
+                    logger.warning(f"Class register generation warning for Sowjanya: {reg_err2}")
 
             db.commit()
     except Exception as e:

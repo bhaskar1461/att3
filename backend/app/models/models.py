@@ -201,6 +201,9 @@ class TeacherAssignment(Base):
     teacher_id = Column(Integer, nullable=False)
     subject_id = Column(Integer, nullable=False)
     section_id = Column(Integer, nullable=False)
+    excel_file_name = Column(String(255), nullable=True)
+    excel_file_path = Column(String(500), nullable=True)
+    google_sheet_id = Column(String(255), nullable=True)
 
     teacher = relationship("Teacher", primaryjoin="TeacherAssignment.teacher_id==Teacher.id", foreign_keys="[TeacherAssignment.teacher_id]", back_populates="assignments")
     subject = relationship("Subject", primaryjoin="TeacherAssignment.subject_id==Subject.id", foreign_keys="[TeacherAssignment.subject_id]", back_populates="assignments")

@@ -2,6 +2,7 @@ import os
 import shutil
 import logging
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Request
+from fastapi.responses import FileResponse
 
 logger = logging.getLogger("snist_erp.admin")
 from sqlalchemy import or_, func, case, and_
@@ -64,6 +65,10 @@ class AssignmentCreate(BaseModel):
     teacher_id: int
     subject_id: int
     section_id: int
+    google_sheet_id: Optional[str] = None
+
+class AssignmentGSheetUpdate(BaseModel):
+    google_sheet_id: str
 
 class SettingsUpdate(BaseModel):
     settings: Dict[str, str]
@@ -478,9 +483,26 @@ def get_teachers(
         teachers = query.order_by(Teacher.id.asc()).offset(offset_val).limit(limit_val).all()
         
         items = []
+        teacher_ids = [t.id for t in teachers]
+        assignments_map = {}
+        if teacher_ids:
+            all_asg = db.query(TeacherAssignment).options(
+                joinedload(TeacherAssignment.subject),
+                joinedload(TeacherAssignment.section)
+            ).filter(TeacherAssignment.teacher_id.in_(teacher_ids)).all()
+            for asg in all_asg:
+                assignments_map.setdefault(asg.teacher_id, []).append({
+                    "id": asg.id,
+                    "subject_code": asg.subject.code if asg.subject else "",
+                    "subject_name": asg.subject.name if asg.subject else "",
+                    "section_name": asg.section.name if asg.section else "",
+                    "excel_file_name": asg.excel_file_name or f"Register_{asg.id}.xlsx"
+                })
+
         for t in teachers:
             sp_id = t.google_sheet_id or ""
             sp_url = f"https://docs.google.com/spreadsheets/d/{sp_id}/edit" if sp_id else ""
+            t_asgs = assignments_map.get(t.id, [])
             items.append({
                 "id": t.id,
                 "teacher_code": t.teacher_code,
@@ -490,7 +512,9 @@ def get_teachers(
                 "mobile": t.mobile,
                 "username": t.user.username if t.user else "",
                 "google_sheet_id": sp_id,
-                "google_sheet_url": sp_url
+                "google_sheet_url": sp_url,
+                "assigned_count": len(t_asgs),
+                "assigned_classes": t_asgs
             })
 
         import math
@@ -503,10 +527,27 @@ def get_teachers(
         }
 
     teachers = query.all()
+    teacher_ids = [t.id for t in teachers]
+    assignments_map = {}
+    if teacher_ids:
+        all_asg = db.query(TeacherAssignment).options(
+            joinedload(TeacherAssignment.subject),
+            joinedload(TeacherAssignment.section)
+        ).filter(TeacherAssignment.teacher_id.in_(teacher_ids)).all()
+        for asg in all_asg:
+            assignments_map.setdefault(asg.teacher_id, []).append({
+                "id": asg.id,
+                "subject_code": asg.subject.code if asg.subject else "",
+                "subject_name": asg.subject.name if asg.subject else "",
+                "section_name": asg.section.name if asg.section else "",
+                "excel_file_name": asg.excel_file_name or f"Register_{asg.id}.xlsx"
+            })
+
     res = []
     for t in teachers:
         sp_id = t.google_sheet_id or ""
         sp_url = f"https://docs.google.com/spreadsheets/d/{sp_id}/edit" if sp_id else ""
+        t_asgs = assignments_map.get(t.id, [])
         res.append({
             "id": t.id,
             "teacher_code": t.teacher_code,
@@ -516,7 +557,9 @@ def get_teachers(
             "mobile": t.mobile,
             "username": t.user.username if t.user else "",
             "google_sheet_id": sp_id,
-            "google_sheet_url": sp_url
+            "google_sheet_url": sp_url,
+            "assigned_count": len(t_asgs),
+            "assigned_classes": t_asgs
         })
     return res
 
@@ -566,9 +609,32 @@ def create_teacher(req: TeacherCreate, db: Session = Depends(get_db), current_us
 
 @router.post("/assignments")
 def assign_teacher(req: AssignmentCreate, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    assignment = TeacherAssignment(teacher_id=req.teacher_id, subject_id=req.subject_id, section_id=req.section_id)
+    existing = db.query(TeacherAssignment).filter(
+        TeacherAssignment.teacher_id == req.teacher_id,
+        TeacherAssignment.subject_id == req.subject_id,
+        TeacherAssignment.section_id == req.section_id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="This faculty member is already assigned to this Subject and Section.")
+
+    sp_id = extract_spreadsheet_id(req.google_sheet_id) if req.google_sheet_id else None
+
+    assignment = TeacherAssignment(
+        teacher_id=req.teacher_id,
+        subject_id=req.subject_id,
+        section_id=req.section_id,
+        google_sheet_id=sp_id
+    )
     db.add(assignment)
     db.commit()
+    db.refresh(assignment)
+
+    # Immediately generate the dedicated class attendance register
+    try:
+        from app.services.register_service import generate_class_attendance_register
+        generate_class_attendance_register(db, assignment.id, overwrite=False)
+    except Exception as e:
+        logger.warning(f"Could not auto-generate class attendance register for assignment {assignment.id}: {e}")
 
     teacher_notified = None
     try:
@@ -587,27 +653,181 @@ def assign_teacher(req: AssignmentCreate, db: Session = Depends(get_db), current
         logger.warning(f"Could not dispatch teacher assignment email: {e}")
 
     return {
-        "message": "Teacher assigned successfully",
+        "message": "Class assigned to faculty successfully with dedicated Excel register",
+        "id": assignment.id,
+        "excel_file_name": assignment.excel_file_name,
         "teacher_notified": teacher_notified,
     }
 
 @router.get("/assignments")
-def list_assignments(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
-    # Eagerly load teacher, subject, section in 1 query
-    assignments = db.query(TeacherAssignment).options(
-        joinedload(TeacherAssignment.teacher),
+def list_assignments(
+    teacher_id: Optional[int] = None,
+    section_id: Optional[int] = None,
+    db: Session = Depends(get_db), 
+    current_user: User = Depends(require_admin)
+):
+    from app.services.register_service import get_assignment_register_info
+    query = db.query(TeacherAssignment).options(
+        joinedload(TeacherAssignment.teacher).joinedload(Teacher.department),
         joinedload(TeacherAssignment.subject),
-        joinedload(TeacherAssignment.section)
-    ).all()
+        joinedload(TeacherAssignment.section).joinedload(Section.department),
+        joinedload(TeacherAssignment.section).joinedload(Section.academic_year)
+    )
+    if teacher_id:
+        query = query.filter(TeacherAssignment.teacher_id == teacher_id)
+    if section_id:
+        query = query.filter(TeacherAssignment.section_id == section_id)
+
+    assignments = query.all()
+
+    counts_by_section = dict(
+        db.query(Student.section_id, func.count(Student.id))
+        .group_by(Student.section_id)
+        .all()
+    )
+
     res = []
     for a in assignments:
+        reg_info = get_assignment_register_info(a)
+        sp_id = a.google_sheet_id or ""
+        sp_url = f"https://docs.google.com/spreadsheets/d/{sp_id}/edit" if sp_id else ""
+        dept_name = ""
+        if a.section and a.section.department:
+            dept_name = a.section.department.name
+        elif a.teacher and a.teacher.department:
+            dept_name = a.teacher.department.name
+
+        acad_year = a.section.academic_year.name if a.section and a.section.academic_year else ""
+
         res.append({
             "id": a.id,
+            "teacher_id": a.teacher_id,
+            "teacher_code": a.teacher.teacher_code if a.teacher else "",
             "teacher_name": a.teacher.name if a.teacher else "",
+            "subject_id": a.subject_id,
+            "subject_code": a.subject.code if a.subject else "",
             "subject_name": a.subject.name if a.subject else "",
-            "section_name": a.section.name if a.section else ""
+            "section_id": a.section_id,
+            "section_name": a.section.name if a.section else "",
+            "department": dept_name,
+            "academic_year": acad_year,
+            "student_count": counts_by_section.get(a.section_id, 0),
+            "excel_file_name": reg_info.get("file_name") or a.excel_file_name or f"Register_{a.id}.xlsx",
+            "has_excel_register": reg_info.get("exists", False),
+            "google_sheet_id": sp_id,
+            "google_sheet_url": sp_url
         })
     return res
+
+@router.delete("/assignments/{assignment_id}")
+def delete_assignment(assignment_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    assignment = db.query(TeacherAssignment).filter(TeacherAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    db.delete(assignment)
+    db.commit()
+    return {"message": "Class assignment removed successfully", "id": assignment_id}
+
+@router.get("/assignments/{assignment_id}/download-register")
+def admin_download_class_register(assignment_id: int, db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
+    assignment = db.query(TeacherAssignment).filter(TeacherAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Class assignment not found")
+
+    from app.services.register_service import get_or_create_assignment_register
+    try:
+        reg_path = get_or_create_assignment_register(db, assignment)
+        if not os.path.exists(reg_path):
+            raise HTTPException(status_code=404, detail="Register file could not be generated")
+
+        download_name = assignment.excel_file_name or os.path.basename(reg_path)
+        return FileResponse(
+            path=reg_path,
+            filename=download_name,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    except Exception as e:
+        logger.error(f"Failed to deliver class register for assignment {assignment_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not load class register: {str(e)}")
+
+@router.post("/assignments/{assignment_id}/upload-register")
+async def admin_upload_class_register(
+    assignment_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    assignment = db.query(TeacherAssignment).filter(TeacherAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Class assignment not found")
+
+    if not file.filename.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx Excel files are supported")
+
+    from app.services.register_service import get_register_directory, _sanitize_name
+    reg_dir = get_register_directory()
+    clean_orig = _sanitize_name(os.path.splitext(file.filename)[0])
+    target_filename = f"Register_{assignment.id}_{clean_orig}.xlsx"
+    target_path = os.path.join(reg_dir, target_filename)
+
+    content = await file.read()
+    with open(target_path, "wb") as f:
+        f.write(content)
+
+    assignment.excel_file_name = file.filename
+    assignment.excel_file_path = target_path
+    db.commit()
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Successfully updated Excel attendance register for class assignment #{assignment.id}",
+        "file_name": file.filename,
+        "file_path": target_path
+    }
+
+@router.post("/assignments/{assignment_id}/regenerate-register")
+def admin_regenerate_class_register(
+    assignment_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    assignment = db.query(TeacherAssignment).filter(TeacherAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Class assignment not found")
+
+    from app.services.register_service import generate_class_attendance_register
+    try:
+        reg_path = generate_class_attendance_register(db, assignment_id, overwrite=True)
+        return {
+            "status": "SUCCESS",
+            "message": "Class attendance register regenerated with latest roster and attendance",
+            "file_name": assignment.excel_file_name,
+            "file_path": reg_path
+        }
+    except Exception as e:
+        logger.error(f"Failed to regenerate class register for assignment {assignment_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Regeneration failed: {str(e)}")
+
+@router.put("/assignments/{assignment_id}/google-sheet")
+def admin_update_assignment_google_sheet(
+    assignment_id: int,
+    req: AssignmentGSheetUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    assignment = db.query(TeacherAssignment).filter(TeacherAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Class assignment not found")
+
+    sp_id = extract_spreadsheet_id(req.google_sheet_id) if req.google_sheet_id else None
+    assignment.google_sheet_id = sp_id
+    db.commit()
+    sp_url = f"https://docs.google.com/spreadsheets/d/{sp_id}/edit" if sp_id else ""
+    return {
+        "message": f"Updated Google Sheet ID for class assignment #{assignment.id}",
+        "google_sheet_id": sp_id or "",
+        "google_sheet_url": sp_url
+    }
 
 # --- Student Management & Bulk Excel Import ---
 @router.get("/students")

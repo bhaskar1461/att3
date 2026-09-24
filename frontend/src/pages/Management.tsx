@@ -1,11 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
-import { Department, Section, Subject, Teacher, Student } from '../types';
-import { UserPlus, FileSpreadsheet, Settings, ExternalLink, Edit } from 'lucide-react';
+import { Department, Section, Subject, Teacher, Student, AdminClassAssignment } from '../types';
+import { 
+  UserPlus, FileSpreadsheet, Settings, ExternalLink, Edit, 
+  Download, Upload, RefreshCw, Trash2, Plus, Check, Search, 
+  Filter, BookOpen, Layers, Users, ChevronRight, X, AlertCircle
+} from 'lucide-react';
 import { Toast } from '../components/Toast';
 
 export const Management: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'students' | 'teachers' | 'departments' | 'sections' | 'subjects' | 'settings'>('students');
+  const [activeTab, setActiveTab] = useState<'students' | 'teachers' | 'assignments' | 'departments' | 'sections' | 'subjects' | 'settings'>('students');
   
   const [departments, setDepartments] = useState<Department[]>([]);
   const [sections, setSections] = useState<Section[]>([]);
@@ -13,6 +17,7 @@ export const Management: React.FC = () => {
   const [teachers, setTeachers] = useState<Teacher[]>([]);
   const [students, setStudents] = useState<Student[]>([]);
   const [years, setYears] = useState<any[]>([]);
+  const [assignments, setAssignments] = useState<AdminClassAssignment[]>([]);
 
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -22,6 +27,30 @@ export const Management: React.FC = () => {
   const [isImportModalOpen, setIsImportModalOpen] = useState(false);
   const [editingTeacher, setEditingTeacher] = useState<Teacher | null>(null);
   const [teacherGSheetInput, setTeacherGSheetInput] = useState('');
+
+  // Class Assignment & Register States
+  const [isAssignmentsLoading, setIsAssignmentsLoading] = useState(false);
+  const [assignmentSearch, setAssignmentSearch] = useState('');
+  const [filterTeacherId, setFilterTeacherId] = useState<number | ''>('');
+  const [filterSectionId, setFilterSectionId] = useState<number | ''>('');
+
+  // Assign Class Modal
+  const [isAssignModalOpen, setIsAssignModalOpen] = useState(false);
+  const [assignTeacherId, setAssignTeacherId] = useState<number | ''>('');
+  const [assignSubjectId, setAssignSubjectId] = useState<number | ''>('');
+  const [assignSectionId, setAssignSectionId] = useState<number | ''>('');
+  const [assignGSheetId, setAssignGSheetId] = useState('');
+  const [isAssigning, setIsAssigning] = useState(false);
+
+  // Upload Custom Register Modal
+  const [isUploadRegisterModalOpen, setIsUploadRegisterModalOpen] = useState(false);
+  const [selectedAssignmentForUpload, setSelectedAssignmentForUpload] = useState<AdminClassAssignment | null>(null);
+  const [uploadRegisterFile, setUploadRegisterFile] = useState<File | null>(null);
+  const [isUploadingRegister, setIsUploadingRegister] = useState(false);
+
+  // Class Google Sheet Modal
+  const [editingAssignmentGSheet, setEditingAssignmentGSheet] = useState<AdminClassAssignment | null>(null);
+  const [assignmentGSheetInput, setAssignmentGSheetInput] = useState('');
 
   // New Student Form
   const [newRoll, setNewRoll] = useState('');
@@ -96,6 +125,18 @@ export const Management: React.FC = () => {
     }
   };
 
+  const fetchAssignments = async () => {
+    setIsAssignmentsLoading(true);
+    try {
+      const data: any = await apiRequest('/admin/assignments');
+      setAssignments(Array.isArray(data) ? data : []);
+    } catch (err: any) {
+      console.error("Failed to load assignments:", err);
+    } finally {
+      setIsAssignmentsLoading(false);
+    }
+  };
+
   const fetchAllManagementData = async () => {
     setIsLoading(true);
     try {
@@ -117,6 +158,7 @@ export const Management: React.FC = () => {
       await Promise.all([
         fetchStudents(1),
         fetchTeachers(1),
+        fetchAssignments()
       ]);
     } catch (err: any) {
       setToast({ message: err.message || 'Error loading data', type: 'error' });
@@ -159,19 +201,16 @@ export const Management: React.FC = () => {
       formData.append('academic_year_id', newYearId.toString());
       formData.append('section_id', newSecId.toString());
 
-      const token = localStorage.getItem('token');
-      const res = await fetch('/api/v1/admin/students/import-excel', {
+      const res: any = await apiRequest('/admin/students/import-excel', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
         body: formData
-      }).then(r => r.json());
-
-      setToast({ message: `Import complete! ${res.imported} imported, ${res.skipped_duplicates} skipped`, type: 'success' });
+      });
+      setToast({ message: res.message || 'Students imported successfully', type: 'success' });
       setIsImportModalOpen(false);
       setImportFile(null);
       fetchAllManagementData();
     } catch (err: any) {
-      setToast({ message: err.message || 'Import failed', type: 'error' });
+      setToast({ message: err.message || 'Excel import failed', type: 'error' });
     }
   };
 
@@ -182,21 +221,18 @@ export const Management: React.FC = () => {
       const formData = new FormData();
       formData.append('file', templateFile);
 
-      const token = localStorage.getItem('token');
-      const res = await fetch('/api/v1/admin/master-template/upload', {
+      const res: any = await apiRequest('/admin/settings/upload-master-template', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
         body: formData
-      }).then(r => r.json());
-
-      setToast({ message: res.message, type: 'success' });
+      });
+      setToast({ message: res.message || 'Master template updated successfully', type: 'success' });
       setTemplateFile(null);
     } catch (err: any) {
-      setToast({ message: err.message || 'Upload failed', type: 'error' });
+      setToast({ message: err.message || 'Template upload failed', type: 'error' });
     }
   };
 
-  const handleSaveTeacherSheet = async (e: React.FormEvent) => {
+  const handleSaveTeacherGSheet = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingTeacher) return;
     try {
@@ -228,6 +264,149 @@ export const Management: React.FC = () => {
     }
   };
 
+  // Class Assignment Handlers
+  const handleAssignClass = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!assignTeacherId || !assignSubjectId || !assignSectionId) {
+      setToast({ message: 'Please select faculty, subject, and section', type: 'error' });
+      return;
+    }
+    setIsAssigning(true);
+    try {
+      const res: any = await apiRequest('/admin/assignments', {
+        method: 'POST',
+        body: JSON.stringify({
+          teacher_id: Number(assignTeacherId),
+          subject_id: Number(assignSubjectId),
+          section_id: Number(assignSectionId),
+          google_sheet_id: assignGSheetId.trim() || undefined
+        })
+      });
+      setToast({ message: res.message || 'Class assigned with dedicated Excel register!', type: 'success' });
+      setIsAssignModalOpen(false);
+      setAssignGSheetId('');
+      fetchAssignments();
+      fetchTeachers(teacherPage);
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to assign class', type: 'error' });
+    } finally {
+      setIsAssigning(false);
+    }
+  };
+
+  const handleDownloadRegister = async (assignmentId: number, preferredName?: string) => {
+    const token = localStorage.getItem('token');
+    try {
+      setToast({ message: 'Generating and downloading official class attendance register...', type: 'success' });
+      const url = `/api/v1/admin/assignments/${assignmentId}/download-register`;
+      const response = await fetch(url, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (!response.ok) {
+        throw new Error(`Download failed with status ${response.status}`);
+      }
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = preferredName || `Register_${assignmentId}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+      setToast({ message: `Downloaded register successfully!`, type: 'success' });
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to download class register', type: 'error' });
+    }
+  };
+
+  const handleUploadCustomRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedAssignmentForUpload || !uploadRegisterFile) return;
+    setIsUploadingRegister(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', uploadRegisterFile);
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/v1/admin/assignments/${selectedAssignmentForUpload.id}/upload-register`, {
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+        body: formData
+      });
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || `Upload failed with status ${response.status}`);
+      }
+      setToast({ message: 'Custom class attendance register uploaded successfully!', type: 'success' });
+      setIsUploadRegisterModalOpen(false);
+      setSelectedAssignmentForUpload(null);
+      setUploadRegisterFile(null);
+      fetchAssignments();
+      fetchTeachers(teacherPage);
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to upload custom register', type: 'error' });
+    } finally {
+      setIsUploadingRegister(false);
+    }
+  };
+
+  const handleRegenerateRegister = async (assignmentId: number) => {
+    try {
+      setToast({ message: 'Regenerating class attendance register...', type: 'success' });
+      const res: any = await apiRequest(`/admin/assignments/${assignmentId}/regenerate-register`, {
+        method: 'POST'
+      });
+      setToast({ message: res.message || 'Register regenerated successfully', type: 'success' });
+      fetchAssignments();
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to regenerate register', type: 'error' });
+    }
+  };
+
+  const handleDeleteAssignment = async (assignmentId: number, classDesc: string) => {
+    if (!window.confirm(`Are you sure you want to remove assignment for ${classDesc}?`)) return;
+    try {
+      const res: any = await apiRequest(`/admin/assignments/${assignmentId}`, {
+        method: 'DELETE'
+      });
+      setToast({ message: res.message || 'Assignment removed successfully', type: 'success' });
+      fetchAssignments();
+      fetchTeachers(teacherPage);
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to remove assignment', type: 'error' });
+    }
+  };
+
+  const handleSaveAssignmentGSheet = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingAssignmentGSheet) return;
+    try {
+      const res: any = await apiRequest(`/admin/assignments/${editingAssignmentGSheet.id}/google-sheet`, {
+        method: 'PUT',
+        body: JSON.stringify({ google_sheet_id: assignmentGSheetInput })
+      });
+      setToast({ message: res.message || 'Updated class Google Sheet', type: 'success' });
+      setEditingAssignmentGSheet(null);
+      fetchAssignments();
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to update Google Sheet', type: 'error' });
+    }
+  };
+
+  // Filtered class assignments
+  const filteredAssignments = assignments.filter(a => {
+    if (filterTeacherId && a.teacher_id !== filterTeacherId) return false;
+    if (filterSectionId && a.section_id !== filterSectionId) return false;
+    if (assignmentSearch.trim()) {
+      const q = assignmentSearch.toLowerCase();
+      const matchTeacher = (a.teacher_name || '').toLowerCase().includes(q) || (a.teacher_code || '').toLowerCase().includes(q);
+      const matchSubject = (a.subject_name || '').toLowerCase().includes(q) || (a.subject_code || '').toLowerCase().includes(q);
+      const matchSection = (a.section_name || '').toLowerCase().includes(q);
+      if (!matchTeacher && !matchSubject && !matchSection) return false;
+    }
+    return true;
+  });
+
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
       
@@ -237,10 +416,23 @@ export const Management: React.FC = () => {
       <div className="snist-card p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <h2 className="font-heading text-2xl font-bold text-[#15347e]">System Setup Hub</h2>
-          <p className="text-xs font-medium text-[#6a7894]">Configure students, faculty, sections, master Excel templates & Google Sheets</p>
+          <p className="text-xs font-medium text-[#6a7894]">Configure students, faculty, multiple class assignments & dedicated Excel registers</p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => {
+              setAssignTeacherId('');
+              setAssignSubjectId('');
+              setAssignSectionId('');
+              setAssignGSheetId('');
+              setIsAssignModalOpen(true);
+            }}
+            className="px-3.5 py-2 bg-[#2f53d7] hover:bg-[#15347e] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors shadow-sm"
+          >
+            <Plus className="w-4 h-4" /> Assign Class
+          </button>
+
           <button
             onClick={() => setIsStudentModalOpen(true)}
             className="px-3.5 py-2 snist-btn-primary text-xs font-bold flex items-center gap-1.5"
@@ -259,17 +451,31 @@ export const Management: React.FC = () => {
 
       {/* Management Navigation Tabs */}
       <div className="flex border-b border-slate-200 overflow-x-auto space-x-2 pb-1">
-        {(['students', 'teachers', 'departments', 'sections', 'subjects', 'settings'] as const).map(tab => (
+        {[
+          { id: 'students', label: 'Students' },
+          { id: 'teachers', label: 'Teachers' },
+          { id: 'assignments', label: 'Classes & Registers' },
+          { id: 'departments', label: 'Departments' },
+          { id: 'sections', label: 'Sections' },
+          { id: 'subjects', label: 'Subjects' },
+          { id: 'settings', label: 'Settings' }
+        ].map(tab => (
           <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all whitespace-nowrap ${
-              activeTab === tab 
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id as any)}
+            className={`px-4 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider transition-all whitespace-nowrap flex items-center gap-1.5 ${
+              activeTab === tab.id 
                 ? 'bg-white text-[#15347e] border border-slate-300 shadow-sm'
                 : 'text-slate-500 hover:text-[#15347e] hover:bg-white/60'
             }`}
           >
-            {tab}
+            {tab.id === 'assignments' && <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />}
+            {tab.label}
+            {tab.id === 'assignments' && assignments.length > 0 && (
+              <span className="ml-1 px-1.5 py-0.2 rounded-full bg-blue-100 text-blue-800 text-[10px] font-extrabold">
+                {assignments.length}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -353,18 +559,37 @@ export const Management: React.FC = () => {
         </div>
       )}
 
+      {/* Teachers Tab */}
       {activeTab === 'teachers' && (
         <div className="snist-card p-6 space-y-4">
-          <h3 className="font-heading text-lg font-bold text-[#15347e]">Faculty Members ({teacherTotal})</h3>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="font-heading text-lg font-bold text-[#15347e]">Faculty Members ({teacherTotal})</h3>
+              <p className="text-xs text-[#6a7894]">Faculty can be assigned multiple classes. Each assigned class maintains a dedicated Excel register.</p>
+            </div>
+            <button
+              onClick={() => {
+                setAssignTeacherId('');
+                setAssignSubjectId('');
+                setAssignSectionId('');
+                setAssignGSheetId('');
+                setIsAssignModalOpen(true);
+              }}
+              className="px-3.5 py-1.5 bg-[#2f53d7] hover:bg-[#15347e] text-white rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors self-start sm:self-auto shadow-sm"
+            >
+              <Plus className="w-3.5 h-3.5" /> Assign Class to Faculty
+            </button>
+          </div>
+
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-100 text-[#17233c] font-bold border-b border-slate-200">
                 <tr>
                   <th className="py-3 px-4">Code</th>
-                  <th className="py-3 px-4">Name</th>
+                  <th className="py-3 px-4">Faculty Name</th>
                   <th className="py-3 px-4">Department</th>
+                  <th className="py-3 px-4">Assigned Classes & Live Registers</th>
                   <th className="py-3 px-4">Username</th>
-                  <th className="py-3 px-4">Mobile</th>
                   <th className="py-3 px-4">Individual Google Sheet</th>
                 </tr>
               </thead>
@@ -374,8 +599,57 @@ export const Management: React.FC = () => {
                     <td className="py-3 px-4 font-mono font-bold text-[#2f53d7]">{t.teacher_code}</td>
                     <td className="py-3 px-4 font-bold text-[#17233c]">{t.name}</td>
                     <td className="py-3 px-4 text-slate-700">{t.department}</td>
+                    
+                    {/* Assigned Classes Column with Quick Register Download */}
+                    <td className="py-3 px-4">
+                      {t.assigned_classes && t.assigned_classes.length > 0 ? (
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {t.assigned_classes.map((cls: any) => (
+                            <div 
+                              key={cls.id} 
+                              className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 border border-blue-200 text-[#15347e] rounded-md font-semibold text-[11px]"
+                            >
+                              <span>{cls.section_name} ({cls.subject_code})</span>
+                              <button
+                                onClick={() => handleDownloadRegister(cls.id, cls.excel_file_name)}
+                                title={`Download Live Register: ${cls.excel_file_name}`}
+                                className="text-emerald-700 hover:text-emerald-900 p-0.5 rounded hover:bg-emerald-100 transition-colors"
+                              >
+                                <Download className="w-3 h-3" />
+                              </button>
+                            </div>
+                          ))}
+                          <button
+                            onClick={() => {
+                              setFilterTeacherId(t.id);
+                              setActiveTab('assignments');
+                            }}
+                            className="text-[10px] font-bold text-[#2f53d7] hover:underline ml-1"
+                            title="Manage registers in Classes & Registers tab"
+                          >
+                            Manage ({t.assigned_count}) →
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-center gap-1.5 text-slate-400">
+                          <span className="italic text-[11px]">No classes assigned</span>
+                          <button
+                            onClick={() => {
+                              setAssignTeacherId(t.id);
+                              setAssignSubjectId('');
+                              setAssignSectionId('');
+                              setAssignGSheetId('');
+                              setIsAssignModalOpen(true);
+                            }}
+                            className="px-2 py-0.5 bg-blue-50 hover:bg-blue-100 text-[#2f53d7] rounded text-[10px] font-bold border border-blue-200 transition"
+                          >
+                            + Assign
+                          </button>
+                        </div>
+                      )}
+                    </td>
+
                     <td className="py-3 px-4 text-slate-700">{t.username}</td>
-                    <td className="py-3 px-4 text-slate-500">{t.mobile || '-'}</td>
                     <td className="py-3 px-4">
                       {t.google_sheet_id ? (
                         <div className="flex items-center gap-1.5">
@@ -458,6 +732,245 @@ export const Management: React.FC = () => {
                 Next
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* NEW TAB: Classes & Dedicated Registers */}
+      {activeTab === 'assignments' && (
+        <div className="snist-card p-6 space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <h3 className="font-heading text-lg font-bold text-[#15347e] flex items-center gap-2">
+                <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
+                Faculty Class Assignments & Attendance Registers ({filteredAssignments.length})
+              </h3>
+              <p className="text-xs text-[#6a7894] mt-0.5">
+                Every assigned class (Faculty + Subject + Section) has a dedicated live Excel register (.xlsx) and Google Sheet. Live attendance auto-syncs on every session lock.
+              </p>
+            </div>
+
+            <button
+              onClick={() => {
+                setAssignTeacherId(filterTeacherId || '');
+                setAssignSubjectId('');
+                setAssignSectionId(filterSectionId || '');
+                setAssignGSheetId('');
+                setIsAssignModalOpen(true);
+              }}
+              className="px-4 py-2 bg-[#2f53d7] hover:bg-[#15347e] text-white font-bold text-xs rounded-xl flex items-center gap-1.5 shadow-sm transition self-start sm:self-auto"
+            >
+              <Plus className="w-4 h-4" /> Assign Faculty to Class
+            </button>
+          </div>
+
+          {/* Search & Filter Toolbar */}
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 p-3 bg-slate-50 border border-slate-200 rounded-2xl">
+            <div className="relative flex-1">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                placeholder="Search by faculty name, subject code, or section..."
+                value={assignmentSearch}
+                onChange={(e) => setAssignmentSearch(e.target.value)}
+                className="snist-input w-full pl-9 text-xs"
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <select
+                value={filterTeacherId}
+                onChange={(e) => setFilterTeacherId(e.target.value ? Number(e.target.value) : '')}
+                className="snist-input text-xs font-semibold"
+              >
+                <option value="">All Faculty ({teachers.length})</option>
+                {teachers.map(t => (
+                  <option key={t.id} value={t.id}>{t.name} ({t.teacher_code})</option>
+                ))}
+              </select>
+
+              <select
+                value={filterSectionId}
+                onChange={(e) => setFilterSectionId(e.target.value ? Number(e.target.value) : '')}
+                className="snist-input text-xs font-semibold"
+              >
+                <option value="">All Sections ({sections.length})</option>
+                {sections.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+
+              {(filterTeacherId || filterSectionId || assignmentSearch) && (
+                <button
+                  onClick={() => {
+                    setFilterTeacherId('');
+                    setFilterSectionId('');
+                    setAssignmentSearch('');
+                  }}
+                  className="px-2.5 py-1.5 text-xs text-slate-500 hover:text-slate-800 font-bold transition"
+                  title="Clear filters"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Assignments Table */}
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-slate-100 text-[#17233c] font-bold border-b border-slate-200">
+                <tr>
+                  <th className="py-3 px-4">Faculty Member</th>
+                  <th className="py-3 px-4">Subject</th>
+                  <th className="py-3 px-4">Section / Year</th>
+                  <th className="py-3 px-4">Enrolled Students</th>
+                  <th className="py-3 px-4">Dedicated Excel Register (.xlsx)</th>
+                  <th className="py-3 px-4">Class Google Sheet</th>
+                  <th className="py-3 px-4 text-center">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-200">
+                {filteredAssignments.length > 0 ? (
+                  filteredAssignments.map(asg => (
+                    <tr key={asg.id} className="hover:bg-slate-50">
+                      
+                      {/* Faculty Info */}
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-[#17233c]">{asg.teacher_name}</div>
+                        <div className="font-mono text-[11px] text-[#2f53d7]">{asg.teacher_code}</div>
+                        {asg.department && <div className="text-[10px] text-slate-500 truncate max-w-[180px]">{asg.department}</div>}
+                      </td>
+
+                      {/* Subject */}
+                      <td className="py-3 px-4">
+                        <div className="font-mono font-bold text-slate-800 text-[11px] bg-slate-100 px-1.5 py-0.5 rounded inline-block">
+                          {asg.subject_code}
+                        </div>
+                        <div className="font-semibold text-slate-700 text-xs mt-0.5">{asg.subject_name}</div>
+                      </td>
+
+                      {/* Section & Year */}
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-[#15347e] text-xs">{asg.section_name}</div>
+                        <div className="text-[11px] text-slate-500">{asg.academic_year || 'Academic Year'}</div>
+                      </td>
+
+                      {/* Enrolled Students */}
+                      <td className="py-3 px-4">
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 font-bold text-[11px]">
+                          <Users className="w-3.5 h-3.5 text-slate-500" />
+                          {asg.student_count} Students
+                        </span>
+                      </td>
+
+                      {/* Dedicated Excel Register Controls */}
+                      <td className="py-3 px-4">
+                        <div className="space-y-1.5">
+                          <div className="flex items-center gap-1.5">
+                            <span 
+                              className={`w-2 h-2 rounded-full ${asg.has_excel_register ? 'bg-emerald-500' : 'bg-amber-400'}`} 
+                              title={asg.has_excel_register ? 'Live Register Ready' : 'Auto-generated on download'}
+                            />
+                            <span className="font-mono text-[11px] text-slate-700 truncate max-w-[180px]" title={asg.excel_file_name}>
+                              {asg.excel_file_name || `Register_${asg.id}.xlsx`}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            {/* Download Button */}
+                            <button
+                              onClick={() => handleDownloadRegister(asg.id, asg.excel_file_name)}
+                              className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-lg font-bold text-[11px] flex items-center gap-1 shadow-xs transition"
+                              title="Download live Excel attendance register"
+                            >
+                              <Download className="w-3 h-3" /> Download
+                            </button>
+
+                            {/* Upload Custom Register Button */}
+                            <button
+                              onClick={() => {
+                                setSelectedAssignmentForUpload(asg);
+                                setUploadRegisterFile(null);
+                                setIsUploadRegisterModalOpen(true);
+                              }}
+                              className="px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-lg font-bold text-[11px] flex items-center gap-1 transition"
+                              title="Upload custom official register template"
+                            >
+                              <Upload className="w-3 h-3" /> Custom
+                            </button>
+
+                            {/* Regenerate Button */}
+                            <button
+                              onClick={() => handleRegenerateRegister(asg.id)}
+                              className="p-1 text-slate-400 hover:text-blue-600 rounded transition"
+                              title="Regenerate register with latest enrolled student roster"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+
+                      {/* Class Google Sheet */}
+                      <td className="py-3 px-4">
+                        {asg.google_sheet_id ? (
+                          <div className="flex items-center gap-1.5">
+                            <a
+                              href={asg.google_sheet_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-mono text-[#2f53d7] hover:underline font-bold text-[11px] truncate max-w-[130px] block"
+                              title={asg.google_sheet_id}
+                            >
+                              {asg.google_sheet_id}
+                            </a>
+                            <button
+                              onClick={() => {
+                                setEditingAssignmentGSheet(asg);
+                                setAssignmentGSheetInput(asg.google_sheet_id || '');
+                              }}
+                              className="p-1 text-slate-400 hover:text-[#2f53d7] rounded transition-colors"
+                              title="Edit Class Google Sheet ID"
+                            >
+                              <Edit className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => {
+                              setEditingAssignmentGSheet(asg);
+                              setAssignmentGSheetInput('');
+                            }}
+                            className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-[11px] font-bold border border-slate-200 flex items-center gap-1 transition-colors"
+                          >
+                            <Plus className="w-3 h-3 text-slate-400" /> Link Sheet
+                          </button>
+                        )}
+                      </td>
+
+                      {/* Actions */}
+                      <td className="py-3 px-4 text-center">
+                        <button
+                          onClick={() => handleDeleteAssignment(asg.id, `${asg.teacher_name} - ${asg.section_name} (${asg.subject_code})`)}
+                          className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 transition-colors"
+                          title="Unassign Faculty from Class"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
+
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={7} className="py-8 text-center text-slate-400 italic">
+                      No class assignments found matching filters.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
@@ -567,7 +1080,258 @@ export const Management: React.FC = () => {
         </div>
       )}
 
-      {/* Add Student Modal */}
+      {/* MODAL 1: Assign Faculty to Class */}
+      {isAssignModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-lg p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3 className="font-heading text-lg font-bold text-[#15347e] flex items-center gap-2">
+                <BookOpen className="w-5 h-5 text-[#2f53d7]" /> Assign Faculty to Class
+              </h3>
+              <button 
+                onClick={() => setIsAssignModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <p className="text-xs text-[#6a7894]">
+              Assigning a faculty member generates a dedicated, institutional attendance register (.xlsx) tailored specifically for this section and subject.
+            </p>
+
+            <form onSubmit={handleAssignClass} className="space-y-3">
+              {/* Faculty Selector */}
+              <div>
+                <label className="block text-xs font-bold text-[#17233c] mb-1">Faculty Member</label>
+                <select
+                  required
+                  value={assignTeacherId}
+                  onChange={(e) => setAssignTeacherId(Number(e.target.value))}
+                  className="snist-input w-full text-xs font-semibold"
+                >
+                  <option value="">Select Faculty...</option>
+                  {teachers.map(t => (
+                    <option key={t.id} value={t.id}>{t.name} ({t.teacher_code})</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Subject Selector */}
+              <div>
+                <label className="block text-xs font-bold text-[#17233c] mb-1">Subject / Course</label>
+                <select
+                  required
+                  value={assignSubjectId}
+                  onChange={(e) => setAssignSubjectId(Number(e.target.value))}
+                  className="snist-input w-full text-xs font-semibold"
+                >
+                  <option value="">Select Subject...</option>
+                  {subjects.map(s => (
+                    <option key={s.id} value={s.id}>[{s.code}] {s.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Section Selector */}
+              <div>
+                <label className="block text-xs font-bold text-[#17233c] mb-1">Section</label>
+                <select
+                  required
+                  value={assignSectionId}
+                  onChange={(e) => setAssignSectionId(Number(e.target.value))}
+                  className="snist-input w-full text-xs font-semibold"
+                >
+                  <option value="">Select Section...</option>
+                  {sections.map(sec => (
+                    <option key={sec.id} value={sec.id}>{sec.name} ({sec.department} • {sec.year})</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Optional Class Google Sheet */}
+              <div>
+                <label className="block text-xs font-bold text-[#17233c] mb-1">Class Google Sheet ID or URL (Optional)</label>
+                <input
+                  type="text"
+                  placeholder="Paste Google Sheet URL or ID (optional)"
+                  value={assignGSheetId}
+                  onChange={(e) => setAssignGSheetId(e.target.value)}
+                  className="snist-input w-full text-xs"
+                />
+                <span className="text-[10px] text-slate-400">If left blank, sessions will sync to the faculty's default Google Sheet.</span>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setIsAssignModalOpen(false)}
+                  className="px-4 py-2 bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200 hover:bg-slate-200 transition"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isAssigning}
+                  className="px-5 py-2 bg-[#2f53d7] hover:bg-[#15347e] text-white font-bold text-xs rounded-xl shadow-sm transition disabled:opacity-50"
+                >
+                  {isAssigning ? 'Assigning...' : 'Assign Class & Create Register'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 2: Upload Custom Register (.xlsx) */}
+      {isUploadRegisterModalOpen && selectedAssignmentForUpload && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3 className="font-heading text-lg font-bold text-[#15347e] flex items-center gap-2">
+                <Upload className="w-5 h-5 text-emerald-600" /> Upload Class Attendance Register
+              </h3>
+              <button 
+                onClick={() => setIsUploadRegisterModalOpen(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
+              <div><span className="font-bold text-slate-600">Faculty:</span> <span className="text-[#17233c] font-semibold">{selectedAssignmentForUpload.teacher_name}</span></div>
+              <div><span className="font-bold text-slate-600">Class:</span> <span className="text-[#17233c] font-semibold">{selectedAssignmentForUpload.section_name}</span> — {selectedAssignmentForUpload.subject_name}</div>
+            </div>
+
+            <p className="text-xs text-[#6a7894]">
+              Upload an official SNIST Excel attendance register (.xlsx) for this class. Future session scans will sync directly into this file.
+            </p>
+
+            <form onSubmit={handleUploadCustomRegister} className="space-y-3">
+              <input
+                type="file"
+                accept=".xlsx"
+                required
+                onChange={(e) => setUploadRegisterFile(e.target.files?.[0] || null)}
+                className="snist-input w-full text-xs"
+              />
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsUploadRegisterModalOpen(false)}
+                  className="px-4 py-2 bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={!uploadRegisterFile || isUploadingRegister}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm transition disabled:opacity-50"
+                >
+                  {isUploadingRegister ? 'Uploading...' : 'Save Class Register'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 3: Edit Class-Specific Google Sheet */}
+      {editingAssignmentGSheet && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3 className="font-heading text-lg font-bold text-[#15347e]">
+                Set Class Google Sheet
+              </h3>
+              <button 
+                onClick={() => setEditingAssignmentGSheet(null)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
+              <div><span className="font-bold text-slate-600">Faculty:</span> {editingAssignmentGSheet.teacher_name}</div>
+              <div><span className="font-bold text-slate-600">Class:</span> {editingAssignmentGSheet.section_name} ({editingAssignmentGSheet.subject_code})</div>
+            </div>
+
+            <form onSubmit={handleSaveAssignmentGSheet} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-[#17233c] mb-1">Google Sheet URL or Spreadsheet ID</label>
+                <input
+                  type="text"
+                  placeholder="https://docs.google.com/spreadsheets/d/.../edit"
+                  value={assignmentGSheetInput}
+                  onChange={(e) => setAssignmentGSheetInput(e.target.value)}
+                  className="snist-input w-full text-xs"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingAssignmentGSheet(null)}
+                  className="px-4 py-2 bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 snist-btn-primary font-bold text-xs"
+                >
+                  Save Class Sheet
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 4: Edit Teacher Individual Google Sheet */}
+      {editingTeacher && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+            <h3 className="font-heading text-lg font-bold text-[#15347e]">
+              Edit Google Sheet for {editingTeacher.name}
+            </h3>
+
+            <form onSubmit={handleSaveTeacherGSheet} className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-[#17233c] mb-1">Spreadsheet ID or URL</label>
+                <input
+                  type="text"
+                  placeholder="e.g. 1zv8ahGuDQ0KPAYXNSRHyUWIERhwd3ev3599V3nVDO5Y"
+                  value={teacherGSheetInput}
+                  onChange={(e) => setTeacherGSheetInput(e.target.value)}
+                  className="snist-input w-full text-xs"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingTeacher(null)}
+                  className="px-4 py-2 bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 snist-btn-primary font-bold text-xs"
+                >
+                  Save Sheet ID
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: Add Student */}
       {isStudentModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-md p-6 space-y-4 shadow-2xl">
@@ -642,7 +1406,7 @@ export const Management: React.FC = () => {
         </div>
       )}
 
-      {/* Bulk Import Modal */}
+      {/* MODAL 6: Bulk Import */}
       {isImportModalOpen && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-md p-6 space-y-4 shadow-2xl">

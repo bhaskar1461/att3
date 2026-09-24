@@ -17,7 +17,7 @@ from sqlalchemy import or_, func
 from sqlalchemy.orm import joinedload
 
 from app.models.models import (
-    User, UserRole, Student, Teacher, AttendanceSession, AttendanceRecord, 
+    User, UserRole, Student, Teacher, TeacherAssignment, AttendanceSession, AttendanceRecord, 
     AttendanceStatus, SessionStatus, SystemSettings, Section
 )
 from app.services.qr_service import QRService
@@ -222,6 +222,32 @@ def _async_post_scan_tasks(
         except Exception as ex:
             print(f"Excel Update Warning: {str(ex)}")
 
+    # Sync to Class-Specific Dedicated Excel Register
+    try:
+        from app.core.database import SessionLocal
+        from app.models.models import TeacherAssignment, Section, Teacher
+        from app.services.register_service import get_or_create_assignment_register
+        with SessionLocal() as sync_db:
+            sec_obj = sync_db.query(Section).filter(Section.name == sec_name).first()
+            teacher_obj = sync_db.query(Teacher).filter(Teacher.name == teacher_name).first()
+            if sec_obj and teacher_obj:
+                asgn = sync_db.query(TeacherAssignment).filter(
+                    TeacherAssignment.teacher_id == teacher_obj.id,
+                    TeacherAssignment.section_id == sec_obj.id
+                ).first()
+                if asgn:
+                    class_reg_path = get_or_create_assignment_register(sync_db, asgn)
+                    if class_reg_path and os.path.exists(class_reg_path):
+                        ExcelAttendanceService.record_attendance_in_excel(
+                            file_path=class_reg_path,
+                            roll_number=roll_number,
+                            date_str=date_formatted,
+                            status_code=status_str,
+                            overwrite=True
+                        )
+    except Exception as ex_class:
+        print(f"Class Register Update Warning: {ex_class}")
+
     if gs_id:
         try:
             creds_file = settings.GOOGLE_CREDENTIALS_FILE or os.path.join(settings.BACKEND_DIR, "credentials.json")
@@ -245,10 +271,23 @@ def _async_post_scan_tasks(
 
 def _get_effective_gsheet_id(db: Session, session: Optional[AttendanceSession]) -> str:
     try:
-        if session and session.teacher_id:
-            teacher = db.query(Teacher).filter(Teacher.id == session.teacher_id).first()
-            if teacher and teacher.google_sheet_id:
-                return teacher.google_sheet_id.strip()
+        if session:
+            # 1. Class-specific Google Sheet
+            asgn = db.query(TeacherAssignment).filter(
+                TeacherAssignment.teacher_id == session.teacher_id,
+                TeacherAssignment.subject_id == session.subject_id,
+                TeacherAssignment.section_id == session.section_id
+            ).first()
+            if asgn and asgn.google_sheet_id:
+                return asgn.google_sheet_id.strip()
+
+            # 2. Teacher-specific Google Sheet
+            if session.teacher_id:
+                teacher = db.query(Teacher).filter(Teacher.id == session.teacher_id).first()
+                if teacher and teacher.google_sheet_id:
+                    return teacher.google_sheet_id.strip()
+
+        # 3. Global institutional sheet
         setting = db.query(SystemSettings).filter(SystemSettings.key == "GOOGLE_SPREADSHEET_ID").first()
         return setting.value.strip() if (setting and setting.value) else settings.GOOGLE_SPREADSHEET_ID
     except Exception:

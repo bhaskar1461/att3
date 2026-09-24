@@ -1,1 +1,28 @@
-(empty)
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Registers & generated files
+backend/data/registers/*.xlsx
+!backend/data/registers/.gitkeep
+backend/data/selfies/*
+backend/data/backups/*
+*.db
+backend/*.db
+backend/data/*.db
+
+# Logs & temp
+*.log
+cf_tunnel*.log
+cloudflared.exe
+.env
+backend/.env
+.wrangler/

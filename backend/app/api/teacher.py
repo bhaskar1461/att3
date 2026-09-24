@@ -1,6 +1,7 @@
 import os
 import logging
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Request
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Request, UploadFile, File
+from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
@@ -196,9 +197,13 @@ def get_unmarked_students(
 
 @router.get("/assigned-classes")
 def get_assigned_classes(db: Session = Depends(get_db), current_teacher: Teacher = Depends(require_teacher)):
+    from app.services.register_service import get_assignment_register_info
     assignments = db.query(TeacherAssignment).filter(TeacherAssignment.teacher_id == current_teacher.id).all()
     res = []
     for a in assignments:
+        reg_info = get_assignment_register_info(a)
+        sp_id = a.google_sheet_id or ""
+        sp_url = f"https://docs.google.com/spreadsheets/d/{sp_id}/edit" if sp_id else ""
         res.append({
             "assignment_id": a.id,
             "subject_id": a.subject_id,
@@ -207,7 +212,11 @@ def get_assigned_classes(db: Session = Depends(get_db), current_teacher: Teacher
             "section_id": a.section_id,
             "section_name": a.section.name if a.section else "",
             "department": a.section.department.code if a.section and a.section.department else "",
-            "year": a.section.academic_year.name if a.section and a.section.academic_year else ""
+            "year": a.section.academic_year.name if a.section and a.section.academic_year else "",
+            "excel_file_name": reg_info["file_name"],
+            "has_excel_register": reg_info["exists"],
+            "google_sheet_id": sp_id,
+            "google_sheet_url": sp_url
         })
     return res
 
@@ -852,6 +861,20 @@ def _async_full_session_sync(session_id: int, target_sheet_id: Optional[str] = N
         except Exception as ex_err:
             logger.warning(f"[Excel Sync Warning] Session {session_id} Excel sync failed: {ex_err}")
 
+        # 4. Sync to Dedicated Class-Specific Attendance Register
+        try:
+            from app.services.register_service import sync_session_to_class_register
+            sync_session_to_class_register(
+                db=sync_db,
+                session_id=session_id,
+                date_str=date_str,
+                present_rolls=present_rolls,
+                all_rolls=all_rolls,
+                session_p_count=session_p_count
+            )
+        except Exception as class_err:
+            logger.warning(f"[Class Register Sync Warning] Session {session_id}: {class_err}")
+
     except Exception as general_err:
         logger.error(f"[Async Full Session Sync Error] Session {session_id}: {general_err}", exc_info=True)
     finally:
@@ -879,8 +902,15 @@ def lock_session(
     invalidate_session_cache(session_id)
     ShortTokenService.purge_session_tokens(db=db, session_id=session_id)
 
-    # Determine Google Sheet ID for this teacher
-    teacher_sheet_id = (current_teacher.google_sheet_id or "").strip()
+    # Determine Google Sheet ID: prioritize class assignment sheet, then teacher sheet, then global
+    asgn = db.query(TeacherAssignment).filter(
+        TeacherAssignment.teacher_id == session.teacher_id,
+        TeacherAssignment.subject_id == session.subject_id,
+        TeacherAssignment.section_id == session.section_id
+    ).first()
+    teacher_sheet_id = (asgn.google_sheet_id or "").strip() if asgn else ""
+    if not teacher_sheet_id:
+        teacher_sheet_id = (current_teacher.google_sheet_id or "").strip()
     if not teacher_sheet_id:
         from app.models.models import SystemSettings
         setting = db.query(SystemSettings).filter(SystemSettings.key == "GOOGLE_SPREADSHEET_ID").first()
@@ -890,7 +920,7 @@ def lock_session(
     warning_msg = None
 
     if not has_google_sheet:
-        warning_msg = "No Google Sheet linked for this faculty. Attendance is safely stored in the institutional database and ready for sync once a Google Sheet URL is linked."
+        warning_msg = "No Google Sheet linked for this class or faculty. Attendance is safely stored in the institutional database and class Excel register, ready for cloud sync once linked."
         log_security_audit_event(
             db=db,
             event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
@@ -1245,4 +1275,73 @@ def sync_roster_from_sheet(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to sync roster from Google Sheet: {str(e)}")
+
+@router.get("/assignments/{assignment_id}/download-register")
+def download_teacher_class_register(
+    assignment_id: int, 
+    db: Session = Depends(get_db), 
+    current_teacher: Teacher = Depends(require_teacher)
+):
+    """Allows faculty to download the official Excel attendance register for an assigned class."""
+    assignment = db.query(TeacherAssignment).filter(TeacherAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Class assignment not found")
+
+    if assignment.teacher_id != current_teacher.id and current_teacher.user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Not authorized to access this class register")
+
+    from app.services.register_service import get_or_create_assignment_register
+    try:
+        reg_path = get_or_create_assignment_register(db, assignment)
+        if not os.path.exists(reg_path):
+            raise HTTPException(status_code=404, detail="Register file could not be generated")
+
+        download_name = assignment.excel_file_name or os.path.basename(reg_path)
+        return FileResponse(
+            path=reg_path,
+            filename=download_name,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    except Exception as e:
+        logger.error(f"Failed to deliver class register for assignment {assignment_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Could not load class register: {str(e)}")
+
+@router.post("/assignments/{assignment_id}/upload-register")
+async def upload_teacher_class_register(
+    assignment_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_teacher: Teacher = Depends(require_teacher)
+):
+    """Allows faculty to upload a custom official Excel register (.xlsx) for this class."""
+    assignment = db.query(TeacherAssignment).filter(TeacherAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Class assignment not found")
+
+    if assignment.teacher_id != current_teacher.id and current_teacher.user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Not authorized to update this class register")
+
+    if not file.filename.endswith(".xlsx"):
+        raise HTTPException(status_code=400, detail="Only .xlsx Excel files are supported")
+
+    from app.services.register_service import get_register_directory, _sanitize_name
+    reg_dir = get_register_directory()
+    clean_orig = _sanitize_name(os.path.splitext(file.filename)[0])
+    target_filename = f"Register_{assignment.id}_{clean_orig}.xlsx"
+    target_path = os.path.join(reg_dir, target_filename)
+
+    content = await file.read()
+    with open(target_path, "wb") as f:
+        f.write(content)
+
+    assignment.excel_file_name = file.filename
+    assignment.excel_file_path = target_path
+    db.commit()
+
+    return {
+        "status": "SUCCESS",
+        "message": f"Successfully updated Excel attendance register for {assignment.section.name if assignment.section else 'class'}!",
+        "file_name": file.filename,
+        "file_path": target_path
+    }
 

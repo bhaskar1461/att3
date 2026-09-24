@@ -48,6 +48,14 @@ export interface Teacher {
   username: string;
   google_sheet_id?: string;
   google_sheet_url?: string;
+  assigned_count?: number;
+  assigned_classes?: Array<{
+    id: number;
+    subject_code: string;
+    subject_name: string;
+    section_name: string;
+    excel_file_name?: string;
+  }>;
 }
 
 export interface Student {
@@ -71,6 +79,29 @@ export interface TeacherAssignment {
   section_name: string;
   department: string;
   year: string;
+  excel_file_name?: string;
+  has_excel_register?: boolean;
+  google_sheet_id?: string;
+  google_sheet_url?: string;
+}
+
+export interface AdminClassAssignment {
+  id: number;
+  teacher_id: number;
+  teacher_code: string;
+  teacher_name: string;
+  subject_id: number;
+  subject_code: string;
+  subject_name: string;
+  section_id: number;
+  section_name: string;
+  department: string;
+  academic_year: string;
+  student_count: number;
+  excel_file_name?: string;
+  has_excel_register?: boolean;
+  google_sheet_id?: string;
+  google_sheet_url?: string;
 }
 
 export interface AttendanceSession {

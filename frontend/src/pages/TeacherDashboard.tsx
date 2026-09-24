@@ -4,7 +4,7 @@ import { apiRequest } from '../services/api';
 import { TeacherAssignment, AttendanceSession, HistoricalAttendanceSession } from '../types';
 import { 
   Camera, Lock, Unlock, RefreshCw, Search, Calendar, History, 
-  FileSpreadsheet, ExternalLink, Users, Zap, CheckCircle, X,
+  FileSpreadsheet, ExternalLink, Users, Zap, CheckCircle, X, Download,
   UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Maximize2, Smartphone, ShieldAlert, AlertTriangle,
   Clock, Tv, Trash2
 } from 'lucide-react';
@@ -228,6 +228,34 @@ export const TeacherDashboard: React.FC = () => {
       }
     } catch (err: any) {
       setToast({ message: err.message || 'Failed to load assigned classes', type: 'error' });
+    }
+  };
+
+  const handleDownloadMyClassRegister = async (assignmentId?: number, fileName?: string) => {
+    const targetId = assignmentId || selectedAssignment?.assignment_id;
+    if (!targetId) return;
+    const token = localStorage.getItem('token');
+    try {
+      setToast({ message: 'Generating and downloading class attendance register...', type: 'success' });
+      const url = `/api/v1/teacher/assignments/${targetId}/download-register`;
+      const response = await fetch(url, {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (!response.ok) {
+        throw new Error(`Download failed with status ${response.status}`);
+      }
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = fileName || selectedAssignment?.excel_file_name || `Register_${targetId}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+      setToast({ message: 'Class register downloaded successfully!', type: 'success' });
+    } catch (err: any) {
+      setToast({ message: err.message || 'Download failed', type: 'error' });
     }
   };
 
@@ -1191,6 +1219,38 @@ export const TeacherDashboard: React.FC = () => {
                     ))}
                   </select>
                 </div>
+
+                {selectedAssignment && (
+                  <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-xl bg-blue-50/80 border border-blue-100 text-xs">
+                    <div className="flex items-center gap-2">
+                      <FileSpreadsheet className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <div>
+                        <span className="font-bold text-[#15347e]">Dedicated Class Register: </span>
+                        <span className="font-mono text-[11px] text-slate-700">{selectedAssignment.excel_file_name || `Register_${selectedAssignment.assignment_id}.xlsx`}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadMyClassRegister(selectedAssignment.assignment_id, selectedAssignment.excel_file_name)}
+                        className="px-3 py-1.5 bg-white hover:bg-emerald-50 text-emerald-700 font-bold rounded-lg border border-emerald-200 text-xs flex items-center gap-1.5 shadow-xs transition"
+                        title="Download official live Excel attendance register for this class"
+                      >
+                        <Download className="w-3.5 h-3.5" /> Download Register (.xlsx)
+                      </button>
+                      {selectedAssignment.google_sheet_url && (
+                        <a
+                          href={selectedAssignment.google_sheet_url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="px-3 py-1.5 bg-white hover:bg-blue-50 text-[#2f53d7] font-bold rounded-lg border border-blue-200 text-xs flex items-center gap-1.5 shadow-xs transition"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" /> Class Google Sheet
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Multi-Select Period Interface */}
                 <div className="space-y-2.5 p-4 rounded-xl bg-slate-50 border border-slate-200">

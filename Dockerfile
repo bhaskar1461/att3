@@ -44,7 +44,7 @@ COPY seed_dev.py /app/seed_dev.py
 COPY --from=frontend-builder /frontend/dist /app/frontend_dist
 
 # Create required runtime storage folders
-RUN mkdir -p /app/data/master_templates /app/data/outputs /app/data/qr_codes
+RUN mkdir -p /app/data/master_templates /app/data/outputs /app/data/qr_codes /app/data/registers
 
 # Configure environment variables
 ENV PYTHONUNBUFFERED=1 \
