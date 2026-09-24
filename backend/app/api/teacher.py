@@ -174,7 +174,7 @@ def get_unmarked_students(
 
     marked_records = db.query(AttendanceRecord.student_id).filter(
         AttendanceRecord.session_id == session_id,
-        AttendanceRecord.status.in_(["PRESENT", "4"])
+        AttendanceRecord.status == AttendanceStatus.PRESENT
     ).all()
     marked_set = {m[0] for m in marked_records}
 
@@ -428,69 +428,73 @@ def get_historical_sessions(
     db: Session = Depends(get_db),
     current_teacher: Teacher = Depends(require_teacher)
 ):
-    # Week 9 Part D: Bounded pagination to prevent slow load with 50+ sessions
-    safe_limit = max(1, min(200, limit))
-    safe_offset = max(0, offset)
+    try:
+        # Week 9 Part D: Bounded pagination to prevent slow load with 50+ sessions
+        safe_limit = max(1, min(200, limit))
+        safe_offset = max(0, offset)
 
-    query = db.query(AttendanceSession).filter(AttendanceSession.teacher_id == current_teacher.id)
-    if date:
-        query = query.filter(AttendanceSession.session_date == date)
-    
-    # Eagerly load subject and section in 1 query with pagination applied
-    sessions = query.options(
-        joinedload(AttendanceSession.subject),
-        joinedload(AttendanceSession.section)
-    ).order_by(AttendanceSession.created_at.desc()).offset(safe_offset).limit(safe_limit).all()
+        query = db.query(AttendanceSession).filter(AttendanceSession.teacher_id == current_teacher.id)
+        if date:
+            query = query.filter(AttendanceSession.session_date == date)
+        
+        # Eagerly load subject and section in 1 query with pagination applied
+        sessions = query.options(
+            joinedload(AttendanceSession.subject),
+            joinedload(AttendanceSession.section)
+        ).order_by(AttendanceSession.created_at.desc()).offset(safe_offset).limit(safe_limit).all()
 
-    if not sessions:
-        return []
+        if not sessions:
+            return []
 
-    # Batch group aggregations to eliminate 2 queries per session inside loop
-    session_ids = [s.id for s in sessions]
-    section_ids = list(set(s.section_id for s in sessions))
+        # Batch group aggregations to eliminate 2 queries per session inside loop
+        session_ids = [s.id for s in sessions]
+        section_ids = list(set(s.section_id for s in sessions))
 
-    # Single query for section total students count across all sections
-    total_students_map = dict(
-        db.query(Student.section_id, func.count(Student.id))
-        .filter(Student.section_id.in_(section_ids))
-        .group_by(Student.section_id)
-        .all()
-    )
-
-    # Single query for present counts across all sessions
-    present_counts_map = dict(
-        db.query(AttendanceRecord.session_id, func.count(AttendanceRecord.id))
-        .filter(
-            AttendanceRecord.session_id.in_(session_ids),
-            AttendanceRecord.status.in_([AttendanceStatus.PRESENT, "4"])
+        # Single query for section total students count across all sections
+        total_students_map = dict(
+            db.query(Student.section_id, func.count(Student.id))
+            .filter(Student.section_id.in_(section_ids))
+            .group_by(Student.section_id)
+            .all()
         )
-        .group_by(AttendanceRecord.session_id)
-        .all()
-    )
 
-    res = []
-    for s in sessions:
-        total_students = total_students_map.get(s.section_id, 0)
-        present_count = present_counts_map.get(s.id, 0)
-        absent_count = max(0, total_students - present_count)
+        # Single query for present counts across all sessions
+        present_counts_map = dict(
+            db.query(AttendanceRecord.session_id, func.count(AttendanceRecord.id))
+            .filter(
+                AttendanceRecord.session_id.in_(session_ids),
+                AttendanceRecord.status == AttendanceStatus.PRESENT
+            )
+            .group_by(AttendanceRecord.session_id)
+            .all()
+        )
 
-        res.append({
-            "session_id": s.id,
-            "subject_id": s.subject_id,
-            "subject_name": s.subject.name if s.subject else "",
-            "subject_code": s.subject.code if s.subject else "",
-            "section_id": s.section_id,
-            "section_name": s.section.name if s.section else "",
-            "period": s.period,
-            "period_count": _extract_period_count(s.period),
-            "session_date": s.session_date,
-            "status": s.status.value,
-            "total_students": total_students,
-            "present_count": present_count,
-            "absent_count": absent_count,
-            "created_at": s.created_at.isoformat() if s.created_at else ""
-        })
-    return res
+        res = []
+        for s in sessions:
+            total_students = total_students_map.get(s.section_id, 0)
+            present_count = present_counts_map.get(s.id, 0)
+            absent_count = max(0, total_students - present_count)
+
+            res.append({
+                "session_id": s.id,
+                "subject_id": s.subject_id,
+                "subject_name": s.subject.name if s.subject else "",
+                "subject_code": s.subject.code if s.subject else "",
+                "section_id": s.section_id,
+                "section_name": s.section.name if s.section else "",
+                "period": s.period,
+                "period_count": _extract_period_count(s.period),
+                "session_date": s.session_date,
+                "status": s.status.value,
+                "total_students": total_students,
+                "present_count": present_count,
+                "absent_count": absent_count,
+                "created_at": s.created_at.isoformat() if s.created_at else ""
+            })
+        return res
+    except Exception as e:
+        logger.error(f"[HISTORICAL_SESSIONS_ERROR] Failed fetching historical sessions for teacher {current_teacher.id}: {str(e)}", exc_info=True)
+        return []
 
 @router.get("/sessions/{session_id}")
 def get_session_details(session_id: int, db: Session = Depends(get_db), current_teacher: Teacher = Depends(require_teacher)):
