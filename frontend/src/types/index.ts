@@ -106,6 +106,8 @@ export interface AdminClassAssignment {
 
 export interface AttendanceSession {
   session_id: number;
+  subject_id?: number;
+  subject_code?: string;
   section_id?: number;
   subject_name: string;
   section_name: string;
@@ -120,6 +122,7 @@ export interface AttendanceSession {
   manual_pct?: number;
   anomaly_status?: 'NORMAL' | 'AMBER' | 'RED';
   students: StudentAttendanceStatus[];
+  created_at?: string;
 }
 
 export interface StudentAttendanceStatus {
@@ -156,6 +159,8 @@ export interface HistoricalAttendanceSession {
   total_students: number;
   present_count: number;
   absent_count: number;
+  manual_count?: number;
+  manual_pct?: number;
   created_at?: string;
 }
 

@@ -221,7 +221,7 @@ class TestDateBoundQRAndHistoricalEditing(unittest.TestCase):
             json={"session_id": session.id, "qr_payload": qr_stu2, "period_count": 1}
         )
         self.assertEqual(res.status_code, 400)
-        self.assertIn("does not belong to class section", res.json()["detail"])
+        self.assertIn("Not enrolled in this section", res.json()["detail"])
 
     def test_6_teacher_not_assigned_to_session_reject(self):
         """6. Teacher not assigned to session -> REJECT"""

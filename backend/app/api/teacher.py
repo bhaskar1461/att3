@@ -2,7 +2,7 @@ import os
 import logging
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Request, UploadFile, File
 from fastapi.responses import FileResponse
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
 from typing import List, Optional
@@ -423,30 +423,31 @@ def start_attendance_session(req: StartSessionRequest, db: Session = Depends(get
 @router.get("/historical-sessions")
 def get_historical_sessions(
     date: Optional[str] = None,
-    limit: int = 50,
+    limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
     current_teacher: Teacher = Depends(require_teacher)
 ):
     try:
-        # Week 9 Part D: Bounded pagination to prevent slow load with 50+ sessions
-        safe_limit = max(1, min(200, limit))
+        # Week 9 Part D: Bounded pagination to prevent slow load with 100+ sessions
+        safe_limit = max(1, min(500, limit))
         safe_offset = max(0, offset)
 
         query = db.query(AttendanceSession).filter(AttendanceSession.teacher_id == current_teacher.id)
-        if date:
-            query = query.filter(AttendanceSession.session_date == date)
+        if date and date.strip():
+            clean_date = date.strip()
+            query = query.filter(func.trim(AttendanceSession.session_date) == clean_date)
         
-        # Eagerly load subject and section in 1 query with pagination applied
+        # Eagerly load subject and section with chronological ordering (newest first)
         sessions = query.options(
             joinedload(AttendanceSession.subject),
             joinedload(AttendanceSession.section)
-        ).order_by(AttendanceSession.created_at.desc()).offset(safe_offset).limit(safe_limit).all()
+        ).order_by(AttendanceSession.session_date.desc(), AttendanceSession.created_at.desc()).offset(safe_offset).limit(safe_limit).all()
 
         if not sessions:
             return []
 
-        # Batch group aggregations to eliminate 2 queries per session inside loop
+        # Batch group aggregations to eliminate N+1 queries per session
         session_ids = [s.id for s in sessions]
         section_ids = list(set(s.section_id for s in sessions))
 
@@ -469,11 +470,29 @@ def get_historical_sessions(
             .all()
         )
 
+        # Single query for manual present counts across all sessions
+        manual_counts_map = dict(
+            db.query(AttendanceRecord.session_id, func.count(AttendanceRecord.id))
+            .filter(
+                AttendanceRecord.session_id.in_(session_ids),
+                AttendanceRecord.status == AttendanceStatus.PRESENT,
+                or_(
+                    AttendanceRecord.scan_mode == "MANUAL",
+                    AttendanceRecord.manual_reason.isnot(None),
+                    AttendanceRecord.entry_method == "MANUAL"
+                )
+            )
+            .group_by(AttendanceRecord.session_id)
+            .all()
+        )
+
         res = []
         for s in sessions:
             total_students = total_students_map.get(s.section_id, 0)
             present_count = present_counts_map.get(s.id, 0)
+            manual_count = manual_counts_map.get(s.id, 0)
             absent_count = max(0, total_students - present_count)
+            manual_pct = round((manual_count / present_count) * 100, 1) if present_count > 0 else 0.0
 
             res.append({
                 "session_id": s.id,
@@ -488,6 +507,8 @@ def get_historical_sessions(
                 "status": s.status.value,
                 "total_students": total_students,
                 "present_count": present_count,
+                "manual_count": manual_count,
+                "manual_pct": manual_pct,
                 "absent_count": absent_count,
                 "created_at": s.created_at.isoformat() if s.created_at else ""
             })
