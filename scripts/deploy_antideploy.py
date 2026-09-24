@@ -233,38 +233,69 @@ def authenticate(device_code: Optional[str] = None, user_code: Optional[str] = N
 def get_or_create_application(token: str, app_name: str) -> Dict[str, Any]:
     """Retrieves existing application or provisions a new application."""
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    apps = api_request("/applications", headers=headers)
-    
-    if isinstance(apps, list):
-        for app in apps:
+    try:
+        apps = api_request("/applications", headers=headers)
+        app_list = apps if isinstance(apps, list) else (apps.get("applications") or apps.get("items") or [])
+        for app in app_list:
             if app.get("name") == app_name:
-                print(f"[App] Using existing application '{app_name}' (ID: {app.get('id')}).", flush=True)
+                app_id = app.get("applicationId") or app.get("id")
+                print(f"[App] Using existing application '{app_name}' (ID: {app_id}).", flush=True)
                 return app
+    except Exception as e:
+        print(f"[App] Notice during application lookup: {e}", flush=True)
 
     print(f"[App] Creating application '{app_name}'...", flush=True)
     create_payload = json.dumps({"name": app_name}).encode("utf-8")
-    new_app = api_request("/applications", method="POST", headers=headers, data=create_payload)
-    print(f"[App] Created application '{app_name}' (ID: {new_app.get('id')}).", flush=True)
-    return new_app
+    try:
+        new_app = api_request("/applications", method="POST", headers=headers, data=create_payload)
+        app_id = new_app.get("applicationId") or new_app.get("id")
+        print(f"[App] Created application '{app_name}' (ID: {app_id}).", flush=True)
+        return new_app
+    except AntideployAPIError as e:
+        if e.status_code == 409:
+            app_id = e.data.get("applicationId") or e.data.get("id")
+            if app_id:
+                print(f"[App] Using existing application '{app_name}' (ID: {app_id}) from 409 conflict resolution.", flush=True)
+                return {"applicationId": app_id, "id": app_id, "name": app_name}
+        raise
+
+
+def encode_multipart_formdata(fields: Dict[str, str], files: Dict[str, tuple]) -> tuple[bytes, str]:
+    """Encodes fields and files into multipart/form-data body and Content-Type header."""
+    boundary = "----AntideployBoundary" + os.urandom(16).hex()
+    body = bytearray()
+    for name, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        body.extend(f"{value}\r\n".encode("utf-8"))
+    for name, (filename, data, content_type) in files.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode("utf-8"))
+        body.extend(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+        body.extend(data)
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    content_type_header = f"multipart/form-data; boundary={boundary}"
+    return bytes(body), content_type_header
 
 
 def configure_secrets(token: str, app_id: str) -> None:
     """Configures project environment secrets."""
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    secrets = {
-        "SECRET_KEY": "snist_sec_" + os.urandom(24).hex(),
-        "QR_SECRET_KEY": "snist_qr_" + os.urandom(24).hex(),
-        "ENVIRONMENT": "production",
-        "JNTUH_ELIGIBLE_THRESHOLD": "75.0",
-        "JNTUH_CONDONABLE_THRESHOLD": "65.0",
-        "JNTUH_INCLUDE_APPROVED_ABSENCES": "True"
+    payload = {
+        "env": {
+            "ENVIRONMENT": "production",
+            "JNTUH_ELIGIBLE_THRESHOLD": "75.0",
+            "JNTUH_CONDONABLE_THRESHOLD": "65.0",
+            "JNTUH_INCLUDE_APPROVED_ABSENCES": "True"
+        }
     }
     try:
         api_request(
             f"/secrets?applicationId={app_id}",
             method="PUT",
             headers=headers,
-            data=json.dumps(secrets).encode("utf-8")
+            data=json.dumps(payload).encode("utf-8")
         )
         print("[Secrets] Configured base application environment secrets.", flush=True)
     except AntideployAPIError as e:
@@ -272,23 +303,28 @@ def configure_secrets(token: str, app_id: str) -> None:
 
 
 def deploy_archive(token: str, app_id: str, archive_path: str) -> str:
-    """Pushes the tar.gz binary package to Antideploy."""
+    """Pushes the tar.gz binary package to Antideploy via multipart/form-data."""
     archive_size_mb = os.path.getsize(archive_path) / (1024 * 1024)
     print(f"[Deploy] Uploading archive ({archive_size_mb:.2f} MB)...", flush=True)
 
     with open(archive_path, "rb") as f:
         archive_data = f.read()
 
+    multipart_body, content_type_header = encode_multipart_formdata(
+        fields={},
+        files={"archive": ("archive.tar.gz", archive_data, "application/gzip")}
+    )
+
     headers = {
         "Authorization": f"Bearer {token}",
-        "Content-Type": "application/gzip"
+        "Content-Type": content_type_header
     }
 
     resp = api_request(
         f"/deploy?applicationId={app_id}",
         method="POST",
         headers=headers,
-        data=archive_data
+        data=multipart_body
     )
     task_id = resp.get("taskId")
     if not task_id:
@@ -364,7 +400,7 @@ def main():
 
     # Step 3: Get or create application
     app = get_or_create_application(token, APP_NAME)
-    app_id = app.get("id")
+    app_id = app.get("applicationId") or app.get("id")
 
     # Step 4: Configure environment secrets
     configure_secrets(token, app_id)
