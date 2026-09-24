@@ -48,7 +48,7 @@ const RoleBasedRedirect: React.FC = () => {
       : '';
     return <Navigate to={`/login${nextQuery}`} replace />;
   }
-  const safeNext = getSafeNextDestination(typeof window !== 'undefined' ? window.location.search : '');
+  const safeNext = getSafeNextDestination(typeof window !== 'undefined' ? window.location.search : '', user.role);
   if (safeNext) return <Navigate to={safeNext} replace />;
   if (user.role === 'SUPER_ADMIN') return <Navigate to="/admin" replace />;
   if (user.role === 'TEACHER') return <Navigate to="/teacher" replace />;
@@ -95,7 +95,7 @@ export const App: React.FC = () => {
                 <Route
                   path="/teacher"
                   element={
-                    <ProtectedRoute allowedRoles={['TEACHER', 'SUPER_ADMIN']}>
+                    <ProtectedRoute allowedRoles={['TEACHER']}>
                       <TeacherDashboard />
                     </ProtectedRoute>
                   }
@@ -104,7 +104,7 @@ export const App: React.FC = () => {
                 <Route
                   path="/student"
                   element={
-                    <ProtectedRoute allowedRoles={['STUDENT', 'SUPER_ADMIN']}>
+                    <ProtectedRoute allowedRoles={['STUDENT']}>
                       <StudentPortal />
                     </ProtectedRoute>
                   }

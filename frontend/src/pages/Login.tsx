@@ -10,13 +10,31 @@ import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/devi
 import { performAuthRedirect } from '../services/api';
 import { isLoopBreakerTripped, resetLoopBreaker, emergencyWipeAuthState } from '../services/loopBreaker';
 
-export function getSafeNextDestination(search: string): string | null {
+export function isRouteAllowedForRole(path: string, role?: string): boolean {
+  if (!role) return true;
+  const cleanPath = path.split('?')[0].split('#')[0];
+  if (role === 'SUPER_ADMIN') {
+    return cleanPath.startsWith('/admin') || cleanPath.startsWith('/reports');
+  }
+  if (role === 'TEACHER') {
+    return cleanPath.startsWith('/teacher') || cleanPath.startsWith('/reports') || cleanPath.startsWith('/qr-size-test');
+  }
+  if (role === 'STUDENT') {
+    return cleanPath.startsWith('/student') || cleanPath.startsWith('/a/');
+  }
+  return true;
+}
+
+export function getSafeNextDestination(search: string, role?: string): string | null {
   try {
     const params = new URLSearchParams(search);
     const next = params.get('next');
     if (!next) return null;
     // Must start with '/' and not '//' or '/\' to prevent open redirects, and no protocol
     if (next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\') && !next.includes('://')) {
+      if (role && !isRouteAllowedForRole(next, role)) {
+        return null;
+      }
       return next;
     }
     return null;
@@ -96,7 +114,7 @@ export const Login: React.FC = () => {
         .then(async (res) => {
           if (res.ok) {
             const userData = await res.json();
-            const safeNext = getSafeNextDestination(window.location.search);
+            const safeNext = getSafeNextDestination(window.location.search, userData.role);
             resetLoopBreaker();
             if (safeNext) {
               performAuthRedirect(safeNext);
@@ -210,7 +228,7 @@ export const Login: React.FC = () => {
       }
 
       resetLoopBreaker();
-      const safeNext = getSafeNextDestination(window.location.search);
+      const safeNext = getSafeNextDestination(window.location.search, data.role);
       setTimeout(() => {
         if (safeNext) {
           performAuthRedirect(safeNext);
@@ -332,7 +350,7 @@ export const Login: React.FC = () => {
       }, response.refresh_token);
 
       resetLoopBreaker();
-      const safeNext = getSafeNextDestination(window.location.search);
+      const safeNext = getSafeNextDestination(window.location.search, response.role);
       if (safeNext) {
         performAuthRedirect(safeNext);
       } else if (response.role === 'SUPER_ADMIN') {

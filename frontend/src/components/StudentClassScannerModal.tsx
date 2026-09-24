@@ -228,6 +228,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       setSuccessResult(res);
       if (res.attendance_id) {
         setSelfieAttendanceId(res.attendance_id);
+        setShowSelfieModal(true);
       }
       setShowFallbackInput(false);
       setShowHelpSheet(false);
@@ -872,7 +873,10 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
       triggerFeedback(true);
       setSuccessResult(res);
-      if (res.attendance_id) setSelfieAttendanceId(res.attendance_id);
+      if (res.attendance_id) {
+        setSelfieAttendanceId(res.attendance_id);
+        setShowSelfieModal(true);
+      }
       stopCamera();
 
     } catch (err: any) {

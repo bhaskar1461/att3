@@ -58,12 +58,14 @@ def store_attendance_selfie(
     attendance_id: int,
     student_id: int,
     image_bytes: bytes,
+    frame_index: int = 1,
+    total_frames: int = 1,
     ip_address: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Validates, saves to private storage, and links selfie to attendance record.
-    Server-generated storage path:
-        data/selfies/YYYY/MM/<session_id>/<student_id>/<uuid>.jpg
+    Organized by Roll Number and Student Name for AI model training:
+        data/selfies/<ROLL>_<NAME>/<ROLL>_<NAME>_s<session_id>_<timestamp>_f<frame>_<uuid>.jpg
     """
     if not image_bytes or len(image_bytes) == 0:
         raise ValueError("Selfie image payload cannot be empty.")
@@ -75,7 +77,7 @@ def store_attendance_selfie(
     if mime_type not in ALLOWED_MIME_TYPES:
         raise ValueError(f"Unsupported image type '{mime_type}'. Supported: JPEG, PNG, WebP.")
 
-    # 1. Fetch attendance record
+    # 1. Fetch attendance record & student details
     record = db.query(AttendanceRecord).filter(
         AttendanceRecord.id == attendance_id,
         AttendanceRecord.student_id == student_id
@@ -84,14 +86,21 @@ def store_attendance_selfie(
     if not record:
         raise ValueError(f"Attendance record {attendance_id} for student {student_id} not found.")
 
-    now = datetime.utcnow()
-    year_str = now.strftime("%Y")
-    month_str = now.strftime("%m")
-    session_id = record.session_id or 0
-    unique_name = f"{uuid.uuid4().hex}.jpg"
+    from app.models.models import Student
+    student = db.query(Student).filter(Student.id == student_id).first()
+    roll_number = (student.roll_number if student else record.roll_number or "UNKNOWN").upper().strip()
+    raw_name = (student.name if student else "").strip() or "Student"
+    clean_name = "".join(c for c in raw_name.replace(" ", "_") if c.isalnum() or c == "_")
 
-    # Construct server-authoritative private storage key
-    rel_key = os.path.join(year_str, month_str, str(session_id), str(student_id), unique_name)
+    now = datetime.utcnow()
+    session_id = record.session_id or 0
+    unique_suffix = uuid.uuid4().hex[:6]
+    timestamp_str = now.strftime("%Y%m%d_%H%M%S")
+    file_name = f"{roll_number}_{clean_name}_s{session_id}_{timestamp_str}_f{frame_index}_{unique_suffix}.jpg"
+
+    # Construct dataset storage key labeled by student identity for facial recognition model training
+    folder_name = f"{roll_number}_{clean_name}"
+    rel_key = os.path.join(folder_name, file_name)
     storage_base = getattr(settings, "SELFIE_STORAGE_DIR", os.path.join(settings.DATA_DIR, "selfies"))
     full_path = os.path.join(storage_base, rel_key)
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -128,7 +137,7 @@ def store_attendance_selfie(
             db=db,
             event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
             action="SELFIE_SUBMITTED",
-            details=f"Selfie uploaded for attendance #{attendance_id} (Student #{student_id}, Session #{session_id})",
+            details=f"Selfie frame {frame_index}/{total_frames} uploaded for attendance #{attendance_id} (Student {roll_number} {clean_name}, Session #{session_id})",
             roll_number=record.roll_number,
             ip_address=ip_address
         )
@@ -139,7 +148,10 @@ def store_attendance_selfie(
         "status": "ACCEPTED",
         "selfie_id": selfie.id,
         "object_storage_key": selfie.object_storage_key,
-        "file_size": len(image_bytes)
+        "file_size": len(image_bytes),
+        "frame_index": frame_index,
+        "roll_number": roll_number,
+        "student_name": clean_name
     }
 
 

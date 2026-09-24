@@ -640,6 +640,24 @@ def _auto_seed_initial_users():
                     s_b.section_id = sec_b.id
                 logger.info(f"Auto-seeded CSE-B Student: '{roll_b}' ({s_b.name or name_b}) / 'demostudent@2026'")
 
+            # Ensure all students in CSE-B have active user accounts with demostudent@2026
+            for s in db.query(Student).filter(Student.section_id == sec_b.id).all():
+                if not s.user:
+                    u = db.query(User).filter(User.username == s.roll_number).first()
+                    if not u:
+                        u = User(
+                            username=s.roll_number,
+                            email=s.email or f"{s.roll_number.lower()}@sreenidhi.edu.in",
+                            password_hash=get_password_hash("demostudent@2026"),
+                            role=UserRole.STUDENT,
+                            is_active=True
+                        )
+                        db.add(u)
+                        db.flush()
+                    s.user_id = u.id
+                else:
+                    s.user.is_active = True
+
             subj_cet = db.query(Subject).filter(Subject.code == "CS301").first()
             if not subj_cet:
                 subj_cet = Subject(code="CS301", name="Career Enhancement Training (CET)", department_id=dept.id, academic_year_id=ay.id)

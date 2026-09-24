@@ -61,13 +61,31 @@ let fetchCalls: { url: string; options?: any }[] = [];
   };
 };
 
+function isRouteAllowedForRole(path: string, role?: string): boolean {
+  if (!role) return true;
+  const cleanPath = path.split('?')[0].split('#')[0];
+  if (role === 'SUPER_ADMIN') {
+    return cleanPath.startsWith('/admin') || cleanPath.startsWith('/reports');
+  }
+  if (role === 'TEACHER') {
+    return cleanPath.startsWith('/teacher') || cleanPath.startsWith('/reports') || cleanPath.startsWith('/qr-size-test');
+  }
+  if (role === 'STUDENT') {
+    return cleanPath.startsWith('/student') || cleanPath.startsWith('/a/');
+  }
+  return true;
+}
+
 // Pure implementation of getSafeNextDestination for standalone execution
-function getSafeNextDestination(search: string): string | null {
+function getSafeNextDestination(search: string, role?: string): string | null {
   try {
     const params = new URLSearchParams(search);
     const next = params.get('next');
     if (!next) return null;
     if (next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\') && !next.includes('://')) {
+      if (role && !isRouteAllowedForRole(next, role)) {
+        return null;
+      }
       return next;
     }
     return null;
@@ -97,6 +115,21 @@ async function runTests() {
   assert(getSafeNextDestination('?next=/a/launch_token_123') === '/a/launch_token_123', 'Allows /a/launch_token');
   assert(getSafeNextDestination('?next=/teacher?tab=sessions') === '/teacher?tab=sessions', 'Allows /teacher with query');
   assert(getSafeNextDestination('?next=/student?scan=true') === '/student?scan=true', 'Allows /student?scan=true');
+
+  // Role-based destination enforcement
+  assert(getSafeNextDestination('?next=/teacher', 'SUPER_ADMIN') === null, 'SUPER_ADMIN cannot be redirected to /teacher');
+  assert(getSafeNextDestination('?next=/student', 'SUPER_ADMIN') === null, 'SUPER_ADMIN cannot be redirected to /student');
+  assert(getSafeNextDestination('?next=/admin', 'SUPER_ADMIN') === '/admin', 'SUPER_ADMIN can be redirected to /admin');
+  assert(getSafeNextDestination('?next=/reports', 'SUPER_ADMIN') === '/reports', 'SUPER_ADMIN can be redirected to /reports');
+
+  assert(getSafeNextDestination('?next=/admin', 'TEACHER') === null, 'TEACHER cannot be redirected to /admin');
+  assert(getSafeNextDestination('?next=/teacher', 'TEACHER') === '/teacher', 'TEACHER can be redirected to /teacher');
+  assert(getSafeNextDestination('?next=/reports', 'TEACHER') === '/reports', 'TEACHER can be redirected to /reports');
+
+  assert(getSafeNextDestination('?next=/admin', 'STUDENT') === null, 'STUDENT cannot be redirected to /admin');
+  assert(getSafeNextDestination('?next=/teacher', 'STUDENT') === null, 'STUDENT cannot be redirected to /teacher');
+  assert(getSafeNextDestination('?next=/student', 'STUDENT') === '/student', 'STUDENT can be redirected to /student');
+  assert(getSafeNextDestination('?next=/a/launch123', 'STUDENT') === '/a/launch123', 'STUDENT can be redirected to /a/launch123');
   
   // Test 2: getSafeNextDestination - Rejects open redirects & malicious URLs
   assert(getSafeNextDestination('?next=https://attacker.com') === null, 'Rejects absolute https URL');

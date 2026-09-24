@@ -1554,28 +1554,62 @@ def _require_student(current_user: User = Depends(get_current_user)) -> Student:
 @router.post("/records/{attendance_id}/selfie")
 async def upload_attendance_selfie(
     attendance_id: int,
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
+    files: Optional[List[UploadFile]] = File(None),
     request: Request = None,
     db: Session = Depends(get_db),
     current_student: Student = Depends(_require_student)
 ):
     """
     Post-attendance selfie upload endpoint.
-    Saves image into private object storage and persists metadata in selfie_records.
+    Supports single photo and multi-frame burst uploads for training datasets.
+    Saves images into private object storage and persists metadata in selfie_records.
     Decoupled from core attendance validity: selfie status never reverts AttendanceStatus.PRESENT.
     """
     from app.services.selfie_service import store_attendance_selfie
-    contents = await file.read()
     ip_addr = request.client.host if request and request.client else None
+
+    upload_list: List[UploadFile] = []
+    if files:
+        upload_list.extend(files)
+    if file:
+        upload_list.append(file)
+
+    if not upload_list:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No selfie image file provided.")
+
     try:
-        res = store_attendance_selfie(
-            db=db,
-            attendance_id=attendance_id,
-            student_id=current_student.id,
-            image_bytes=contents,
-            ip_address=ip_addr
-        )
-        return res
+        stored_results = []
+        total = len(upload_list)
+        for idx, f in enumerate(upload_list):
+            contents = await f.read()
+            if not contents:
+                continue
+            res = store_attendance_selfie(
+                db=db,
+                attendance_id=attendance_id,
+                student_id=current_student.id,
+                image_bytes=contents,
+                frame_index=idx + 1,
+                total_frames=total,
+                ip_address=ip_addr
+            )
+            stored_results.append(res)
+
+        if not stored_results:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="All uploaded selfie files were empty.")
+
+        last_res = stored_results[-1]
+        return {
+            "status": "ACCEPTED",
+            "selfie_id": last_res["selfie_id"],
+            "object_storage_key": last_res["object_storage_key"],
+            "file_size": last_res["file_size"],
+            "frames_stored": len(stored_results),
+            "all_storage_keys": [r["object_storage_key"] for r in stored_results],
+            "roll_number": last_res.get("roll_number"),
+            "student_name": last_res.get("student_name")
+        }
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as ex:

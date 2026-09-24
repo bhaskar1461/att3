@@ -504,6 +504,57 @@ class TestAttendanceMVPFull(unittest.TestCase):
         self.assertEqual(att_rec2.status, AttendanceStatus.PRESENT)
         self.assertEqual(att_rec2.selfie_status, "FAILED")
 
+    def test_post_attendance_multi_frame_burst_selfie_upload(self):
+        """
+        Verify multi-frame burst upload:
+        1. Client uploads 3 burst frames for model training dataset.
+        2. Endpoint stores all 3 frames labeled with student Roll & Name.
+        3. Returns status ACCEPTED with all storage keys.
+        """
+        sess = AttendanceSession(
+            subject_id=self.sub.id,
+            section_id=self.sec.id,
+            teacher_id=self.teacher.id,
+            session_date=get_server_ist_date(),
+            period="Period 2",
+            status=SessionStatus.OPEN
+        )
+        self.db.add(sess)
+        self.db.commit()
+
+        att_rec = AttendanceRecord(
+            session_id=sess.id,
+            student_id=self.student.id,
+            roll_number=self.student.roll_number,
+            session_date=sess.session_date,
+            period_count=1,
+            status=AttendanceStatus.PRESENT,
+            scan_mode="QR_CAMERA"
+        )
+        self.db.add(att_rec)
+        self.db.commit()
+
+        dummy_jpeg = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00" + (b"\x00" * 200) + b"\xff\xd9"
+        files = [
+            ("files", ("frame1.jpg", dummy_jpeg, "image/jpeg")),
+            ("files", ("frame2.jpg", dummy_jpeg, "image/jpeg")),
+            ("files", ("frame3.jpg", dummy_jpeg, "image/jpeg")),
+        ]
+        res = self.client.post(
+            f"/api/v1/attendance/records/{att_rec.id}/selfie",
+            files=files,
+            headers={"Authorization": f"Bearer {self.student_token}"}
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        data = res.json()
+        self.assertEqual(data["status"], "ACCEPTED")
+        self.assertEqual(data["frames_stored"], 3)
+        self.assertEqual(len(data["all_storage_keys"]), 3)
+        self.assertIn(self.student.roll_number, data["all_storage_keys"][0])
+        self.assertIn("_f1_", data["all_storage_keys"][0])
+        self.assertIn("_f2_", data["all_storage_keys"][1])
+        self.assertIn("_f3_", data["all_storage_keys"][2])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { getBindingState, signChallenge, generateKeyPair, commitBindingRecord } from '../services/binding';
 import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/deviceCredential';
+import { PostAttendanceSelfieModal } from '../components/PostAttendanceSelfieModal';
 
 interface SessionMetadata {
   valid: boolean;
@@ -60,6 +61,8 @@ export const AttendanceLanding: React.FC = () => {
   const [submitErrorCode, setSubmitErrorCode] = useState<string | null>(null);
   const [isEnrollingDevice, setIsEnrollingDevice] = useState(false);
   const [, setGeoStatus] = useState<'idle' | 'acquiring' | 'ready' | 'denied'>('idle');
+  const [showSelfieModal, setShowSelfieModal] = useState(false);
+  const [selfieAttendanceId, setSelfieAttendanceId] = useState<number | null>(null);
 
   // Validate and exchange the launch token for a 3-minute claim ticket on mount
   useEffect(() => {
@@ -329,6 +332,10 @@ export const AttendanceLanding: React.FC = () => {
         sessionStorage.removeItem('snist_launch_claim');
       } catch {}
       setSubmissionSuccess(res);
+      if (res?.attendance_id) {
+        setSelfieAttendanceId(res.attendance_id);
+        setShowSelfieModal(true);
+      }
     } catch (err: any) {
       const rawMsg = err?.message || err?.detail || '';
       const lowerMsg = rawMsg.toLowerCase();
@@ -645,7 +652,7 @@ export const AttendanceLanding: React.FC = () => {
                   Signed in as <strong>{user.role}</strong> ({user.full_name || user.username}). Attendance marking is only permitted for enrolled students.
                 </div>
                 <button
-                  onClick={() => navigate('/teacher')}
+                  onClick={() => navigate(user?.role === 'SUPER_ADMIN' ? '/admin' : '/teacher')}
                   className="w-full py-2.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-white text-sm font-medium transition"
                 >
                   Return to Dashboard
@@ -732,6 +739,22 @@ export const AttendanceLanding: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Post-Attendance Selfie Collection Modal */}
+      {showSelfieModal && selfieAttendanceId && (
+        <PostAttendanceSelfieModal
+          attendanceId={selfieAttendanceId}
+          rollNumber={user?.username || loginRoll.trim().toUpperCase()}
+          studentName={user?.full_name}
+          subjectName={sessionData?.subject_name}
+          onComplete={() => {
+            setShowSelfieModal(false);
+          }}
+          onSkip={() => {
+            setShowSelfieModal(false);
+          }}
+        />
+      )}
     </div>
   );
 };
