@@ -454,6 +454,120 @@ def _run_defensive_schema_migrations():
 
 _run_defensive_schema_migrations()
 
+def _auto_seed_initial_users():
+    """
+    Defensively ensures standard admin, faculty, and student accounts exist.
+    Essential for newly provisioned databases (e.g. Antideploy Postgres, local dev).
+    """
+    try:
+        from app.core.database import SessionLocal
+        from app.models.models import User, UserRole, Student, Teacher, Department, AcademicYear, Section
+        from app.core.security import get_password_hash
+
+        with SessionLocal() as db:
+            # 1. Ensure Super Admin
+            admin_user = db.query(User).filter(User.username == "admin").first()
+            if not admin_user:
+                admin_user = User(
+                    username="admin",
+                    email="admin@sreenidhi.edu.in",
+                    password_hash=get_password_hash("admin123"),
+                    role=UserRole.SUPER_ADMIN,
+                    is_active=True
+                )
+                db.add(admin_user)
+                logger.info("Auto-seeded Super Admin account: 'admin' / 'admin123'")
+
+            # 2. Ensure base academic structure if missing
+            dept = db.query(Department).filter(Department.code == "CSE").first()
+            if not dept:
+                dept = Department(code="CSE", name="Computer Science & Engineering")
+                db.add(dept)
+                db.flush()
+
+            ay = db.query(AcademicYear).filter(AcademicYear.name == "3rd Year").first()
+            if not ay:
+                ay = AcademicYear(name="3rd Year")
+                db.add(ay)
+                db.flush()
+
+            sec = db.query(Section).filter(Section.name == "CSE-A").first()
+            if not sec:
+                sec = Section(name="CSE-A", department_id=dept.id, academic_year_id=ay.id)
+                db.add(sec)
+                db.flush()
+
+            # 3. Ensure Demo Faculty
+            teacher_user = db.query(User).filter(User.username == "demoteacher").first()
+            if not teacher_user:
+                teacher_user = User(
+                    username="demoteacher",
+                    email="demoteacher@sreenidhi.edu.in",
+                    password_hash=get_password_hash("demoteacher@2026"),
+                    role=UserRole.TEACHER,
+                    is_active=True
+                )
+                db.add(teacher_user)
+                db.flush()
+                t_prof = Teacher(user_id=teacher_user.id, name="Mrs. N. Sowjanya", department_id=dept.id, email=teacher_user.email)
+                db.add(t_prof)
+                logger.info("Auto-seeded Faculty account: 'demoteacher' / 'demoteacher@2026'")
+
+            # 4. Ensure Demo Student 23311A0504 (Vikram)
+            v_user = db.query(User).filter(User.username == "23311A0504").first()
+            if not v_user:
+                v_user = User(
+                    username="23311A0504",
+                    email="vikram@sreenidhi.edu.in",
+                    password_hash=get_password_hash("demostudent@2026"),
+                    role=UserRole.STUDENT,
+                    is_active=True
+                )
+                db.add(v_user)
+                db.flush()
+                s_prof = Student(
+                    user_id=v_user.id,
+                    roll_number="23311A0504",
+                    name="Vikram Reddy",
+                    department_id=dept.id,
+                    academic_year_id=ay.id,
+                    section_id=sec.id,
+                    agency="Regular"
+                )
+                db.add(s_prof)
+                logger.info("Auto-seeded Student account: '23311A0504' / 'demostudent@2026'")
+
+            # 5. Ensure Demo Student demostudent
+            ds_user = db.query(User).filter(User.username == "demostudent").first()
+            if not ds_user:
+                ds_user = User(
+                    username="demostudent",
+                    email="demostudent@sreenidhi.edu.in",
+                    password_hash=get_password_hash("demostudent@2026"),
+                    role=UserRole.STUDENT,
+                    is_active=True
+                )
+                db.add(ds_user)
+                db.flush()
+                ds_prof = Student(
+                    user_id=ds_user.id,
+                    roll_number="DEMOSTUDENT",
+                    name="Demo Student",
+                    department_id=dept.id,
+                    academic_year_id=ay.id,
+                    section_id=sec.id,
+                    agency="Regular"
+                )
+                db.add(ds_prof)
+                logger.info("Auto-seeded Student account: 'demostudent' / 'demostudent@2026'")
+
+            db.commit()
+    except Exception as e:
+        logger.warning(f"Initial user provisioning warning (non-fatal): {e}")
+
+_auto_seed_initial_users()
+
+
 import os
 import asyncio
 from contextlib import asynccontextmanager
