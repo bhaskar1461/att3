@@ -164,6 +164,18 @@ export const TeacherDashboard: React.FC = () => {
     init();
   }, []);
 
+  // Synchronize selectedAssignment with activeSession so switcher dropdown always reflects active class
+  useEffect(() => {
+    if (activeSession && assignments.length > 0) {
+      const match = assignments.find(
+        a => a.subject_id === activeSession.subject_id && a.section_id === activeSession.section_id
+      );
+      if (match && (!selectedAssignment || selectedAssignment.assignment_id !== match.assignment_id)) {
+        setSelectedAssignment(match);
+      }
+    }
+  }, [activeSession?.subject_id, activeSession?.section_id, assignments]);
+
   // Phase 5: Period transitions, background sync & tab visibility synchronization
   useEffect(() => {
     // 1. Period transition detector: Every 60 seconds check server-authoritative current period
@@ -370,6 +382,92 @@ export const TeacherDashboard: React.FC = () => {
       });
     } catch (err: any) {
       setToast({ message: getInstitutionalErrorMessage(err, 'Failed to start session'), type: 'error' });
+    } finally {
+      setIsStartingSession(false);
+    }
+  };
+
+  const handleSwitchAssignedClass = async (targetAsgn: TeacherAssignment) => {
+    if (!targetAsgn) return;
+    setSelectedAssignment(targetAsgn);
+
+    // If active session is already for this exact subject & section, no reload needed
+    if (
+      activeSession &&
+      activeSession.subject_id === targetAsgn.subject_id &&
+      activeSession.section_id === targetAsgn.section_id
+    ) {
+      return;
+    }
+
+    setIsStartingSession(true);
+    setIsProjectorOpen(false);
+    setIsManualOpen(false);
+    setRosterSearch('');
+    setRosterFilter('ALL');
+
+    try {
+      // 1. Look for an existing session in allHistoricalSessions for this class today
+      const todayDate = todayStr;
+      const todayClassSessions = allHistoricalSessions.filter(
+        s => s.subject_id === targetAsgn.subject_id &&
+             s.section_id === targetAsgn.section_id &&
+             s.session_date === todayDate
+      );
+
+      let sessionToLoad = todayClassSessions.find(s => s.status === 'OPEN') || todayClassSessions[0];
+
+      // Fallback: any open session for this class regardless of date
+      if (!sessionToLoad) {
+        sessionToLoad = allHistoricalSessions.find(
+          s => s.subject_id === targetAsgn.subject_id &&
+               s.section_id === targetAsgn.section_id &&
+               s.status === 'OPEN'
+        );
+      }
+
+      let targetSessionId = sessionToLoad?.session_id;
+
+      // 2. If no existing session found for today, automatically start / resume via backend
+      if (!targetSessionId) {
+        const geo = await getFacultyGeolocation();
+        const periodStr = formatPeriodsString(selectedPeriods);
+        const periodCount = selectedPeriods.length;
+
+        const response: any = await apiRequest('/teacher/sessions/start', {
+          method: 'POST',
+          body: JSON.stringify({
+            subject_id: targetAsgn.subject_id,
+            section_id: targetAsgn.section_id,
+            period: periodStr,
+            period_count: periodCount,
+            date: todayDate,
+            display_type: displayType,
+            latitude: geo.latitude,
+            longitude: geo.longitude,
+            accuracy_m: geo.accuracy_m,
+            geofence_radius_m: 100.0
+          })
+        });
+        targetSessionId = response.session_id;
+      }
+
+      // 3. Eagerly load full session details & roster
+      if (targetSessionId) {
+        await fetchSessionDetails(targetSessionId);
+        await fetchHistoricalSessions();
+        await fetchCurrentClass();
+        setToast({
+          message: `Switched to ${targetAsgn.subject_name} (${targetAsgn.section_name})`,
+          type: 'success'
+        });
+      }
+    } catch (err: any) {
+      console.error('Failed to switch class session:', err);
+      setToast({
+        message: getInstitutionalErrorMessage(err, 'Failed to switch class session'),
+        type: 'error'
+      });
     } finally {
       setIsStartingSession(false);
     }
@@ -1193,11 +1291,15 @@ export const TeacherDashboard: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <select
                       value={selectedAssignment?.assignment_id || ''}
-                      onChange={(e) => {
-                        const found = assignments.find(a => a.assignment_id === Number(e.target.value));
-                        if (found) setSelectedAssignment(found);
+                      onChange={async (e) => {
+                        const targetId = Number(e.target.value);
+                        const found = assignments.find(a => a.assignment_id === targetId);
+                        if (found) {
+                          await handleSwitchAssignedClass(found);
+                        }
                       }}
-                      className="bg-white/10 border border-white/20 rounded-xl px-3 py-1.5 text-xs font-bold text-white focus:outline-none"
+                      disabled={isStartingSession}
+                      className="bg-white/10 border border-white/20 rounded-xl px-3 py-1.5 text-xs font-bold text-white focus:outline-none cursor-pointer disabled:opacity-50"
                     >
                       {assignments.map(a => (
                         <option key={a.assignment_id} value={a.assignment_id} className="text-slate-900">
@@ -1206,11 +1308,22 @@ export const TeacherDashboard: React.FC = () => {
                       ))}
                     </select>
                     <button
-                      onClick={() => handleStartSession(todayStr)}
+                      onClick={() => {
+                        if (selectedAssignment) {
+                          handleSwitchAssignedClass(selectedAssignment);
+                        }
+                      }}
                       disabled={isStartingSession}
-                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-xs transition"
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-xs transition disabled:opacity-50 flex items-center gap-1.5"
                     >
-                      Start
+                      {isStartingSession ? (
+                        <>
+                          <RefreshCw className="w-3 h-3 animate-spin" />
+                          <span>Switching...</span>
+                        </>
+                      ) : (
+                        <span>Switch</span>
+                      )}
                     </button>
                   </div>
                 </div>
