@@ -545,3 +545,55 @@ def reset_student_device_enrollment(
         "previous_device": old_device_pub_id,
         "message": f"Device binding cleared for {clean_roll}. Student will auto-enroll on next login."
     }
+
+
+def clear_security_lockouts(
+    roll_number: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    clear_all: bool = False
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Admin Operations helper: flushes in-memory security cooldowns WITHOUT a server restart.
+
+    Clears:
+      - failed_login_limiter  (300s IP block / 900s per-roll block)     — app.api.auth
+      - student_scan_limiter  (per-roll scan attempts window)           — app.api.student
+      - failed_token_tracker  (invalid QR token 60s memory cooldowns)   — app.api.student
+
+    Returns (cleared_roll, cleared_ip) — "ALL" markers when clear_all=True.
+    """
+    from app.api.auth import failed_login_limiter
+    from app.api.student import student_scan_limiter, failed_token_tracker
+
+    clean_roll = (roll_number or "").strip().upper() or None
+    clean_ip = (ip_address or "").strip() or None
+
+    if clear_all:
+        with failed_login_limiter._lock:
+            failed_login_limiter._failures.clear()
+            failed_login_limiter._roll_failures.clear()
+        with student_scan_limiter._lock:
+            student_scan_limiter._attempts.clear()
+        with failed_token_tracker._lock:
+            failed_token_tracker._failures.clear()
+            failed_token_tracker._cooldowns.clear()
+        logger.info("All login/scan/token rate limiters flushed by admin operation.")
+        return ("ALL", "ALL")
+
+    if clean_roll:
+        # Roll-scoped login cooldown + scan window + any token-tracker buckets containing the roll
+        failed_login_limiter.record_success(None, clean_roll)
+        student_scan_limiter.reset_limit(clean_roll)
+        with failed_token_tracker._lock:
+            keys = list(failed_token_tracker._failures.keys()) + list(failed_token_tracker._cooldowns.keys())
+            for k in keys:
+                if clean_roll in str(k).upper():
+                    failed_token_tracker._failures.pop(k, None)
+                    failed_token_tracker._cooldowns.pop(k, None)
+        logger.info(f"Login/scan cooldowns cleared for roll {clean_roll} by admin operation.")
+
+    if clean_ip:
+        failed_login_limiter.record_success(clean_ip, None)
+        logger.info(f"IP login cooldown cleared for {clean_ip} by admin operation.")
+
+    return (clean_roll, clean_ip)

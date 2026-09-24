@@ -739,7 +739,7 @@ class StudentScanRateLimiter:
             self._attempts.pop(clean_roll, None)
 
 
-student_scan_limiter = StudentScanRateLimiter(max_attempts=15, window_seconds=60)
+student_scan_limiter = StudentScanRateLimiter(max_attempts=6, window_seconds=60)
 
 # Bounded concurrency token limiter: ensures at most 25 database scan workers run concurrently (AM-200)
 _scan_concurrency_tokens = threading.BoundedSemaphore(25)
