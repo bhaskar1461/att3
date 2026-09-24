@@ -1045,3 +1045,605 @@ def send_test_security_alert(
     }
 
 
+# =============================================================================
+# ADMIN OPERATIONS & SYSTEM CONTROL CENTER  (/api/v1/admin/operations)
+# Transforms manual maintenance scripts, recovery routines, cache invalidation,
+# and device binding controls into authenticated one-click admin actions.
+# Every route below is guarded by require_admin (SUPER_ADMIN role only → 403).
+# =============================================================================
+
+operations_router = APIRouter(prefix="/admin/operations", tags=["Admin Operations"])
+
+
+class DeviceResetRequest(BaseModel):
+    roll_number: str
+    reason: str = "admin_reset"
+
+
+class ClearLockoutsRequest(BaseModel):
+    roll_number: Optional[str] = None
+    ip_address: Optional[str] = None
+    clear_all: bool = False
+
+
+class RecalculateCacheRequest(BaseModel):
+    roll_number: Optional[str] = None
+    department_code: Optional[str] = None
+    recalculate_all: bool = False
+
+
+class ReseedDemoRequest(BaseModel):
+    confirm_keyword: str
+
+
+class ToggleBindingV2Request(BaseModel):
+    enabled: bool
+
+
+def _record_operation_audit(
+    db: Session,
+    current_user: User,
+    action: str,
+    details: str,
+    request: Optional["Request"] = None,
+    roll_number: Optional[str] = None,
+):
+    """Automatically log every administrative operation to the AuditLog table."""
+    try:
+        ip_addr = None
+        if request is not None and getattr(request, "client", None) is not None:
+            ip_addr = request.client.host
+        entry = AuditLog(
+            user_id=current_user.id,
+            roll_number=roll_number or current_user.username,
+            event_type="ADMIN_OPERATION",
+            action=action,
+            details=details,
+            ip_address=ip_addr,
+            created_at=datetime.utcnow(),
+        )
+        db.add(entry)
+        db.commit()
+    except Exception as audit_err:
+        logger.warning(f"Failed to record admin operation audit '{action}': {audit_err}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+# -----------------------------------------------------------------------------
+# 1. Reset Student Device Binding
+# -----------------------------------------------------------------------------
+@operations_router.post("/device/reset")
+def ops_reset_device_binding(
+    payload: DeviceResetRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Revokes active cryptographic DeviceBinding (ECDSA P-256 keypair) records for a
+    student, clears legacy registered_device_id, expires in-flight 30-minute
+    DeviceAccountBinding windows, and unbinds the registered device ID so the
+    student can re-enroll a fresh device on their next scan.
+    """
+    from app.core.device_security import reset_student_device_enrollment
+    from app.models.models import DeviceBinding, DeviceAccountBinding, BindingStatus
+
+    clean_roll = (payload.roll_number or "").strip().upper()
+    if not clean_roll:
+        raise HTTPException(status_code=400, detail="roll_number is required.")
+
+    student = db.query(Student).filter(Student.roll_number == clean_roll).first()
+    if not student:
+        raise HTTPException(status_code=404, detail=f"Student with roll number '{clean_roll}' not found.")
+
+    # Snapshot active bindings BEFORE revocation (for response metadata)
+    revoked_key_ids = [
+        b.key_id for b in db.query(DeviceBinding).filter(
+            DeviceBinding.student_id == student.id,
+            DeviceBinding.revoked_at.is_(None),
+        ).all()
+    ]
+
+    # Core reset: revokes DeviceBinding keypairs + clears Student.registered_device_id
+    reset_result = reset_student_device_enrollment(
+        db=db,
+        roll_number=clean_roll,
+        admin_user_id=current_user.id,
+        ip_address=request.client.host if request.client else None,
+    )
+
+    # Also expire any in-flight 30-minute device-account lockout bindings for this roll
+    expired_windows = db.query(DeviceAccountBinding).filter(
+        DeviceAccountBinding.roll_number == clean_roll,
+        DeviceAccountBinding.status == BindingStatus.ACTIVE,
+    ).update({DeviceAccountBinding.status: BindingStatus.REVOKED}, synchronize_session=False)
+    db.commit()
+
+    # Unbind the legacy registered device rows referenced by those keypairs
+    unbound_devices = 0
+    if revoked_key_ids:
+        revoked_rows = db.query(DeviceBinding).filter(DeviceBinding.key_id.in_(revoked_key_ids)).all()
+        client_device_ids = [r.device_id for r in revoked_rows if r.device_id]
+        if client_device_ids:
+            unbound_devices = db.query(DeviceRegistration).filter(
+                DeviceRegistration.device_public_id.in_(client_device_ids),
+                DeviceRegistration.is_active == True,
+            ).update(
+                {DeviceRegistration.is_active: False, DeviceRegistration.updated_at: datetime.utcnow()},
+                synchronize_session=False,
+            )
+            db.commit()
+
+    revoked_at = datetime.utcnow()
+    _record_operation_audit(
+        db, current_user,
+        action="OPS_DEVICE_BINDING_RESET",
+        details=(
+            f"Admin {current_user.username} reset device binding for {clean_roll} "
+            f"(reason={payload.reason}, keypairs_revoked={len(revoked_key_ids)}, "
+            f"lockout_windows_expired={expired_windows}, devices_unbound={unbound_devices})"
+        ),
+        request=request,
+        roll_number=clean_roll,
+    )
+
+    return {
+        "success": True,
+        "message": f"Device binding successfully reset for student {clean_roll}.",
+        "roll_number": clean_roll,
+        "reason": payload.reason,
+        "keypairs_revoked": len(revoked_key_ids),
+        "lockout_windows_expired": expired_windows,
+        "devices_unbound": unbound_devices,
+        "previous_device": reset_result.get("previous_device"),
+        "revoked_at": revoked_at.isoformat(),
+    }
+
+
+# -----------------------------------------------------------------------------
+# 2. Clear Student & IP Rate Limiters / Login Cooldowns
+# -----------------------------------------------------------------------------
+@operations_router.post("/security/clear-lockouts")
+def ops_clear_lockouts(
+    payload: ClearLockoutsRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Flushes failed_login_limiter (300s IP / 900s roll blocks), student_scan_limiter
+    (per-roll scan attempts/min), and failed_token_tracker memory cooldowns —
+    without restarting the server process.
+    """
+    from app.core.device_security import clear_security_lockouts
+
+    clean_roll = (payload.roll_number or "").strip().upper() or None
+    clean_ip = (payload.ip_address or "").strip() or None
+
+    if not clean_roll and not clean_ip and not payload.clear_all:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide roll_number, ip_address, or set clear_all=true.",
+        )
+
+    cleared_roll, cleared_ip = clear_security_lockouts(
+        roll_number=clean_roll,
+        ip_address=clean_ip,
+        clear_all=payload.clear_all,
+    )
+
+    _record_operation_audit(
+        db, current_user,
+        action="OPS_RATE_LIMITERS_CLEARED",
+        details=f"Admin {current_user.username} cleared login/scan rate limiters (roll={cleared_roll or '-'}, ip={cleared_ip or '-'}, clear_all={payload.clear_all})",
+        request=request,
+        roll_number=clean_roll,
+    )
+
+    return {
+        "success": True,
+        "cleared_roll": cleared_roll,
+        "cleared_ip": cleared_ip,
+        "message": "Rate limiters and login cooldowns successfully cleared.",
+    }
+
+
+# -----------------------------------------------------------------------------
+# 3. Recalculate Student Attendance & Invalidate Cache
+# -----------------------------------------------------------------------------
+@operations_router.post("/attendance/recalculate-cache")
+def ops_recalculate_cache(
+    payload: RecalculateCacheRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Invalidates the attendance engine TTL caches (redis/memory) and forces a cold
+    JNTUH R25 threshold recomputation of percentage aggregates for one student,
+    one department, or all students.
+    """
+    import time as _time
+    from app.services.attendance_engine import (
+        invalidate_attendance_cache,
+        AttendanceEngine,
+        _ENGINE_CACHE,
+        _CACHE_LOCK,
+    )
+
+    t0 = _time.perf_counter()
+
+    clean_roll = (payload.roll_number or "").strip().upper() or None
+    dept_code = (payload.department_code or "").strip().upper() or None
+
+    student_q = db.query(Student)
+    if clean_roll:
+        student_q = student_q.filter(Student.roll_number == clean_roll)
+    elif dept_code:
+        dept = db.query(Department).filter(Department.code == dept_code).first()
+        if not dept:
+            raise HTTPException(status_code=404, detail=f"Department '{dept_code}' not found.")
+        student_q = student_q.filter(Student.department_id == dept.id)
+    elif not payload.recalculate_all:
+        raise HTTPException(
+            status_code=400,
+            detail="Provide roll_number, department_code, or set recalculate_all=true.",
+        )
+
+    students = student_q.all()
+    if clean_roll and not students:
+        raise HTTPException(status_code=404, detail=f"Student with roll number '{clean_roll}' not found.")
+
+    recalculated = 0
+    errors = []
+    for s in students:
+        try:
+            # Step 1: purge stale cached aggregates for this student
+            invalidate_attendance_cache(student_id=s.id, roll_number=s.roll_number)
+            # Step 2: force cold recomputation across R25 thresholds (repopulates cache)
+            AttendanceEngine.get_student_full_compliance(db=db, roll_number=s.roll_number, use_cache=True)
+            recalculated += 1
+        except Exception as calc_err:
+            errors.append(f"{s.roll_number}: {calc_err}")
+
+    # Always drop global admin/dept summary caches so dashboards reflect fresh numbers
+    try:
+        with _CACHE_LOCK:
+            for k in [k for k in _ENGINE_CACHE.keys() if "admin_summary" in k or "dept:" in k]:
+                _ENGINE_CACHE.pop(k, None)
+    except Exception:
+        pass
+
+    elapsed_ms = round((_time.perf_counter() - t0) * 1000, 2)
+
+    _record_operation_audit(
+        db, current_user,
+        action="OPS_ATTENDANCE_RECALCULATE",
+        details=f"Admin {current_user.username} invalidated cache & recalculated attendance for {recalculated} student(s) (roll={clean_roll or '-'}, dept={dept_code or '-'}, all={payload.recalculate_all}). {elapsed_ms}ms",
+        request=request,
+        roll_number=clean_roll,
+    )
+
+    return {
+        "success": True,
+        "recalculated_records": recalculated,
+        "elapsed_ms": elapsed_ms,
+        "errors": errors[:10],
+        "message": "Attendance cache invalidated and percentage aggregates updated.",
+    }
+
+
+# -----------------------------------------------------------------------------
+# 4. Flush Async Attendance Writer Queue
+# -----------------------------------------------------------------------------
+@operations_router.post("/attendance/flush-queue")
+def ops_flush_queue(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Inspects the in-memory AsyncAttendanceWriter queue, blocks until all queued
+    pending scan jobs are written to the database (workers resolve duplicate
+    race conditions themselves via IntegrityError handling), and reports status.
+    """
+    import time as _time
+    from app.api.student import async_attendance_writer
+
+    pending_before = async_attendance_writer._queue.qsize()
+
+    flushed = 0
+    wait_errors = []
+    deadline = _time.time() + 15.0
+    while _time.time() < deadline:
+        try:
+            async_attendance_writer._queue.join()  # blocks until all tasks are task_done()
+            break
+        except Exception as join_err:
+            wait_errors.append(str(join_err))
+            break
+
+    pending_after = async_attendance_writer._queue.qsize()
+    flushed = max(0, pending_before - pending_after)
+
+    _record_operation_audit(
+        db, current_user,
+        action="OPS_ASYNC_QUEUE_FLUSH",
+        details=f"Admin {current_user.username} flushed async attendance writer queue: pending_before={pending_before}, flushed={flushed}, remaining={pending_after}",
+        request=request,
+    )
+
+    return {
+        "success": True,
+        "pending_queue_size": pending_before,
+        "flushed_jobs": flushed,
+        "remaining_queue_size": pending_after,
+        "worker_pool_size": async_attendance_writer._num_workers,
+        "wait_errors": wait_errors,
+        "message": "Async attendance queue processed.",
+    }
+
+
+# -----------------------------------------------------------------------------
+# 5. Database Health & Latency Benchmark (GET)
+# -----------------------------------------------------------------------------
+@operations_router.get("/diagnostics/benchmark")
+def ops_diagnostics_benchmark(
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Diagnostic benchmark: read/write latency, connection pool utilization,
+    orphaned device binding integrity counts, and overall HEALTHY/DEGRADED status.
+    """
+    import time as _time
+    from sqlalchemy import text as sql_text
+    from app.core.database import engine
+    from app.models.models import DeviceBinding
+
+    t0 = _time.perf_counter()
+    try:
+        db.execute(sql_text("SELECT 1"))
+        query_latency_ms = round((_time.perf_counter() - t0) * 1000, 3)
+    except Exception as q_err:
+        query_latency_ms = -1.0
+        logger.warning(f"Benchmark read query failed: {q_err}")
+
+    write_latency_ms = -1.0
+    try:
+        tw = _time.perf_counter()
+        probe = AuditLog(
+            user_id=current_user.id,
+            roll_number=current_user.username,
+            event_type="ADMIN_OPERATION",
+            action="OPS_BENCHMARK_WRITE_PROBE",
+            details="Diagnostics benchmark write probe",
+            created_at=datetime.utcnow(),
+        )
+        db.add(probe)
+        db.commit()
+        write_latency_ms = round((_time.perf_counter() - tw) * 1000, 3)
+        # Remove the synthetic probe row to keep audit logs clean
+        db.delete(probe)
+        db.commit()
+    except Exception as w_err:
+        logger.warning(f"Benchmark write probe failed: {w_err}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    total_students = db.query(func.count(Student.id)).scalar() or 0
+    total_attendance_records = db.query(func.count(AttendanceRecord.id)).scalar() or 0
+    active_bindings = db.query(func.count(DeviceBinding.id)).filter(
+        DeviceBinding.revoked_at.is_(None)
+    ).scalar() or 0
+
+    valid_student_ids = [row[0] for row in db.query(Student.id).all()]
+    orphaned_q = db.query(func.count(DeviceBinding.id)).filter(DeviceBinding.revoked_at.is_(None))
+    if valid_student_ids:
+        orphaned_q = orphaned_q.filter(~DeviceBinding.student_id.in_(valid_student_ids))
+    orphaned_bindings = orphaned_q.scalar() or 0
+
+    pool = engine.pool
+    pool_status = {
+        "pool_size": getattr(pool, "capacity", None),
+        "checked_in": pool.checkedin(),
+        "checked_out": pool.checkedout(),
+        "overflow": pool.overflow(),
+    }
+
+    db_type = engine.dialect.name
+    degraded = (
+        query_latency_ms < 0
+        or write_latency_ms < 0
+        or query_latency_ms > 500
+        or orphaned_bindings > 0
+    )
+    status_label = "DEGRADED" if degraded else "HEALTHY"
+
+    _record_operation_audit(
+        db, current_user,
+        action="OPS_DB_BENCHMARK",
+        details=f"Admin {current_user.username} ran DB benchmark: status={status_label}, read={query_latency_ms}ms, write={write_latency_ms}ms, students={total_students}, active_bindings={active_bindings}, orphaned={orphaned_bindings}",
+        request=request,
+    )
+
+    return {
+        "status": status_label,
+        "db_type": db_type,
+        "query_latency_ms": query_latency_ms,
+        "write_latency_ms": write_latency_ms,
+        "connection_pool": pool_status,
+        "total_students": total_students,
+        "active_bindings": active_bindings,
+        "orphaned_bindings": orphaned_bindings,
+        "total_attendance_records": total_attendance_records,
+        "generated_at": datetime.utcnow().isoformat(),
+    }
+
+
+# -----------------------------------------------------------------------------
+# 6. Re-Seed Demo Accounts
+# -----------------------------------------------------------------------------
+RESEED_CONFIRM_KEYWORD = "RESEED_SNIST_CONFIRM"
+
+
+@operations_router.post("/diagnostics/reseed-demo")
+def ops_reseed_demo(
+    payload: ReseedDemoRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Runs seed_dev logic safely in dev/demo mode to ensure test students
+    (e.g., 23311A0504) and demo faculty accounts exist with valid test passwords.
+    Requires the exact confirmation keyword to prevent accidental execution.
+    """
+    if (payload.confirm_keyword or "").strip() != RESEED_CONFIRM_KEYWORD:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Confirmation keyword mismatch. Send confirm_keyword='{RESEED_CONFIRM_KEYWORD}' to proceed.",
+        )
+
+    env_mode = (getattr(settings, "ENVIRONMENT", "") or os.getenv("ENVIRONMENT", "")).lower()
+    if env_mode and env_mode not in ("development", "dev", "demo", "test", "local"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Demo re-seeding is disabled in '{env_mode}' environment. Only allowed in dev/demo/test mode.",
+        )
+
+    # Load seed_dev module defensively (project root may not be on sys.path in server context)
+    seed_module = None
+    try:
+        import importlib.util
+        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        seed_path = os.path.join(root_dir, "seed_dev.py")
+        if os.path.exists(seed_path):
+            spec = importlib.util.spec_from_file_location("seed_dev", seed_path)
+            seed_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(seed_module)
+    except Exception as load_err:
+        logger.error(f"Could not load seed_dev.py for re-seed operation: {load_err}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Seeder module unavailable: {load_err}")
+
+    accounts_touched = 0
+    seed_output = []
+    if seed_module is not None and hasattr(seed_module, "seed_database"):
+        import io, contextlib
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                seed_module.seed_database()
+            seed_output = [ln for ln in buf.getvalue().splitlines() if ln.strip()][:20]
+        except Exception as seed_err:
+            logger.error(f"seed_database() execution failed: {seed_err}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Re-seed execution failed: {seed_err}")
+        accounts_touched = sum(1 for ln in seed_output if "Created" in ln or "created" in ln)
+    else:
+        raise HTTPException(status_code=500, detail="seed_dev.seed_database() entrypoint not found.")
+
+    # Guarantee the canonical demo test accounts exist even if the seeder skipped them
+    demo_roll = "23311A0504"
+    demo_student = db.query(Student).filter(Student.roll_number == demo_roll).first()
+    if not demo_student:
+        cse = db.query(Department).filter(Department.code == "CSE").first()
+        ay = db.query(AcademicYear).filter(AcademicYear.name == "3rd Year").first()
+        sec = db.query(Section).filter(Section.department_id == cse.id).first() if cse else None
+        demo_user = db.query(User).filter(User.username == demo_roll).first()
+        if not demo_user:
+            demo_user = User(
+                username=demo_roll,
+                email=f"{demo_roll.lower()}@cse.sreenidhi.edu.in",
+                password_hash=get_password_hash("student123"),
+                role=UserRole.STUDENT,
+                is_active=True,
+            )
+            db.add(demo_user)
+            db.flush()
+            accounts_touched += 1
+        demo_student = Student(
+            user_id=demo_user.id,
+            roll_number=demo_roll,
+            name="Demo Test Student",
+            department_id=cse.id if cse else None,
+            academic_year_id=ay.id if ay else None,
+            section_id=sec.id if sec else None,
+            agency="Regular",
+        )
+        db.add(demo_student)
+        accounts_touched += 1
+    db.commit()
+
+    _record_operation_audit(
+        db, current_user,
+        action="OPS_RESEED_DEMO_ACCOUNTS",
+        details=f"Admin {current_user.username} executed demo account re-seed. accounts_created_or_updated≈{accounts_touched}. Verified {demo_roll}.",
+        request=request,
+    )
+
+    return {
+        "success": True,
+        "accounts_created_or_updated": accounts_touched,
+        "demo_student_verified": demo_roll,
+        "seeder_log": seed_output,
+        "message": "Demo test accounts verified and refreshed.",
+    }
+
+
+# -----------------------------------------------------------------------------
+# 7. Toggle Binding V2 Cryptographic Enforcement
+# -----------------------------------------------------------------------------
+@operations_router.post("/config/toggle-binding-v2")
+def ops_toggle_binding_v2(
+    payload: ToggleBindingV2Request,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """
+    Dynamically enables/disables settings.BINDING_V2 (live ECDSA P-256 possession
+    proof enforcement) and persists the flag in the SystemSettings DB table.
+    """
+    new_flag = bool(payload.enabled)
+    previous_flag = bool(getattr(settings, "BINDING_V2", False))
+    settings.BINDING_V2 = new_flag
+
+    item = db.query(SystemSettings).filter(SystemSettings.key == "BINDING_V2").first()
+    if item:
+        item.value = "true" if new_flag else "false"
+    else:
+        db.add(SystemSettings(
+            key="BINDING_V2",
+            value="true" if new_flag else "false",
+            description="Cryptographic Device Binding V2 (WebCrypto ECDSA P-256) enforcement flag",
+        ))
+    db.commit()
+
+    _record_operation_audit(
+        db, current_user,
+        action="OPS_TOGGLE_BINDING_V2",
+        details=f"Admin {current_user.username} toggled BINDING_V2: {previous_flag} -> {new_flag}",
+        request=request,
+    )
+
+    return {
+        "success": True,
+        "binding_v2_enabled": new_flag,
+        "previous_state": previous_flag,
+        "message": "Device Binding V2 enforcement updated.",
+    }
+
+
+# Register the operations router on the main admin router (defensive)
+try:
+    router.include_router(operations_router)
+except Exception as ops_err:  # pragma: no cover
+    logger.error(f"Failed to register Admin Operations router: {ops_err}", exc_info=True)
+
+
