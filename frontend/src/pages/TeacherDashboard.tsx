@@ -222,9 +222,13 @@ export const TeacherDashboard: React.FC = () => {
   const fetchAssignedClasses = async () => {
     try {
       const data: any = await apiRequest('/teacher/assigned-classes');
-      setAssignments(data);
-      if (data.length > 0 && !selectedAssignment) {
-        setSelectedAssignment(data[0]);
+      setAssignments(data || []);
+      if (data && data.length > 0) {
+        if (!selectedAssignment || !data.some((a: any) => a.assignment_id === selectedAssignment.assignment_id)) {
+          setSelectedAssignment(data[0]);
+        }
+      } else {
+        setSelectedAssignment(null);
       }
     } catch (err: any) {
       setToast({ message: err.message || 'Failed to load assigned classes', type: 'error' });
@@ -316,9 +320,18 @@ export const TeacherDashboard: React.FC = () => {
   };
 
   const handleStartSession = async (targetDate?: string) => {
-    if (!selectedAssignment) {
-      setToast({ message: 'Please select a class first.', type: 'warning' });
-      return;
+    let currentAsgn = selectedAssignment;
+    if (!currentAsgn) {
+      if (assignments && assignments.length > 0) {
+        currentAsgn = assignments[0];
+        setSelectedAssignment(assignments[0]);
+      } else {
+        setToast({ 
+          message: 'No classes are currently assigned to your faculty profile. Please contact the administrator or assign a class in the Admin Setup Hub.', 
+          type: 'warning' 
+        });
+        return;
+      }
     }
     const sessionDate = targetDate || selectedDate;
     const periodStr = formatPeriodsString(selectedPeriods);
@@ -330,8 +343,8 @@ export const TeacherDashboard: React.FC = () => {
       const response: any = await apiRequest('/teacher/sessions/start', {
         method: 'POST',
         body: JSON.stringify({
-          subject_id: selectedAssignment.subject_id,
-          section_id: selectedAssignment.section_id,
+          subject_id: currentAsgn.subject_id,
+          section_id: currentAsgn.section_id,
           period: periodStr,
           period_count: periodCount,
           date: sessionDate,
@@ -1203,21 +1216,51 @@ export const TeacherDashboard: React.FC = () => {
 
               <div className="space-y-4">
                 <div>
-                  <label className="block text-xs font-bold text-slate-700 mb-1.5">Assigned Class / Subject</label>
-                  <select
-                    value={selectedAssignment?.assignment_id || ''}
-                    onChange={(e) => {
-                      const found = assignments.find(a => a.assignment_id === Number(e.target.value));
-                      if (found) setSelectedAssignment(found);
-                    }}
-                    className="snist-input w-full font-semibold"
-                  >
-                    {assignments.map(a => (
-                      <option key={a.assignment_id} value={a.assignment_id}>
-                        {a.subject_name} ({a.section_name} - {a.department})
-                      </option>
-                    ))}
-                  </select>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-xs font-bold text-slate-700">Assigned Class / Subject</label>
+                    <button
+                      type="button"
+                      onClick={fetchAssignedClasses}
+                      className="text-[11px] text-[#2f53d7] hover:underline font-bold flex items-center gap-1"
+                      title="Reload assigned classes from institutional server"
+                    >
+                      <RefreshCw className="w-3 h-3" /> Refresh Classes
+                    </button>
+                  </div>
+
+                  {assignments.length === 0 ? (
+                    <div className="p-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs space-y-2">
+                      <div className="flex items-center gap-2 font-bold text-amber-800">
+                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                        <span>No classes currently assigned to your faculty profile</span>
+                      </div>
+                      <p className="text-slate-600">
+                        Attendance sessions require at least one assigned class. Ask your Administrator to assign your subject & section in the Admin System Setup Hub, or refresh if an assignment was just created.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={fetchAssignedClasses}
+                        className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold rounded-lg text-xs flex items-center gap-1.5 transition shadow-xs"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" /> Refresh Assigned Classes
+                      </button>
+                    </div>
+                  ) : (
+                    <select
+                      value={selectedAssignment?.assignment_id || ''}
+                      onChange={(e) => {
+                        const found = assignments.find(a => a.assignment_id === Number(e.target.value));
+                        if (found) setSelectedAssignment(found);
+                      }}
+                      className="snist-input w-full font-semibold"
+                    >
+                      {assignments.map(a => (
+                        <option key={a.assignment_id} value={a.assignment_id}>
+                          {a.subject_name} ({a.section_name} - {a.department})
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </div>
 
                 {selectedAssignment && (
