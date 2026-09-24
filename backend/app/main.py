@@ -600,6 +600,46 @@ def _auto_seed_initial_users():
                 db.add(sec_b)
                 db.flush()
 
+            # Ensure Demo Students for CSE-B
+            cseb_students_data = [
+                ("23311A0525", "Aarav Sharma", "aarav.sharma@sreenidhi.edu.in"),
+                ("23311A0526", "Ananya Rao", "ananya.rao@sreenidhi.edu.in"),
+                ("23311A0527", "Rohan Varma", "rohan.varma@sreenidhi.edu.in"),
+                ("23311A0528", "Sneha Patel", "sneha.patel@sreenidhi.edu.in"),
+            ]
+            for roll_b, name_b, email_b in cseb_students_data:
+                u_b = db.query(User).filter(User.username == roll_b).first()
+                if not u_b:
+                    u_b = User(
+                        username=roll_b,
+                        email=email_b,
+                        password_hash=get_password_hash("demostudent@2026"),
+                        role=UserRole.STUDENT,
+                        is_active=True
+                    )
+                    db.add(u_b)
+                    db.flush()
+                else:
+                    u_b.password_hash = get_password_hash("demostudent@2026")
+                    u_b.is_active = True
+                    u_b.role = UserRole.STUDENT
+
+                s_b = db.query(Student).filter(Student.roll_number == roll_b).first()
+                if not s_b:
+                    s_b = Student(
+                        user_id=u_b.id,
+                        roll_number=roll_b,
+                        name=name_b,
+                        department_id=dept.id,
+                        academic_year_id=ay.id,
+                        section_id=sec_b.id,
+                        agency="Regular"
+                    )
+                    db.add(s_b)
+                else:
+                    s_b.section_id = sec_b.id
+                logger.info(f"Auto-seeded CSE-B Student: '{roll_b}' ({s_b.name or name_b}) / 'demostudent@2026'")
+
             subj_cet = db.query(Subject).filter(Subject.code == "CS301").first()
             if not subj_cet:
                 subj_cet = Subject(code="CS301", name="Career Enhancement Training (CET)", department_id=dept.id, academic_year_id=ay.id)

@@ -233,7 +233,13 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       setShowHelpSheet(false);
       stopCamera();
     } catch (err: any) {
-      setFallbackError(err.message || 'Controlled fallback verification failed.');
+      const msg = err.message || '';
+      const lower = msg.toLowerCase();
+      if (lower.includes('not enrolled in this section') || (lower.includes('section') && (lower.includes('enrolled') || lower.includes('belong') || lower.includes('mismatch')))) {
+        setFallbackError('Not enrolled in this section. Please contact faculty incharge.');
+      } else {
+        setFallbackError(err.message || 'Controlled fallback verification failed.');
+      }
     } finally {
       setFallbackSubmitting(false);
     }
@@ -881,7 +887,14 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       const rawMsg = err?.message || err?.detail || '';
       const lowerMsg = rawMsg.toLowerCase();
       const p7Code = err?.phase7_code || err?.error_code || err?.qr_error_code;
-      const code: string = p7Code || err?.code || (
+      const isSectionMismatch = 
+        lowerMsg.includes('section') || 
+        lowerMsg.includes('not enrolled in this section') || 
+        lowerMsg.includes('faculty incharge') ||
+        p7Code === 'section_mismatch' ||
+        err?.code === 'section_mismatch';
+
+      const code: string = isSectionMismatch ? 'section_mismatch' : (p7Code || err?.code || (
         err?.status === 429 || lowerMsg.includes('too many') || lowerMsg.includes('rate_limited') ? 'rate_limited' :
         lowerMsg.includes('qr-session-end') || lowerMsg.includes('session has ended') ? 'QR-SESSION-END' :
         lowerMsg.includes('qr-old') || lowerMsg.includes('outdated') ? 'QR-OLD' :
@@ -890,7 +903,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
         (lowerMsg.includes('no_active_binding') || lowerMsg.includes('binding_required') || lowerMsg.includes('device')) ? 'no_active_binding' :
         (lowerMsg.includes('geofence') || lowerMsg.includes('location') || lowerMsg.includes('gps')) ? 'geofence_failed' :
         'error'
-      );
+      ));
 
       console.warn('[QR] Scan submission error:', rawMsg, 'Code:', code);
       setScanErrorCode(code);
@@ -995,6 +1008,21 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
         setFlowState('ERROR');
         setScanError(rawMsg || 'Location verification failed. Please ensure you are inside the classroom.');
         setGuideText('Location check failed');
+        return;
+      }
+
+      // Section mismatch (student not enrolled in this section)
+      if (
+        code === 'section_mismatch' ||
+        lowerMsg.includes('not enrolled in this section') ||
+        lowerMsg.includes('does not belong to class section') ||
+        lowerMsg.includes('does not belong to this session') ||
+        lowerMsg.includes('faculty incharge') ||
+        (lowerMsg.includes('section') && (lowerMsg.includes('enrolled') || lowerMsg.includes('belong') || lowerMsg.includes('mismatch')))
+      ) {
+        setFlowState('ERROR');
+        setScanError('Not enrolled in this section. Please contact faculty incharge.');
+        setGuideText('Section mismatch — contact faculty');
         return;
       }
 

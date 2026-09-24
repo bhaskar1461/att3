@@ -1135,7 +1135,45 @@ async def student_scan_session(
         # Step 0d: AM3 Valid token exemption: reset any prior failed token count immediately!
         failed_token_tracker.record_success(tracker_key)
 
-        # Step 0e: Device Binding V2 Possession Proof (Feature-Flagged, Phase 4 & Phase 5 Cutover)
+        session_id = token_data["session_id"]
+        period_count = max(1, min(8, int(token_data.get("period_count", 1))))
+
+        # 1. Fetch session using BoundedLRUSessionCache (avoids remote DB round-trip on hits)
+        t_enroll_start = time.perf_counter()
+        session_meta = get_cached_session_meta(db, session_id)
+        if not session_meta:
+            raise HTTPException(status_code=404, detail="Attendance session not found.")
+
+        # Authoritative multi-period inheritance: Never downgrade multi-period sessions to single period
+        sess_period_label = session_meta.get("period", "")
+        if sess_period_label:
+            from app.api.teacher import _extract_period_count
+            sess_p = _extract_period_count(sess_period_label)
+            if sess_p > period_count:
+                period_count = sess_p
+
+        resolved_subject_name = (session_meta.get("subject_name") or "").strip() or "Class Attendance Session"
+        session_meta["subject_name"] = resolved_subject_name
+
+        # Step 0e: Canonical Section Membership Check (Rule 4 & Section Governance)
+        # Fast-fail BEFORE device binding or biometric proof if the student does not belong to this section!
+        if current_student.section_id != session_meta["section_id"]:
+            try:
+                log_security_audit_event(
+                    db=db,
+                    event_type=SecurityEventType.ATTENDANCE_REJECTED,
+                    action="SECTION_MISMATCH_REJECTED",
+                    details=f"Student {current_student.roll_number} section {current_student.section_id} mismatched session section {session_meta['section_id']}",
+                    roll_number=current_student.roll_number
+                )
+            except Exception:
+                pass
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Not enrolled in this section. Please contact faculty incharge."
+            )
+
+        # Step 0f: Device Binding V2 Possession Proof (Feature-Flagged, Phase 4 & Phase 5 Cutover)
         # When BINDING_V2=true, validates ECDSA P-256 challenge-response before allowing attendance.
         # When BINDING_V2=false (legacy test mode), requests sending only legacy device ID receive hard deprecation error.
         # Offline submissions are exempt (cannot fetch challenge while offline).
@@ -1159,26 +1197,6 @@ async def student_scan_session(
                     status_code=status.HTTP_410_GONE,
                     detail="legacy_binding_retired: Legacy soft-binding device ID has been retired. Device binding enrollment is required."
                 )
-
-        session_id = token_data["session_id"]
-        period_count = max(1, min(8, int(token_data.get("period_count", 1))))
-
-        # 1. Fetch session using BoundedLRUSessionCache (avoids remote MySQL round-trip on hits)
-        t_enroll_start = time.perf_counter()
-        session_meta = get_cached_session_meta(db, session_id)
-        if not session_meta:
-            raise HTTPException(status_code=404, detail="Attendance session not found.")
-
-        # Authoritative multi-period inheritance: Never downgrade multi-period sessions to single period
-        sess_period_label = session_meta.get("period", "")
-        if sess_period_label:
-            from app.api.teacher import _extract_period_count
-            sess_p = _extract_period_count(sess_period_label)
-            if sess_p > period_count:
-                period_count = sess_p
-
-        resolved_subject_name = (session_meta.get("subject_name") or "").strip() or "Class Attendance Session"
-        session_meta["subject_name"] = resolved_subject_name
 
         status_str = getattr(session_meta["status"], "value", str(session_meta["status"]))
         if status_str != "OPEN":
@@ -1235,22 +1253,6 @@ async def student_scan_session(
                     }
                 )
 
-        # 2. Check section membership (in-memory)
-        if current_student.section_id != session_meta["section_id"]:
-            try:
-                log_security_audit_event(
-                    db=db,
-                    event_type=SecurityEventType.ATTENDANCE_REJECTED,
-                    action="SECTION_MISMATCH_REJECTED",
-                    details=f"Student {current_student.roll_number} section {current_student.section_id} mismatched session section {session_meta['section_id']}",
-                    roll_number=current_student.roll_number
-                )
-            except Exception:
-                pass
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Student is not enrolled in this section."
-            )
         t_enrollment_ms = (time.perf_counter() - t_enroll_start) * 1000
 
         # 2b. Geofence validation (Rule 5 & MVP GPS geofence)

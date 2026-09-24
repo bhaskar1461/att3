@@ -333,7 +333,15 @@ export const AttendanceLanding: React.FC = () => {
       const rawMsg = err?.message || err?.detail || '';
       const lowerMsg = rawMsg.toLowerCase();
       const p7Code = err?.phase7_code || err?.error_code || err?.qr_error_code;
-      const code = p7Code || err?.code || (
+      const isSectionMismatch = 
+        lowerMsg.includes('section') || 
+        lowerMsg.includes('not enrolled in this section') || 
+        lowerMsg.includes('not enrolled in this class') ||
+        lowerMsg.includes('faculty incharge') ||
+        p7Code === 'section_mismatch' ||
+        err?.code === 'section_mismatch';
+
+      const code = isSectionMismatch ? 'section_mismatch' : (p7Code || err?.code || (
         lowerMsg.includes('qr-session-end') || lowerMsg.includes('session has ended') ? 'QR-SESSION-END' :
         lowerMsg.includes('binding') || lowerMsg.includes('device') ? 'no_active_binding' :
         lowerMsg.includes('qr-old') || lowerMsg.includes('outdated') ? 'QR-OLD' :
@@ -341,9 +349,11 @@ export const AttendanceLanding: React.FC = () => {
         lowerMsg.includes('geofence') ? 'geofence_failed' :
         err?.name === 'AbortError' ? 'timeout' :
         'error'
-      );
+      ));
       setSubmitErrorCode(code);
-      if (code === 'QR-SESSION-END' || lowerMsg.includes('session has ended')) {
+      if (code === 'section_mismatch' || isSectionMismatch) {
+        setSubmitError('Not enrolled in this section. Please contact faculty incharge.');
+      } else if (code === 'QR-SESSION-END' || lowerMsg.includes('session has ended')) {
         try { sessionStorage.removeItem('snist_launch_claim'); } catch {}
         setSubmitError('This class session has ended. See your faculty if you believe this is wrong. (Code: QR-SESSION-END)');
       } else if (code === 'QR-OLD' || code === 'expired' || lowerMsg.includes('outdated')) {

@@ -413,7 +413,7 @@ def process_qr_scan(
     if student.section_id != session_meta["section_id"] and not is_admin:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Attendance Rejected: Student {student.roll_number} does not belong to class section {session_meta['section_name']}."
+            detail="Not enrolled in this section. Please contact faculty incharge."
         )
 
     roll_number = student.roll_number
@@ -698,7 +698,7 @@ def process_batch_qr_scan(
                     continue
 
         if student.section_id != session_meta["section_id"] and not is_admin:
-            results.append({"status": "FAILED", "reason": "Student does not belong to session class section"})
+            results.append({"status": "FAILED", "reason": "Not enrolled in this section. Please contact faculty incharge."})
             continue
 
         roll_number = student.roll_number
@@ -823,7 +823,7 @@ def manual_mark_attendance(
     if student.section_id != session.section_id and current_user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Student {student.roll_number} does not belong to this session's class section."
+            detail="Not enrolled in this section. Please contact faculty incharge."
         )
 
     existing_recs = db.query(AttendanceRecord).filter(
