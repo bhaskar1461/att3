@@ -5,6 +5,7 @@ import { Topbar } from './Topbar';
 import { BreadcrumbRow } from './BreadcrumbRow';
 import { ContentGridPlaceholder } from './ContentGridPlaceholder';
 import { DashboardGrid } from '../../core/components/DashboardGrid';
+import { MockBanner } from './MockBanner';
 import { useSidebarState } from '../../hooks/useSidebarState';
 import { useNavigation } from '../../hooks/useNavigation';
 import { useTheme } from '../../hooks/useTheme';
@@ -129,6 +130,7 @@ export const DashboardShell: React.FC = () => {
         </main>
       </div>
 
+      <MockBanner />
     </div>
   );
 };

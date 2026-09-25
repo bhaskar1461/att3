@@ -16,6 +16,7 @@ const PublicQrDisplay = React.lazy(() => import('./pages/PublicQrDisplay').then(
 const QrSizeTest = React.lazy(() => import('./pages/QrSizeTest').then(m => ({ default: m.QrSizeTest })));
 const AttendanceLanding = React.lazy(() => import('./pages/AttendanceLanding').then(m => ({ default: m.AttendanceLanding })));
 const ComponentsShowcase = React.lazy(() => import('./dev/ComponentsShowcase').then(m => ({ default: m.ComponentsShowcase })));
+const ContractsPage = React.lazy(() => import('./dev/ContractsPage').then(m => ({ default: m.ContractsPage })));
 import { renderRegisteredRouteElements } from './core/components/RegisteredRoutes';
 import './core/features';
 
@@ -150,6 +151,9 @@ export const App: React.FC = () => {
 
                 {/* Developer UI Primitives Showcase */}
                 <Route path="/dev/components" element={<ComponentsShowcase />} />
+
+                {/* Developer API Contracts & Parity Verification */}
+                <Route path="/dev/contracts" element={<ContractsPage />} />
 
                 {/* Dynamic Extensible Routes from Registries (Wiring Point 2) */}
                 {renderRegisteredRouteElements('admin')}
