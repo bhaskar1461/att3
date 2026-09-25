@@ -4,9 +4,9 @@ import { apiRequest } from '../services/api';
 import { TeacherAssignment, AttendanceSession, HistoricalAttendanceSession } from '../types';
 import { 
   Camera, Lock, Unlock, RefreshCw, Search, Calendar, History, 
-  FileSpreadsheet, ExternalLink, Users, Zap, CheckCircle, X, Download,
+  FileSpreadsheet, ExternalLink, Users, Zap, CheckCircle, CheckCircle2, X, Download,
   UserCheck, UserX, AlertCircle, Sparkles, ChevronRight, Maximize2, Smartphone, ShieldAlert, AlertTriangle,
-  Clock, Tv, Trash2
+  Clock, Tv, Trash2, Layers
 } from 'lucide-react';
 // Lazy-load heavy camera scanner and excel register modals
 const QRScannerModal = React.lazy(() => import('../components/QRScannerModal').then(m => ({ default: m.QRScannerModal })));
@@ -102,6 +102,9 @@ export const TeacherDashboard: React.FC = () => {
   const [teacherProfile, setTeacherProfile] = useState<any>(null);
   const [teacherGSheetId, setTeacherGSheetId] = useState('');
   const [teacherGSheetUrl, setTeacherGSheetUrl] = useState('');
+  const [classSheetInputs, setClassSheetInputs] = useState<Record<number, string>>({});
+  const [savingAssignmentId, setSavingAssignmentId] = useState<number | null>(null);
+  const [syncingAssignmentId, setSyncingAssignmentId] = useState<number | null>(null);
 
   const [currentClassInfo, setCurrentClassInfo] = useState<any>(null);
   const [unmarkedData, setUnmarkedData] = useState<any>(null);
@@ -238,6 +241,11 @@ export const TeacherDashboard: React.FC = () => {
     try {
       const data: any = await apiRequest('/teacher/assigned-classes');
       setAssignments(data || []);
+      const inputs: Record<number, string> = {};
+      (data || []).forEach((a: TeacherAssignment) => {
+        inputs[a.assignment_id] = a.google_sheet_id || '';
+      });
+      setClassSheetInputs(prev => ({ ...inputs, ...prev }));
       if (data && data.length > 0) {
         if (!selectedAssignment || !data.some((a: any) => a.assignment_id === selectedAssignment.assignment_id)) {
           setSelectedAssignment(data[0]);
@@ -710,6 +718,62 @@ export const TeacherDashboard: React.FC = () => {
     }
   };
 
+  const handleSaveClassSheet = async (asgn: TeacherAssignment) => {
+    const rawVal = classSheetInputs[asgn.assignment_id] ?? (asgn.google_sheet_id || '');
+    setSavingAssignmentId(asgn.assignment_id);
+    try {
+      const res: any = await apiRequest(`/teacher/assignments/${asgn.assignment_id}/sheet`, {
+        method: 'PUT',
+        body: JSON.stringify({ google_sheet_id: rawVal })
+      });
+      setAssignments(prev => prev.map(a => 
+        a.assignment_id === asgn.assignment_id 
+          ? { ...a, google_sheet_id: res.google_sheet_id, google_sheet_url: res.google_sheet_url } 
+          : a
+      ));
+      setClassSheetInputs(prev => ({ ...prev, [asgn.assignment_id]: res.google_sheet_id }));
+      setToast({ 
+        message: res.message || `Google Sheet saved for ${asgn.subject_name} (${asgn.section_name})!`, 
+        type: 'success' 
+      });
+      if (selectedAssignment?.assignment_id === asgn.assignment_id) {
+        setSelectedAssignment(prev => prev ? { ...prev, google_sheet_id: res.google_sheet_id, google_sheet_url: res.google_sheet_url } : null);
+      }
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to save Google Sheet ID', type: 'error' });
+    } finally {
+      setSavingAssignmentId(null);
+    }
+  };
+
+  const handleSyncClassSheetRoster = async (asgn: TeacherAssignment) => {
+    const sheetId = classSheetInputs[asgn.assignment_id] || asgn.google_sheet_id;
+    if (!sheetId) {
+      setToast({ message: `Please enter a Google Sheet URL or ID for ${asgn.section_name} first.`, type: 'warning' });
+      return;
+    }
+    setSyncingAssignmentId(asgn.assignment_id);
+    try {
+      const res: any = await apiRequest('/teacher/sync-roster-from-sheet', {
+        method: 'POST',
+        body: JSON.stringify({
+          assignment_id: asgn.assignment_id,
+          section_id: asgn.section_id,
+          google_sheet_id: sheetId
+        })
+      });
+      setToast({ message: res.message || `Students successfully synced into ${asgn.section_name}!`, type: 'success' });
+      await fetchAssignedClasses();
+      if (activeSession && activeSession.section_id === asgn.section_id) {
+        fetchSessionDetails(activeSession.session_id);
+      }
+    } catch (err: any) {
+      setToast({ message: err.message || `Failed to sync students for ${asgn.section_name}`, type: 'error' });
+    } finally {
+      setSyncingAssignmentId(null);
+    }
+  };
+
   const handleSaveTeacherGSheet = async () => {
     try {
       const res: any = await apiRequest('/teacher/settings', {
@@ -997,13 +1061,13 @@ export const TeacherDashboard: React.FC = () => {
             <FileSpreadsheet className="w-4 h-4 text-emerald-300" /> Class Register
           </button>
 
-          {teacherGSheetUrl && (
+          {(selectedAssignment?.google_sheet_url || teacherGSheetUrl) && (
             <a
-              href={teacherGSheetUrl}
+              href={selectedAssignment?.google_sheet_url || teacherGSheetUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 font-bold rounded-xl text-xs flex items-center gap-1.5 transition shadow-sm"
-              title="Open Google Sheet"
+              title={selectedAssignment?.google_sheet_url ? `Open Google Sheet for ${selectedAssignment.subject_code} (${selectedAssignment.section_name})` : "Open Google Sheet"}
             >
               <ExternalLink className="w-3.5 h-3.5" /> Sheet
             </a>
@@ -2029,73 +2093,214 @@ export const TeacherDashboard: React.FC = () => {
 
       {/* TAB 3: GOOGLE SHEET SETTINGS */}
       {activeTab === 'settings' && (
-        <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-5">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+        <div className="space-y-6">
+          {/* Top Banner */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
             <div>
-              <h3 className="font-heading text-lg font-bold text-[#15347e] flex items-center gap-2">
-                <FileSpreadsheet className="w-5 h-5 text-emerald-600" /> Individual Google Sheet Configuration
-              </h3>
-              <p className="text-xs text-[#6a7894] mt-1">
-                Configure your personal Google Sheet URL. Attendance marked in your sessions will automatically update your Google Sheet in real-time.
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <h3 className="font-heading text-lg font-bold text-[#15347e] flex items-center gap-2">
+                  <FileSpreadsheet className="w-5 h-5 text-emerald-600" /> Class-Wise Google Sheet Management
+                </h3>
+                <span className="px-2.5 py-0.5 rounded-full bg-blue-50 text-[#2f53d7] font-extrabold text-xs border border-blue-200 flex items-center gap-1">
+                  <Layers className="w-3 h-3" />
+                  {assignments.length} Assigned Class{assignments.length === 1 ? '' : 'es'}
+                </span>
+              </div>
+              <p className="text-xs text-[#6a7894] mt-1.5 max-w-2xl">
+                Configure dedicated Google Sheets for each assigned class section. Attendance marked in your sessions will automatically update each class's respective Google Sheet in real-time.
               </p>
             </div>
-            {teacherGSheetUrl && (
-              <a
-                href={teacherGSheetUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold text-xs rounded-xl border border-emerald-200 flex items-center gap-1.5 transition shrink-0 shadow-sm"
-              >
-                <ExternalLink className="w-4 h-4" /> Open My Live Sheet
-              </a>
+            {assignments.some(a => a.google_sheet_url) && (
+              <span className="px-3 py-1.5 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-xl font-bold text-xs flex items-center gap-1.5 shrink-0 shadow-sm">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600" /> Multi-Class Sync Active
+              </span>
             )}
           </div>
 
-          <div className="space-y-4 pt-2">
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">
-                Google Sheet URL or Spreadsheet ID
-              </label>
+          {/* Class-Wise Google Sheets Cards */}
+          {assignments.length === 0 ? (
+            <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-500 text-sm">
+              <FileSpreadsheet className="w-8 h-8 text-slate-400 mx-auto mb-2" />
+              <p className="font-bold text-slate-700">No classes assigned yet</p>
+              <p className="text-xs text-slate-500 mt-1">
+                Contact your administrator or configure your class allotments in the Admin Operations Center to attach Google Sheets to your classes.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {assignments.map((asgn) => {
+                const rawVal = classSheetInputs[asgn.assignment_id] ?? (asgn.google_sheet_id || '');
+                const isConfigured = Boolean(asgn.google_sheet_id);
+                const isSaving = savingAssignmentId === asgn.assignment_id;
+                const isSyncing = syncingAssignmentId === asgn.assignment_id;
+
+                return (
+                  <div 
+                    key={asgn.assignment_id}
+                    className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4 hover:border-slate-300 transition"
+                  >
+                    {/* Class Info Header */}
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                      <div className="flex items-center gap-3 flex-wrap">
+                        <div className="w-10 h-10 rounded-xl bg-blue-50 border border-blue-200 flex items-center justify-center text-[#2f53d7] font-bold shrink-0">
+                          <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h4 className="font-heading text-sm font-bold text-[#15347e]">
+                              {asgn.subject_name}
+                            </h4>
+                            <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 font-extrabold text-[11px] font-mono">
+                              {asgn.subject_code}
+                            </span>
+                            <span className="px-2 py-0.5 rounded-md bg-blue-100 text-[#2f53d7] font-extrabold text-[11px]">
+                              Section {asgn.section_name}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-[#6a7894] mt-0.5">
+                            {asgn.year || '3rd Year'} • Dept: {asgn.department || 'CSE'}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        {isConfigured ? (
+                          <>
+                            <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 rounded-lg font-extrabold text-[10px] flex items-center gap-1">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              LIVE LINKED
+                            </span>
+                            {asgn.google_sheet_url && (
+                              <a
+                                href={asgn.google_sheet_url}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 transition shadow-sm"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" /> Open Live Sheet
+                              </a>
+                            )}
+                          </>
+                        ) : (
+                          <span className="px-2.5 py-1 bg-amber-50 text-amber-700 border border-amber-200 rounded-lg font-extrabold text-[10px] flex items-center gap-1">
+                            <AlertCircle className="w-3 h-3 text-amber-500" />
+                            NOT LINKED
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Sheet URL or ID Input */}
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">
+                        Google Sheet URL or Spreadsheet ID for {asgn.subject_name} ({asgn.section_name})
+                      </label>
+                      <input
+                        type="text"
+                        value={rawVal}
+                        onChange={(e) => setClassSheetInputs(prev => ({ ...prev, [asgn.assignment_id]: e.target.value }))}
+                        placeholder={`e.g. https://docs.google.com/spreadsheets/d/.../edit or Spreadsheet ID for ${asgn.section_name}`}
+                        className="snist-input w-full text-xs font-mono"
+                      />
+                      <p className="text-[11px] text-slate-500 mt-1">
+                        Paste the browser URL for this class's Google Sheet. Attendance for <strong>{asgn.section_name}</strong> will automatically write into this sheet.
+                      </p>
+                    </div>
+
+                    {/* Configured Tag */}
+                    {asgn.google_sheet_id && (
+                      <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2 text-xs">
+                        <div className="truncate">
+                          <span className="font-bold text-slate-500">Configured ID: </span>
+                          <span className="font-mono font-bold text-[#2f53d7]">{asgn.google_sheet_id}</span>
+                        </div>
+                        <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-extrabold text-[10px] shrink-0">
+                          ACTIVE
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Action Buttons */}
+                    <div className="flex flex-wrap items-center gap-3 pt-1">
+                      <button
+                        onClick={() => handleSaveClassSheet(asgn)}
+                        disabled={isSaving}
+                        className="px-5 py-2.5 snist-btn-primary font-bold text-xs flex items-center gap-2 shadow-sm transition disabled:opacity-50"
+                      >
+                        <FileSpreadsheet className={`w-4 h-4 ${isSaving ? 'animate-spin' : ''}`} />
+                        {isSaving ? 'Saving...' : `Save Sheet for ${asgn.section_name}`}
+                      </button>
+
+                      <button
+                        onClick={() => handleSyncClassSheetRoster(asgn)}
+                        disabled={isSyncing}
+                        className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center gap-2 shadow-sm transition disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-4 h-4 ${isSyncing ? 'animate-spin' : ''}`} />
+                        {isSyncing ? `Syncing ${asgn.section_name} Roster...` : `Sync Students from This Sheet`}
+                      </button>
+
+                      {asgn.has_excel_register && (
+                        <button
+                          onClick={() => handleDownloadMyClassRegister(asgn.assignment_id, asgn.excel_file_name)}
+                          className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl flex items-center gap-2 transition border border-slate-200 ml-auto"
+                          title="Download Class Excel Register"
+                        >
+                          <Download className="w-3.5 h-3.5 text-slate-500" />
+                          <span>Download Excel Register</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Section 2: General Faculty Fallback Sheet */}
+          <div className="bg-slate-50/80 rounded-2xl border border-slate-200 p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+              <div>
+                <h4 className="font-heading text-sm font-bold text-slate-800 flex items-center gap-2">
+                  <FileSpreadsheet className="w-4 h-4 text-slate-500" /> Faculty Default Fallback Sheet (Optional)
+                </h4>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  Used as a fallback for any attendance sessions that do not have a class-specific sheet configured above.
+                </p>
+              </div>
+              {teacherGSheetUrl && (
+                <a
+                  href={teacherGSheetUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs rounded-xl flex items-center gap-1.5 transition shrink-0"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" /> Open Default Sheet
+                </a>
+              )}
+            </div>
+
+            <div className="space-y-3">
               <input
                 type="text"
                 value={teacherGSheetId}
                 onChange={(e) => setTeacherGSheetId(e.target.value)}
-                placeholder="e.g. https://docs.google.com/spreadsheets/d/18oBSsQd9CvzpVsQvtMul2CHXWWUWuue-I50-9hzK3wg/edit"
-                className="snist-input w-full text-xs font-mono"
+                placeholder="e.g. Default faculty spreadsheet URL or ID"
+                className="snist-input w-full text-xs font-mono bg-white"
               />
-              <p className="text-[11px] text-slate-500 mt-1">
-                Tip: Paste the complete Google Sheet browser URL. The system will automatically extract and save the Spreadsheet ID.
-              </p>
-            </div>
-
-            {teacherGSheetId && (
-              <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-2 text-xs">
-                <div>
-                  <span className="font-bold text-slate-500">Configured ID: </span>
-                  <span className="font-mono font-bold text-[#2f53d7]">{teacherGSheetId}</span>
-                </div>
-                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-extrabold text-[10px]">
-                  ACTIVE
-                </span>
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  onClick={handleSaveTeacherGSheet}
+                  className="px-4 py-2 bg-slate-700 hover:bg-slate-800 text-white font-bold text-xs rounded-xl flex items-center gap-2 shadow-sm transition"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" /> Save Fallback Sheet
+                </button>
+                {teacherGSheetId && (
+                  <span className="text-xs text-slate-500 font-mono">
+                    Active Fallback: <strong className="text-slate-700">{teacherGSheetId}</strong>
+                  </span>
+                )}
               </div>
-            )}
-
-            <div className="flex flex-wrap items-center gap-3 pt-2">
-              <button
-                onClick={handleSaveTeacherGSheet}
-                className="px-6 py-2.5 snist-btn-primary font-bold text-xs flex items-center gap-2 shadow-sm"
-              >
-                <FileSpreadsheet className="w-4 h-4" /> Save Sheet Configuration
-              </button>
-
-              <button
-                onClick={handleSyncSheetRoster}
-                disabled={isSyncingRoster}
-                className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl flex items-center gap-2 shadow-sm transition disabled:opacity-50"
-              >
-                <RefreshCw className={`w-4 h-4 ${isSyncingRoster ? 'animate-spin' : ''}`} /> 
-                {isSyncingRoster ? 'Syncing Students from Sheet...' : 'Sync Students from This Sheet'}
-              </button>
             </div>
           </div>
         </div>

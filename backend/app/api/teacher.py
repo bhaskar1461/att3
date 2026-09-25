@@ -990,7 +990,14 @@ def trigger_session_sheet_sync(
     if session.teacher_id != current_teacher.id and current_teacher.user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Not authorized to sync this session")
 
-    teacher_sheet_id = (current_teacher.google_sheet_id or "").strip()
+    asgn = db.query(TeacherAssignment).filter(
+        TeacherAssignment.teacher_id == session.teacher_id,
+        TeacherAssignment.subject_id == session.subject_id,
+        TeacherAssignment.section_id == session.section_id
+    ).first()
+    teacher_sheet_id = (asgn.google_sheet_id or "").strip() if asgn else ""
+    if not teacher_sheet_id:
+        teacher_sheet_id = (current_teacher.google_sheet_id or "").strip()
     if not teacher_sheet_id:
         from app.models.models import SystemSettings
         setting = db.query(SystemSettings).filter(SystemSettings.key == "GOOGLE_SPREADSHEET_ID").first()
@@ -1160,6 +1167,9 @@ def delete_session(
 class TeacherSettingsRequest(BaseModel):
     google_sheet_id: str
 
+class AssignmentSheetRequest(BaseModel):
+    google_sheet_id: str
+
 def extract_spreadsheet_id(input_str: str) -> str:
     if not input_str:
         return ""
@@ -1196,9 +1206,38 @@ def update_teacher_settings(req: TeacherSettingsRequest, db: Session = Depends(g
         "google_sheet_url": sp_url
     }
 
+@router.put("/assignments/{assignment_id}/sheet")
+def update_assignment_sheet(
+    assignment_id: int,
+    req: AssignmentSheetRequest,
+    db: Session = Depends(get_db),
+    current_teacher: Teacher = Depends(require_teacher)
+):
+    assignment = db.query(TeacherAssignment).filter(TeacherAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Class assignment not found")
+
+    if assignment.teacher_id != current_teacher.id and current_teacher.user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="Not authorized to configure Google Sheet for this class assignment")
+
+    sp_id = extract_spreadsheet_id(req.google_sheet_id)
+    assignment.google_sheet_id = sp_id
+    db.commit()
+
+    sp_url = f"https://docs.google.com/spreadsheets/d/{sp_id}/edit" if sp_id else ""
+    class_label = f"{assignment.subject.name if assignment.subject else 'Class'} ({assignment.section.name if assignment.section else ''})"
+    return {
+        "status": "SUCCESS",
+        "message": f"Google Sheet configuration saved for {class_label}!",
+        "assignment_id": assignment.id,
+        "google_sheet_id": sp_id,
+        "google_sheet_url": sp_url
+    }
+
 class SyncSheetRosterRequest(BaseModel):
     google_sheet_id: Optional[str] = None
     section_id: Optional[int] = None
+    assignment_id: Optional[int] = None
 
 @router.post("/sync-roster-from-sheet")
 def sync_roster_from_sheet(
@@ -1209,6 +1248,7 @@ def sync_roster_from_sheet(
     """
     Reads student records (Roll No in Col B, Name in Col C) directly from the Google Sheet
     and syncs them into the designated section in the database.
+    Supports class-specific assignments and saves/updates the class sheet if provided.
     """
     import os
     from app.services.gsheets_service import GoogleSheetsService
@@ -1216,11 +1256,29 @@ def sync_roster_from_sheet(
     from app.models.models import Section, Student, User, UserRole
     from app.core.security import get_password_hash
 
-    target_sheet_id = extract_spreadsheet_id(req.google_sheet_id or "") or current_teacher.google_sheet_id
+    target_assignment = None
+    if req.assignment_id:
+        target_assignment = db.query(TeacherAssignment).filter(TeacherAssignment.id == req.assignment_id).first()
+        if target_assignment:
+            if not req.section_id:
+                req.section_id = target_assignment.section_id
+
+    target_sheet_id = extract_spreadsheet_id(req.google_sheet_id or "")
+    if not target_sheet_id and target_assignment and target_assignment.google_sheet_id:
+        target_sheet_id = target_assignment.google_sheet_id
+    if not target_sheet_id:
+        target_sheet_id = current_teacher.google_sheet_id
     if not target_sheet_id:
         raise HTTPException(status_code=400, detail="Google Sheet ID or URL required")
 
+    # If assignment sheet was updated or newly set, persist it
+    if target_assignment and target_sheet_id and target_assignment.google_sheet_id != target_sheet_id:
+        target_assignment.google_sheet_id = target_sheet_id
+        db.commit()
+
     target_section_id = req.section_id
+    if not target_section_id and target_assignment:
+        target_section_id = target_assignment.section_id
     if not target_section_id:
         assignment = db.query(TeacherAssignment).filter(TeacherAssignment.teacher_id == current_teacher.id).first()
         if assignment:
