@@ -46,8 +46,8 @@ export const Navbar: React.FC = () => {
     return 'Student';
   };
 
-  // Standalone public routes (e.g. /qr projector display) must not show the Navbar
-  if (location.pathname === '/qr') {
+  // Standalone routes with their own navigation shell (/qr projector display and Phase 1+ Dashboard shell)
+  if (location.pathname === '/qr' || location.pathname.startsWith('/dashboard') || location.pathname === '/admin') {
     return null;
   }
 

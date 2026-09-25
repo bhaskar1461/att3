@@ -59,16 +59,43 @@ export default {
         "on-error": "#ffffff",
         "on-tertiary-fixed": "#341100",
         "on-primary-fixed": "#001b3c",
-        "outline-variant": "#c3c6d1"
+        "outline-variant": "#c3c6d1",
+        // Admin Dashboard Phase 1 Theme Tokens
+        "page-bg": "#141416",
+        "card-bg": "#1e1f24",
+        "card-border": "#2a2b31",
+        "accent-indigo": "#6366f1",
+        "accent-violet": "#8b5cf6",
+        "hero-purple": "#7c3aed",
+        "hero-lavender": "#a78bfa",
+        "delta-green": "#10b981",
+        "delta-red": "#ef4444",
+        "muted-label": "#9ca3af",
+        "rail-dark": "#111113",
+        "sidebar-dark": "#17181c",
+        "topbar-dark": "#17181c",
+        // Semantic theme tokens for light / dark
+        dash: {
+          page: "var(--dash-page)",
+          card: "var(--dash-card)",
+          border: "var(--dash-border)",
+          rail: "var(--dash-rail)",
+          sidebar: "var(--dash-sidebar)",
+          topbar: "var(--dash-topbar)",
+          text: "var(--dash-text)",
+          muted: "var(--dash-muted)",
+        }
       },
       fontFamily: {
-        sans: ['Geist', 'Outfit', 'Inter', 'system-ui', 'sans-serif'],
+        sans: ['Inter', 'Geist', 'Outfit', 'system-ui', 'sans-serif'],
+        inter: ['Inter', 'sans-serif'],
         geist: ['Geist', 'sans-serif'],
       },
       borderRadius: {
         "DEFAULT": "0.25rem",
         "lg": "0.5rem",
         "xl": "0.75rem",
+        "card": "12px",
         "full": "9999px"
       },
       spacing: {

@@ -5,7 +5,7 @@ import { Navbar } from './components/Navbar';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { Login, getSafeNextDestination } from './pages/Login';
 
-// Lazy-loaded routes to keep initial student/login bundle minimal (<150KB gzip target)
+const DashboardPage = React.lazy(() => import('./pages/DashboardPage').then(m => ({ default: m.DashboardPage })));
 const AdminDashboard = React.lazy(() => import('./pages/AdminDashboard').then(m => ({ default: m.AdminDashboard })));
 const TeacherDashboard = React.lazy(() => import('./pages/TeacherDashboard').then(m => ({ default: m.TeacherDashboard })));
 const StudentPortal = React.lazy(() => import('./pages/StudentPortal').then(m => ({ default: m.StudentPortal })));
@@ -67,15 +67,29 @@ export const App: React.FC = () => {
     <AuthProvider>
       <BrowserRouter>
         <AuthNavigationSync />
-        <div className="min-h-screen bg-gradient-to-b from-[#f7f9fe] to-[#ecf1fb] text-[#17233c] flex flex-col font-sans">
+        <div className="min-h-screen bg-[#141416] text-[#f8fafc] dark:bg-[#141416] dark:text-[#f8fafc] flex flex-col font-sans">
           <Navbar />
           <main className="flex-1">
             <React.Suspense fallback={<RouteLoader />}>
               <Routes>
                 <Route path="/login" element={<Login />} />
 
+                {/* Phase 1 Dashboard Shell: Direct Standalone Route */}
+                <Route path="/dashboard" element={<DashboardPage />} />
+
+                {/* Super Admin Dashboard (Phase 1+ New Dark Admin Shell) */}
                 <Route
                   path="/admin"
+                  element={
+                    <ProtectedRoute allowedRoles={['SUPER_ADMIN']}>
+                      <DashboardPage />
+                    </ProtectedRoute>
+                  }
+                />
+
+                {/* Preserved Super Admin Legacy Tabs (Rule 3: Strict Preservation) */}
+                <Route
+                  path="/admin/legacy"
                   element={
                     <ProtectedRoute allowedRoles={['SUPER_ADMIN']}>
                       <AdminDashboard />
