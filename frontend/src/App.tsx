@@ -15,6 +15,9 @@ const OnboardingWizard = React.lazy(() => import('./pages/OnboardingWizard').the
 const PublicQrDisplay = React.lazy(() => import('./pages/PublicQrDisplay').then(m => ({ default: m.PublicQrDisplay })));
 const QrSizeTest = React.lazy(() => import('./pages/QrSizeTest').then(m => ({ default: m.QrSizeTest })));
 const AttendanceLanding = React.lazy(() => import('./pages/AttendanceLanding').then(m => ({ default: m.AttendanceLanding })));
+const ComponentsShowcase = React.lazy(() => import('./dev/ComponentsShowcase').then(m => ({ default: m.ComponentsShowcase })));
+import { renderRegisteredRouteElements } from './core/components/RegisteredRoutes';
+import './core/features';
 
 const RouteLoader: React.FC = () => (
   <div className="flex items-center justify-center min-h-[60vh]">
@@ -144,6 +147,12 @@ export const App: React.FC = () => {
 
                 {/* Universal Projector QR Direct Entry Route (iPhone Camera / Android / Direct Link) */}
                 <Route path="/a/:launchToken" element={<AttendanceLanding />} />
+
+                {/* Developer UI Primitives Showcase */}
+                <Route path="/dev/components" element={<ComponentsShowcase />} />
+
+                {/* Dynamic Extensible Routes from Registries (Wiring Point 2) */}
+                {renderRegisteredRouteElements('admin')}
 
                 <Route path="*" element={<RoleBasedRedirect />} />
               </Routes>

@@ -16,6 +16,9 @@ import {
 } from 'lucide-react';
 import { Badge } from '../ui/badge';
 import { SecondarySidebarItem, ProInfoCardData } from '../../services/mockApi';
+import { navRegistry } from '../../core/registries';
+import { Role } from '../../core/types';
+import '../../core/features';
 
 interface SecondarySidebarProps {
   items: SecondarySidebarItem[];
@@ -23,6 +26,7 @@ interface SecondarySidebarProps {
   onSelect: (id: string) => void;
   isCollapsed: boolean;
   proCard: ProInfoCardData | null;
+  currentRole?: Role;
   onCloseMobile?: () => void;
 }
 
@@ -37,6 +41,7 @@ const SIDEBAR_ICON_MAP: Record<string, React.FC<{ className?: string }>> = {
   ShieldAlert,
   FileSpreadsheet,
   Settings,
+  Sparkles,
 };
 
 export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({
@@ -45,8 +50,21 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({
   onSelect,
   isCollapsed,
   proCard,
+  currentRole = 'admin',
   onCloseMobile,
 }) => {
+  // Wiring Point 1: Sidebar nav list renders from navRegistry.all(currentRole)
+  const registeredNav = navRegistry.all(currentRole);
+  const displayItems =
+    registeredNav.length > 0
+      ? registeredNav.map((entry) => ({
+          id: entry.id,
+          label: entry.label,
+          iconName: entry.icon,
+          path: entry.path,
+          badge: entry.badge ? (entry.badge() !== null ? String(entry.badge()) : undefined) : undefined,
+        }))
+      : items;
   return (
     <aside
       aria-label="Secondary Navigation Sidebar"
@@ -75,7 +93,7 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({
 
         {/* Navigation Items List */}
         <nav className="flex flex-col gap-1 w-full" aria-label="Dashboard views">
-          {items.map((item) => {
+          {displayItems.map((item) => {
             const IconComp = SIDEBAR_ICON_MAP[item.iconName] || Activity;
             const isActive = activeId === item.id;
 

@@ -4,6 +4,7 @@ import { SecondarySidebar } from './SecondarySidebar';
 import { Topbar } from './Topbar';
 import { BreadcrumbRow } from './BreadcrumbRow';
 import { ContentGridPlaceholder } from './ContentGridPlaceholder';
+import { DashboardGrid } from '../../core/components/DashboardGrid';
 import { useSidebarState } from '../../hooks/useSidebarState';
 import { useNavigation } from '../../hooks/useNavigation';
 import { useTheme } from '../../hooks/useTheme';
@@ -118,6 +119,12 @@ export const DashboardShell: React.FC = () => {
 
         {/* 12-Column Content Grid Placeholder: Purple hero card, metric slots, charts, tables */}
         <main className="flex-1 pb-12">
+          {/* Wiring Point 3: Overview page content area renders <DashboardGrid zone="..." /> for each zone */}
+          <div className="p-4 sm:p-6 space-y-6">
+            <DashboardGrid zone="kpi" />
+            <DashboardGrid zone="main" />
+            <DashboardGrid zone="side" />
+          </div>
           <ContentGridPlaceholder />
         </main>
       </div>
