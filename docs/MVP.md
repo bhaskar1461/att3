@@ -75,16 +75,23 @@ The system must:
 - **Cross-Student Key Reuse Prevention:** Immediate rejection (`DEVICE_KEY_REUSE_REJECTED` / HTTP 409) if a public key is registered by another student.
 - **Single-Device Policy & Controlled Recovery:** 1 active device per student with controlled replacement (`replace_active` / OTP rebind) preserving historical attendance audit records.
 
-### Selfie Collection
+### Selfie Collection (Automatic Post-Attendance Capture)
 
-- Post-attendance selfie prompt
-- Front-camera capture
-- Countdown
-- Face framing guidance
-- Basic image quality validation
-- Secure image upload
-- Student/session association
-- Image metadata/audit information
+- **QR-First Architecture**: Selfie camera strictly opens *after* backend confirms QR attendance authorization.
+- **Front-Camera Initialization**: Automatically transitions from rear QR camera to front selfie camera with a 350ms hardware sensor cooldown to prevent Camera2 HAL / AVFoundation contention.
+- **Client-Side Face Detection Quality Gate**: Real-time detection (via hardware-accelerated `window.FaceDetector` API or fast YCbCr skin chrominance + Laplacian sharpness fallback) enforcing:
+  - Exactly one face in frame (multiple faces trigger alert)
+  - Face centered inside the oval reticle
+  - Adequate facial scale (12% to 85% bounding box area ratio)
+  - Acceptable ambient luminance (35–245 Rec.601) and minimal blur
+- **Face Stability Buffer & 3-Second Countdown**: Requires 3 consecutive valid frames before triggering countdown; if the face leaves the oval or drops during 3-2-1, countdown cancels immediately and resets to searching.
+- **Automatic Shutterless Capture**: Zero button presses needed; captures automatically at countdown 0 with a subtle Web Audio shutter click and white screen flash.
+- **Platform-Adaptive Scanning UX**:
+  - *iOS / Safari*: Apple-inspired smooth oval scanning reticle with glowing boundary sweep and soft haptic feedback.
+  - *Android*: Material 3 motion styling, pulsating radar ripples, and Material haptic feedback.
+- **Decoupled Security & Failure Independence**: Attendance validity (`PRESENT`) is never revoked if selfie capture fails or is skipped; controlled retry reopens front camera without re-scanning QR.
+- **HTTP Compression Negotiation**: Respects `Accept-Encoding: gzip`, never forces unsupported encodings (`zstd` is never forced), with uncompressed identity fallback.
+- **Secure Image Upload**: Validates dimensions and file sizes (< 5MB), archives to private object storage under `data/selfies/{ROLL}_{NAME}/...` with audit logging.
 
 ### Future Face Recognition Preparation
 

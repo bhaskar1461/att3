@@ -194,3 +194,48 @@ A critical design principle of the SNIST platform is that **Cloudflare protects 
 | **Rotating QR Verification** | Passthrough proxy. | **Authoritative**: Validates server-generated HMAC-SHA256 tokens within a 10s sliding window without database reads. |
 | **Security Auditing** | Cloudflare Security Analytics & WAF activity log. | Comprehensive, append-only `qr_audit_logs` + real-time 2-layer email alert engine with IST operating windows. |
 
+---
+
+## 9. QR-First Attendance → Front Camera Selfie Pipeline & Decoupled State Machine
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Student as Student Phone
+    participant Scanner as Rear QR Scanner
+    participant Backend as FastAPI Backend
+    participant FrontCam as Front Camera HAL
+    participant FDetect as Client Face Engine
+    participant Storage as Private Object Store
+
+    Student->>Scanner: Scans Rotating QR / Submits URL
+    Scanner->>Backend: POST /api/v1/attendance/scan-projector (QR, GPS, Device Proof)
+    Backend->>Backend: Verify Session, Device ECDSA Proof, Geofence, Deduplication
+    Backend-->>Student: HTTP 200 OK (attendance_id, status: PRESENT)
+    Note over Scanner,FrontCam: QR Attendance is Authoritative (Status: PRESENT)
+    Scanner->>Scanner: Stop all rear camera tracks & release stream
+    Scanner->>FrontCam: 350ms Hardware Sensor Cooldown Buffer
+    FrontCam->>FrontCam: Initialize getUserMedia({ facingMode: 'user' })
+    FrontCam->>FDetect: Render platform reticle (iOS Face-Scan / Android Material)
+    loop ~14 FPS Face Quality Detection
+        FDetect->>FDetect: Check single face, oval centering, size bounds, luminance & blur
+    end
+    FDetect->>FDetect: FaceStabilityBuffer confirms 3 consecutive valid frames
+    FDetect->>Student: Start 3-Second Animated Countdown (3 → 2 → 1)
+    Note over FDetect: If face leaves oval during countdown, immediately cancel & reset to 3
+    FDetect->>FrontCam: Countdown reaches 0 → Automatic Shutterless Snapshot
+    FrontCam->>Student: Web Audio click + White Screen Flash
+    Student->>Student: Validate Image (<5MB, max 1080px, valid JPEG)
+    Student->>Backend: POST /api/v1/attendance/records/{id}/selfie (file)
+    Backend->>Storage: Archive to data/selfies/{ROLL}_{NAME}/...
+    Backend->>Backend: Persist SelfieRecord & update AttendanceRecord.selfie_status = 'ACCEPTED'
+    Backend-->>Student: HTTP 200 OK (status: ACCEPTED)
+    Note over Student,Backend: If upload fails or is skipped, AttendanceRecord remains PRESENT (Decoupled Rule)
+```
+
+### Architectural Guarantees:
+1. **Server-Authoritative Decoupling**: Attendance validity (`PRESENT`) is finalized upon QR validation. Camera or upload failure never invalidates legitimate attendance.
+2. **HAL Sensor Protection**: A 350ms asynchronous cooldown ensures the rear camera pipeline is completely torn down before the front camera requests access, preventing `NotReadableError` on Android Camera2 HAL and iOS AVFoundation.
+3. **HTTP Compression Negotiation**: Outgoing HTTP responses negotiate compression via standard `Accept-Encoding: gzip` headers. Encodings not advertised by the client (such as `zstd` on unsupported mobile browsers) are never forced, falling back safely to uncompressed identity transfer.
+
+

@@ -694,7 +694,29 @@ Expected: Quality rejection
 ### SELFIE-007 — Selfie Failure After Attendance
 Expected: Attendance: `PRESENT`, Selfie: `FAILED`. Attendance remains valid.
 
----
+### SELFIE-008 — Face Detection Quality Gate & Stability
+Input: Student positions face inside oval reticle.
+Expected: Frame stability buffer requires 3 consecutive valid frames passing centering, size (12-85%), and lighting before initiating countdown.
+
+### SELFIE-009 — Disappearance Countdown Cancellation
+Input: Face is detected, countdown reaches 2, and student moves head outside oval reticle.
+Expected: Countdown immediately cancels and resets to 3; state returns to `FACE_NOT_DETECTED`; scanning sweep resumes.
+
+### SELFIE-010 — Multiple Faces Alert
+Input: Two students stand within camera frame.
+Expected: State machine transitions to alert; countdown is blocked; guidance displays "Multiple faces visible. Ensure only your face is in frame."
+
+### SELFIE-011 — Automatic Shutterless Capture
+Input: Continuous valid face locked through countdown 3 → 2 → 1 → 0.
+Expected: Automatic front camera frame rasterization, Web Audio click sound, white screen flash, and image validation without pressing any button.
+
+### SELFIE-012 — Controlled Retry
+Input: Upload fails or camera permission was temporarily denied and student clicks "Retry Front Camera".
+Expected: State machine resets to `CAMERA_INITIALIZING`, reopens front camera with 350ms sensor cooldown; student is NOT forced to scan QR again.
+
+### SELFIE-013 — HTTP Compression Negotiation
+Input: Test client requests `/api/v1/auth/me` with `Accept-Encoding: gzip` vs `Accept-Encoding: identity`.
+Expected: Compression is applied only when advertised; `zstd` is never forced when unsupported.
 
 # 33. Selfie Authorization
 

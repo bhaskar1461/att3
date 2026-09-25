@@ -1625,6 +1625,8 @@ async def upload_attendance_selfie(
             "roll_number": last_res.get("roll_number"),
             "student_name": last_res.get("student_name")
         }
+    except HTTPException:
+        raise
     except ValueError as ve:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as ex:

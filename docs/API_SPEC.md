@@ -925,109 +925,103 @@ This would bypass the main attendance security controls.
 
 # 36. Selfie Upload
 
-After successful attendance:
+After successful attendance authorization:
 
-`POST /attendance/records/{attendance_id}/selfie`
+`POST /api/v1/attendance/records/{attendance_id}/selfie`
 
 Authorization:
+- `STUDENT` Bearer Token
+- Device headers: `X-Device-Id`, `X-Client-Type`
 
-- `STUDENT`
+Request Content-Type: `multipart/form-data`
+Payload:
+- `file`: JPEG image binary (max 5MB, captured from front camera)
 
-Recommended:
-
-`multipart/form-data`
-
-Example fields:
-
-`file=<image>`
-
-The backend verifies:
-
+Server-Side Authorization & Flow:
 ```text
-authenticated student
+Authenticated Student
         |
         v
-attendance exists
+Attendance Record Exists for Student
         |
         v
-attendance belongs to student
+Validate MIME type (JPEG/PNG/WebP magic bytes) & size (<5MB)
         |
         v
-selfie not already finalized
+Store in private directory: data/selfies/{ROLL}_{NAME}/...
+        |
+        v
+Persist SelfieRecord metadata & update AttendanceRecord.selfie_status = 'ACCEPTED'
 ```
 
 ---
 
 # 37. Selfie Upload Response
 
-Success:
-
+Success (HTTP 200 OK):
 ```json
 {
-  "success": true,
-  "data": {
-    "selfie_id": "uuid",
-    "status": "RECEIVED"
-  }
+  "status": "ACCEPTED",
+  "selfie_id": 104,
+  "object_storage_key": "23KT1A0501_Alice_Smith/23KT1A0501_Alice_Smith_s12_20260925_120000_f1_a1b2c3.jpg",
+  "file_size": 184520,
+  "frames_stored": 1,
+  "all_storage_keys": [
+    "23KT1A0501_Alice_Smith/23KT1A0501_Alice_Smith_s12_20260925_120000_f1_a1b2c3.jpg"
+  ],
+  "roll_number": "23KT1A0501",
+  "student_name": "Alice_Smith"
 }
 ```
 
-The backend should not expose the private storage URL directly unless a controlled signed URL is generated.
-
 ---
 
-# 38. Selfie Validation
+# 38. Selfie Skip / Graceful Fallback
 
-Minimum validation:
+When camera permission is denied, camera is unavailable, or student opts out:
 
-- Valid MIME type
-- Valid image structure
-- Maximum file size
-- Minimum resolution
-- Exactly one face where detection is available
-- Basic quality checks
+`POST /api/v1/attendance/records/{attendance_id}/selfie-skip`
 
-Example accepted MIME types:
-
-- `image/jpeg`
-- `image/webp`
-
-Do not accept arbitrary files merely because the frontend labels them as images.
-
----
-
-# 39. Selfie Failure
-
-If selfie upload fails:
-
-Attendance remains `PRESENT`
-
-The API should return a specific error:
-
+Request Content-Type: `application/json`
+Payload:
 ```json
 {
-  "success": false,
-  "error": {
-    "code": "SELFIE_UPLOAD_FAILED",
-    "message": "The selfie could not be uploaded. Please try again.",
-    "request_id": "uuid"
-  }
+  "reason": "CAMERA_PERMISSION_DENIED"
 }
 ```
 
-The attendance record remains valid.
+Success Response (HTTP 200 OK):
+```json
+{
+  "status": "SKIPPED",
+  "attendance_id": 1245,
+  "attendance_status": "PRESENT",
+  "selfie_status": "FAILED"
+}
+```
+
+**CRITICAL INVARIANT**:
+The student's attendance record **remains PRESENT**. A missing or failed selfie never invalidates authorized attendance.
 
 ---
 
-# 40. Selfie Retry
+# 39. Selfie Failure & Controlled Retry
 
-Endpoint:
+If selfie upload fails (e.g. network disconnect or server timeout):
+- UI displays error notice with a **"Retry Front Camera"** action.
+- Retry re-initializes front camera without requiring the student to re-scan the rotating QR.
+- Student can alternatively choose to proceed: attendance remains `PRESENT`.
 
-`POST /attendance/records/{attendance_id}/selfie`
+---
 
-The same endpoint can support controlled retries.
+# 40. HTTP Compression Negotiation
 
-The backend should enforce a reasonable retry/rate limit.
+The server implements dynamic HTTP Content-Encoding negotiation:
+- Supported: `gzip` via standard Starlette GZipMiddleware (`minimum_size=1024`).
+- Client advertises: `Accept-Encoding: gzip, deflate, br, zstd`.
+- The server will **never force** `zstd`, `br`, or `gzip` unless explicitly supported and advertised in the client's `Accept-Encoding` header.
+- If unsupported or unadvertised, the server serves standard `identity` (uncompressed) payload.
+- Compression is strictly decoupled from TLS and does not touch live camera frame acquisition or streaming.
 
 ---
 

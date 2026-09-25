@@ -521,68 +521,73 @@ Do not allow two simultaneous requests to create two records.
 
 ---
 
-# 23. SELFIE COLLECTION
+# 23. SELFIE COLLECTION (AUTOMATIC POST-ATTENDANCE FLOW)
 
-After successful attendance:
+After successful attendance authorization by the backend:
 
 ```text
-Attendance SUCCESS
+Attendance ACCEPTED (status: PRESENT)
         |
         v
-Selfie prompt
+Front Camera Initialized (350ms Hardware Cooldown to Prevent HAL Contention)
         |
         v
-Front camera
+Platform Reticle Rendered (iOS Face-Scan UX / Android Material Motion)
         |
         v
-3–5 second countdown
+Client-Side Face Detection Starts (~14 FPS)
         |
         v
-Capture
+Face Quality Gate: Single Face + Centered + 12-85% Scale + Lighting (35-245)
         |
         v
-Quality validation
+Face Stability Buffer (3 Consecutive Valid Frames)
         |
         v
-Private storage
+3-Second Auto Countdown (Instant Cancellation & Reset if Face Leaves Oval)
+        |
+        v
+Automatic Shutterless Capture (Web Audio Click + White Screen Flash)
+        |
+        v
+Client Image Quality Check (< 5MB, Capped at 1080px JPEG)
+        |
+        v
+Secure Upload: POST /api/v1/attendance/records/{id}/selfie
+        |
+        v
+Private Storage Archived (Selfie Status: ACCEPTED)
 ```
 
-The user must be clearly informed that a selfie is being collected.
-
-Do not silently capture biometric data.
-
----
-
-# 24. SELFIE QUALITY
-
-Basic validation:
-
-- Valid image
-- Supported format
-- Reasonable file size
-- Minimum resolution
-- Exactly one face
-- Face visible
-- Basic blur check
-- Basic brightness check
-
-Do not build the future face-verification system into MVP just because face detection is being used for image-quality validation.
+The user must be clearly informed that a selfie is being collected for verification.
+The UI must NEVER claim to be Apple's official Face ID or access private platform APIs.
 
 ---
 
-# 25. SELFIE FAILURE
+# 24. SELFIE QUALITY GATE & REAL-TIME VALIDATION
 
-If selfie capture fails:
+Before initiating countdown:
+- **Single Face Validation**: Exactly 1 face must be present. Multiple faces trigger: `"Multiple faces visible. Ensure only your face is in frame."`
+- **Oval Centering**: Face center must lie within normalized distance $\le 0.24$ of the oval center.
+- **Scale Boundaries**: Bounding box area ratio must be between $12\%$ and $85\%$ of the viewport.
+- **Lighting & Sharpness**: Average luminance must be between 35 and 245 (Rec. 601), and Laplacian variance must indicate an unblurred frame.
+- **Stability Buffer**: Requires 3 consecutive valid frames before transitioning from `FACE_DETECTING` to `FACE_DETECTED` and starting the countdown.
+- **Continuous Tracking**: During countdown 3 → 2 → 1, face tracking remains active. If the student turns away or moves out of the oval, countdown is immediately cancelled and resets to searching.
 
-Attendance remains valid.
+---
 
-Do not delete or reverse a successfully accepted attendance record merely because selfie upload failed.
+# 25. SELFIE FAILURE DECOUPLING & RETRY
 
-Record `selfie_status` appropriately.
+If selfie capture fails or is skipped:
+- **Core Attendance Invariant**: The attendance record **remains PRESENT**. A missing or failed selfie never invalidates authorized attendance.
+- **Controlled Retry**: "Retry Front Camera" re-opens the front camera without forcing the student to scan the QR code again.
+- **Safe Skip**: If camera is unavailable or permission permanently blocked, student can skip without losing their present status (`selfie_status = FAILED` or `SKIPPED`).
+- **HTTP Compression**: Outgoing HTTP responses negotiate compression via standard Starlette GZipMiddleware (`Accept-Encoding: gzip`). Unsupported encodings (like `zstd` on iOS Safari) are never forced.
 
 ---
 
 # 26. SELFIE STORAGE
+
 
 Raw selfies must be stored in private object storage.
 

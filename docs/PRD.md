@@ -137,3 +137,37 @@ Monitor Attendance
   ↓
 End Session
 ```
+
+## Student
+
+```text
+Login / Launch
+  ↓
+Open Attendance (Web/PWA, Android APK, Native Camera URL, or Paste-and-Go)
+  ↓
+Scan Rotating QR / Submit Token
+  ↓
+Backend Validates Session, Device Cryptographic Proof, GPS & Geofence
+  ↓
+Attendance Marked PRESENT (Authoritative Decision)
+  ↓
+Front Camera Automatically Opens (350ms Hardware Cooldown)
+  ↓
+Platform-Adaptive Oval Reticle (iOS Face-Scan UX / Android Material Motion)
+  ↓
+Client-Side Face Detection Starts
+  ↓
+Quality Gate: Exactly 1 face, centered, proper size, good lighting
+  ↓
+Face Stability Buffer Confirmed (3 consecutive frames)
+  ↓
+3-Second Auto Countdown (immediate cancellation if face leaves frame)
+  ↓
+Automatic Shutterless Capture at 0
+  ↓
+Image Quality Validation & Resizing (max 1080px, <5MB)
+  ↓
+Secure Upload to /api/v1/attendance/records/{id}/selfie
+  ↓
+Confirmation Displayed (Attendance remains PRESENT even if selfie fails/skipped)
+```

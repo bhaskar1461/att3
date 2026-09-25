@@ -368,30 +368,37 @@ Fallback must still require:
 # 14. Phase 9 — Selfie Collection
 
 ### User Experience
-- [x] Attendance success shown first
+- [x] Attendance success shown first (QR-first flow authoritative)
 - [x] Selfie request clearly explained
-- [x] Front camera requested
-- [x] Countdown implemented
-- [x] 3–5 second countdown
-- [x] Face positioning guidance shown
-- [x] Lighting guidance shown
-- [x] Capture confirmation shown
+- [x] Front camera requested with 350ms hardware sensor cooldown (prevents HAL contention)
+- [x] Deterministic 15-state machine implemented (`CAMERA_INITIALIZING` to `COMPLETED`)
+- [x] Platform-adaptive oval reticle: Apple-inspired face-scanning UX on iOS; Material 3 motion on Android
+- [x] Client-side face detection engine (`window.FaceDetector` + universal skin chrominance fallback)
+- [x] Face quality gate enforced: single face, oval centered, size (12-85%), luminance (35-245), blur
+- [x] Multiple faces detection alert ("Multiple faces visible. Ensure only your face is in frame")
+- [x] Face stability buffer requires 3 consecutive valid frames before countdown
+- [x] 3-second animated countdown
+- [x] Disappearance cancels countdown immediately and resets to searching
+- [x] Automatic shutterless capture at countdown 0
+- [x] Web Audio click sound + white screen flash visual feedback
+- [x] Student identity badge & class context displayed
 
-### Quality
-- [x] Valid image checked
-- [x] Supported format checked
-- [x] Maximum file size enforced
-- [x] Minimum resolution enforced
-- [x] Exactly one face preferred/required according to policy
-- [x] Face visibility checked
-- [x] Basic blur check
-- [x] Basic brightness check
+### Quality & Storage
+- [x] Valid JPEG image checked and mirrored for natural orientation
+- [x] Canvas rasterization capped at max 1080px to preserve facial details without bandwidth bloat
+- [x] Supported format checked (image/jpeg)
+- [x] Maximum file size enforced (< 5MB)
+- [x] Upload payload sent as clean single file (`file`)
+- [x] Private object storage keys organized by student: `data/selfies/{ROLL}_{NAME}/...`
+- [x] HTTP compression negotiated dynamically (`Accept-Encoding: gzip`, never forcing zstd)
 
-### Failure
-- [x] Selfie failure does not invalidate accepted attendance
-- [x] Retry available where appropriate
-- [x] User can continue without successful selfie if policy allows
-- [x] Failure recorded accurately
+### Failure & Decoupled Security
+- [x] Selfie failure does not invalidate accepted attendance (Attendance remains `PRESENT`)
+- [x] Controlled retry available ("Retry Front Camera" re-opens lens without re-scanning QR)
+- [x] User can continue / skip photo verification without losing `PRESENT` status
+- [x] Skip endpoint `/records/{id}/selfie-skip` updates `selfie_status = FAILED/SKIPPED`
+- [x] Comprehensive automated test suite passing 100% (`test_selfie_pipeline.py`)
+
 
 ---
 

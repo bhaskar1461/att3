@@ -1001,6 +1001,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Standard HTTP Content-Encoding negotiation (only compresses if client requests in Accept-Encoding; never forces unsupported encodings)
+from starlette.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
 # Include Routers with defensive safeguards
 for r_module, name in [
     (auth.router, "Auth"),

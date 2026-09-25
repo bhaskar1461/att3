@@ -831,18 +831,28 @@ Use a server-generated identifier:
 
 ---
 
-# 44. Selfie Failure Behavior
+# 44. Selfie Failure Behavior & Architectural Security Boundaries
 
-Selfie failure must not erase valid attendance.
+### 44.1 Decoupled Authorization Invariant
+The core security equation for attendance is:
+$$\text{Attendance (PRESENT)} = \text{QR Signature} + \text{Student Authentication} + \text{Cryptographic Device Proof} + \text{GPS Geofence} + \text{Deduplication}$$
 
-State:
+The selfie is a strictly post-attendance evidence and dataset collection step.
+**Therefore, attendance status is decoupled from selfie outcome:**
+- Successful Attendance + Successful Selfie $\rightarrow$ `Attendance = PRESENT`, `selfie_status = ACCEPTED`
+- Successful Attendance + Failed / Skipped Selfie $\rightarrow$ `Attendance = PRESENT`, `selfie_status = FAILED` or `SKIPPED`
 
-- `Attendance = PRESENT`
-- `Selfie = FAILED`
+Under **NO CIRCUMSTANCES** does a camera error, permission denial, or selfie upload failure revert or revoke a student's `PRESENT` status.
 
-This separation prevents biometric collection from becoming a hidden prerequisite for attendance.
+### 44.2 Security Boundary: Face Detection vs. Identity Verification
+- **Current Phase Boundary**: Client-side face detection is solely an automated framing and quality gate ("Is there exactly one usable, centered face in front of the lens?").
+- **Explicit Non-Claim**: The face detector does NOT assert or verify identity ("This is student X").
+- **Anti-Denial Boundary**: Face detection cannot reject or invalidate legitimate attendance.
 
----
+### 44.3 Transport & Compression Security
+- **No TLS Compression**: In accordance with RFC 7540/RFC 8446, TLS-level compression is strictly disabled to prevent CRIME/BREACH side-channel attacks.
+- **Client-Negotiated HTTP Content-Encoding**: Outgoing HTTP compression uses standard Starlette GZipMiddleware only when explicitly advertised in client `Accept-Encoding: gzip`. Unsupported encodings (like `zstd` on iOS Safari) are never forced, preventing decompression aborts. Live camera frame capture and streaming pipelines are kept completely decoupled from network compression layers.
+
 
 # 45. Biometric Data Protection
 

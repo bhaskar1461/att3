@@ -1,20 +1,47 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { 
-  Camera, 
-  CheckCircle2, 
-  AlertCircle, 
-  RefreshCw, 
-  X, 
-  ShieldCheck, 
-  Sparkles, 
-  Zap, 
-  Check, 
+import {
+  Camera,
+  CheckCircle2,
+  AlertCircle,
+  RefreshCw,
+  X,
+  ShieldCheck,
+  Sparkles,
+  Zap,
+  Check,
   RotateCcw,
-  Layers,
-  ChevronRight
+  ChevronRight,
+  Eye,
+  Users,
+  Sun,
+  Maximize2
 } from 'lucide-react';
 import { apiRequest } from '../services/api';
 import { getDeviceHeaders } from '../services/deviceCredential';
+import {
+  detectFaceInVideo,
+  FaceDetectionResult,
+  FaceStabilityBuffer,
+  OvalBounds
+} from '../utils/faceDetector';
+
+export type SelfieState =
+  | 'IDLE'
+  | 'CAMERA_INITIALIZING'
+  | 'CAMERA_PERMISSION_REQUESTING'
+  | 'CAMERA_PERMISSION_DENIED'
+  | 'CAMERA_PERMISSION_PERMANENTLY_DENIED'
+  | 'CAMERA_READY'
+  | 'FACE_DETECTING'
+  | 'FACE_NOT_DETECTED'
+  | 'FACE_DETECTED'
+  | 'COUNTDOWN'
+  | 'CAPTURING'
+  | 'IMAGE_VALIDATING'
+  | 'UPLOAD_PENDING'
+  | 'UPLOAD_SUCCESS'
+  | 'UPLOAD_FAILED'
+  | 'COMPLETED';
 
 interface PostAttendanceSelfieModalProps {
   attendanceId: number;
@@ -25,10 +52,22 @@ interface PostAttendanceSelfieModalProps {
   onSkip?: () => void;
 }
 
-type CaptureStage = 'INITIALIZING' | 'COUNTDOWN' | 'BURST_CAPTURING' | 'UPLOADING' | 'SUCCESS' | 'ERROR';
+// Normalized oval boundaries for face alignment
+const OVAL_BOUNDS: OvalBounds = {
+  normCenterX: 0.5,
+  normCenterY: 0.48,
+  normWidth: 0.52,
+  normHeight: 0.68,
+};
 
-const TOTAL_BURST_FRAMES = 3;
-const COUNTDOWN_SECONDS = 3;
+// Platform detection for platform-adaptive visual polish
+const isIOS =
+  typeof navigator !== 'undefined' &&
+  (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
+
+const isAndroid =
+  typeof navigator !== 'undefined' && /Android/.test(navigator.userAgent);
 
 export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps> = ({
   attendanceId,
@@ -36,30 +75,45 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
   studentName,
   subjectName,
   onComplete,
-  onSkip
+  onSkip,
 }) => {
+  // Authoritative State Machine
+  const [selfieState, setSelfieState] = useState<SelfieState>('CAMERA_INITIALIZING');
+  const selfieStateRef = useRef<SelfieState>('CAMERA_INITIALIZING');
+  selfieStateRef.current = selfieState;
+
   const [stream, setStream] = useState<MediaStream | null>(null);
-  const [cameraError, setCameraError] = useState<string | null>(null);
-  const [captureStage, setCaptureStage] = useState<CaptureStage>('INITIALIZING');
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [guidanceMessage, setGuidanceMessage] = useState<string>('Initializing front camera…');
   
-  // Timer ring and countdown
-  const [countdownRemaining, setCountdownRemaining] = useState<number>(COUNTDOWN_SECONDS);
-  const [ringProgress, setRingProgress] = useState<number>(0); // 0 to 1
-  
-  // Multi-frame captures
-  const [capturedFrames, setCapturedFrames] = useState<string[]>([]);
-  const [currentFrameIndex, setCurrentFrameIndex] = useState<number>(0);
+  // Countdown & Visual Indicators
+  const [countdownRemaining, setCountdownRemaining] = useState<number>(3);
   const [isFlashing, setIsFlashing] = useState<boolean>(false);
   const [isSkipping, setIsSkipping] = useState<boolean>(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [capturedPreview, setCapturedPreview] = useState<string | null>(null);
+  const [detectionMetrics, setDetectionMetrics] = useState<FaceDetectionResult | null>(null);
 
+  // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const countdownIntervalRef = useRef<any>(null);
-  const animationFrameRef = useRef<number | null>(null);
-  const isCapturingRef = useRef<boolean>(false);
+  const streamRef = useRef<MediaStream | null>(null);
+  const countdownTimerRef = useRef<any>(null);
+  const countdownStartTimeRef = useRef<number>(0);
+  const detectionLoopRef = useRef<number | null>(null);
+  const lastDetectionTimeRef = useRef<number>(0);
+  const isDestroyedRef = useRef<boolean>(false);
+  const stabilityBufferRef = useRef<FaceStabilityBuffer>(new FaceStabilityBuffer(3, 2));
 
-  // Play subtle shutter click via Web Audio API (cross-platform, zero dependencies)
+  // Cross-platform subtle haptic feedback
+  const triggerHaptic = useCallback((pattern: number | number[] = 15) => {
+    try {
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        navigator.vibrate(pattern);
+      }
+    } catch {}
+  }, []);
+
+  // Web Audio click sound (no external audio assets required)
   const playShutterSound = useCallback(() => {
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
@@ -68,129 +122,59 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
-      osc.frequency.setValueAtTime(880, ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(220, ctx.currentTime + 0.08);
-      gain.gain.setValueAtTime(0.25, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.08);
+      osc.frequency.setValueAtTime(920, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(180, ctx.currentTime + 0.09);
+      gain.gain.setValueAtTime(0.3, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.09);
       osc.connect(gain);
       gain.connect(ctx.destination);
       osc.start();
-      osc.stop(ctx.currentTime + 0.08);
+      osc.stop(ctx.currentTime + 0.09);
     } catch {}
   }, []);
 
-  // Stop active camera stream
+  // Safe camera track teardown
   const stopCamera = useCallback(() => {
-    if (stream) {
-      stream.getTracks().forEach(track => {
-        try { track.stop(); } catch {}
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {}
       });
-      setStream(null);
+      streamRef.current = null;
     }
-  }, [stream]);
-
-  // Capture single frame from user video to canvas
-  const grabFrame = useCallback((): string | null => {
-    if (!videoRef.current || !canvasRef.current) return null;
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const w = video.videoWidth || 640;
-    const h = video.videoHeight || 640;
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return null;
-
-    // Mirror image for user-facing camera
-    ctx.save();
-    ctx.translate(canvas.width, 0);
-    ctx.scale(-1, 1);
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    ctx.restore();
-
-    return canvas.toDataURL('image/jpeg', 0.88);
+    setStream(null);
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
   }, []);
 
-  // Start front selfie camera automatically
-  const startCamera = useCallback(async () => {
-    setCameraError(null);
-    setUploadError(null);
-    setCapturedFrames([]);
-    setCurrentFrameIndex(0);
-    setRingProgress(0);
-    setCountdownRemaining(COUNTDOWN_SECONDS);
-    setCaptureStage('INITIALIZING');
-    isCapturingRef.current = false;
-
-    try {
-      if (stream) {
-        stream.getTracks().forEach(t => t.stop());
-      }
-      const mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: 'user',
-          width: { ideal: 720 },
-          height: { ideal: 720 }
-        },
-        audio: false
-      });
-      setStream(mediaStream);
-      if (videoRef.current) {
-        videoRef.current.srcObject = mediaStream;
-        videoRef.current.onloadedmetadata = () => {
-          try {
-            videoRef.current?.play();
-          } catch {}
-          // Transition to COUNTDOWN after 600ms visual buffer
-          setTimeout(() => {
-            setCaptureStage('COUNTDOWN');
-          }, 600);
-        };
-      }
-    } catch (err: any) {
-      console.warn('[PostAttendanceSelfie] Front camera acquisition failed:', err);
-      setCameraError(
-        err.name === 'NotAllowedError'
-          ? 'Front camera permission denied. You can skip photo verification without losing your PRESENT status.'
-          : 'Front selfie camera unavailable on this device. You may safely skip.'
-      );
-      setCaptureStage('ERROR');
+  // Cancellation of countdown when face is lost
+  const cancelCountdown = useCallback((reason: string) => {
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
     }
-  }, [stream]);
+    setCountdownRemaining(3);
+    setSelfieState('FACE_NOT_DETECTED');
+    stabilityBufferRef.current.reset();
+    setGuidanceMessage(reason || 'Face moved. Position your face inside the oval');
+    triggerHaptic(isIOS ? [10, 40, 10] : [25, 30, 25]);
+  }, [triggerHaptic]);
 
-  // Initialize camera on mount and teardown on unmount
-  useEffect(() => {
-    startCamera();
-    return () => {
-      stopCamera();
-      if (countdownIntervalRef.current) clearInterval(countdownIntervalRef.current);
-      if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
-    };
-  }, []);
-
-  // Upload multi-frame burst to backend storage
-  const uploadBurstSelfies = useCallback(async (frames: string[]) => {
-    if (frames.length === 0) return;
-    setCaptureStage('UPLOADING');
+  // Upload selfie payload to backend
+  const uploadSelfie = useCallback(async (blob: Blob) => {
+    setSelfieState('UPLOAD_PENDING');
+    setGuidanceMessage('Saving verification photo…');
     stopCamera();
 
     try {
       const formData = new FormData();
       const cleanName = (studentName || 'student').trim().replace(/[^a-zA-Z0-9]/g, '_');
+      const filename = `${rollNumber}_${cleanName}_selfie.jpg`;
       
-      // Convert all frames to blobs and append
-      for (let i = 0; i < frames.length; i++) {
-        const frameRes = await fetch(frames[i]);
-        const blob = await frameRes.blob();
-        const filename = `${rollNumber}_${cleanName}_f${i + 1}.jpg`;
-        formData.append('files', blob, filename);
-        if (i === 0) {
-          // Backward compatibility for legacy single-file endpoint handlers
-          formData.append('file', blob, filename);
-        }
-      }
-
-      formData.append('total_frames', String(frames.length));
+      // Clean single file submission (avoids duplicate appending)
+      formData.append('file', blob, filename);
 
       const token = localStorage.getItem('token');
       const response = await fetch(`/api/v1/attendance/records/${attendanceId}/selfie`, {
@@ -205,95 +189,340 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
 
       if (!response.ok) {
         const errJson = await response.json().catch(() => ({}));
-        throw new Error(errJson.detail || 'Failed to archive burst photos to training storage');
+        throw new Error(errJson.detail || 'Failed to archive verification selfie');
       }
 
-      setCaptureStage('SUCCESS');
-      // Auto-complete after 1.8 seconds so student sees the success confirmation
+      setSelfieState('UPLOAD_SUCCESS');
+      setGuidanceMessage('Selfie submitted successfully ✓');
+      triggerHaptic(isIOS ? [20, 60, 20] : [35, 50, 35]);
+
+      // Graceful completion after brief confirmation
       setTimeout(() => {
-        onComplete();
-      }, 1800);
+        if (!isDestroyedRef.current) {
+          setSelfieState('COMPLETED');
+          onComplete();
+        }
+      }, 1500);
     } catch (err: any) {
       console.error('[Selfie Upload Error]:', err);
-      setUploadError(err.message || 'Network error during upload');
-      setCaptureStage('ERROR');
+      setSelfieState('UPLOAD_FAILED');
+      setErrorMessage(err.message || 'Network error while uploading photo.');
+      setGuidanceMessage('Upload failed. Your attendance remains PRESENT.');
     }
-  }, [attendanceId, rollNumber, studentName, onComplete, stopCamera]);
+  }, [attendanceId, rollNumber, studentName, onComplete, stopCamera, triggerHaptic]);
 
-  // Execute rapid 3-frame burst capture sequence
-  const startBurstCapture = useCallback(async () => {
-    if (isCapturingRef.current) return;
-    isCapturingRef.current = true;
-    setCaptureStage('BURST_CAPTURING');
+  // Execute snapshot capture from front camera
+  const executeCapture = useCallback(async () => {
+    if (selfieStateRef.current === 'CAPTURING' || selfieStateRef.current === 'IMAGE_VALIDATING') return;
+    
+    setSelfieState('CAPTURING');
+    setGuidanceMessage('Capturing photo…');
+    setIsFlashing(true);
+    playShutterSound();
+    triggerHaptic(isIOS ? [40, 30, 40] : [60]);
 
-    const frames: string[] = [];
-    const BURST_INTERVAL_MS = 380; // 380ms between frames provides natural micro-variation for dataset
-
-    for (let i = 0; i < TOTAL_BURST_FRAMES; i++) {
-      setCurrentFrameIndex(i + 1);
-      
-      // Flash effect & shutter click
-      setIsFlashing(true);
-      playShutterSound();
-      
-      const frameData = grabFrame();
-      if (frameData) {
-        frames.push(frameData);
-        setCapturedFrames([...frames]);
-      }
-
-      await new Promise(r => setTimeout(r, 120));
+    setTimeout(() => {
       setIsFlashing(false);
+    }, 140);
 
-      if (i < TOTAL_BURST_FRAMES - 1) {
-        await new Promise(r => setTimeout(r, BURST_INTERVAL_MS - 120));
+    const video = videoRef.current;
+    if (!video || video.videoWidth === 0 || video.videoHeight === 0) {
+      setSelfieState('UPLOAD_FAILED');
+      setErrorMessage('Video frame was not readable at capture time.');
+      return;
+    }
+
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+
+    // Preserve high facial fidelity capped at 1080 to prevent massive upload payloads
+    const maxDim = 1080;
+    let targetW = vw;
+    let targetH = vh;
+    if (targetW > maxDim || targetH > maxDim) {
+      if (targetW > targetH) {
+        targetH = Math.round((targetH * maxDim) / targetW);
+        targetW = maxDim;
+      } else {
+        targetW = Math.round((targetW * maxDim) / targetH);
+        targetH = maxDim;
       }
     }
 
-    // Complete burst and proceed to upload
-    await uploadBurstSelfies(frames);
-  }, [grabFrame, playShutterSound, uploadBurstSelfies]);
+    const canvas = canvasRef.current || document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      setSelfieState('UPLOAD_FAILED');
+      setErrorMessage('Failed to initialize canvas drawing context.');
+      return;
+    }
 
-  // Countdown timer logic with smooth radial ring progress
-  useEffect(() => {
-    if (captureStage !== 'COUNTDOWN') return;
+    // Mirror user-facing camera for natural stored image
+    ctx.save();
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    ctx.restore();
 
-    const startTime = Date.now();
-    const durationMs = COUNTDOWN_SECONDS * 1000;
+    setSelfieState('IMAGE_VALIDATING');
+    setGuidanceMessage('Checking photo quality…');
 
-    const tick = () => {
-      const elapsed = Date.now() - startTime;
-      const progress = Math.min(1, elapsed / durationMs);
-      setRingProgress(progress);
+    canvas.toBlob(
+      async (blob) => {
+        if (!blob || blob.size === 0) {
+          setSelfieState('UPLOAD_FAILED');
+          setErrorMessage('Captured image frame was empty.');
+          return;
+        }
 
-      const remaining = Math.max(1, Math.ceil((durationMs - elapsed) / 1000));
-      setCountdownRemaining(remaining);
+        if (blob.size > 5 * 1024 * 1024) {
+          setSelfieState('UPLOAD_FAILED');
+          setErrorMessage('Captured image exceeded 5MB size limit.');
+          return;
+        }
 
-      if (elapsed < durationMs) {
-        animationFrameRef.current = requestAnimationFrame(tick);
+        const previewUrl = URL.createObjectURL(blob);
+        setCapturedPreview(previewUrl);
+
+        // Upload to backend
+        await uploadSelfie(blob);
+      },
+      'image/jpeg',
+      0.88
+    );
+  }, [playShutterSound, triggerHaptic, uploadSelfie]);
+
+  // Start 3-second auto countdown when stable face is locked
+  const startCountdown = useCallback(() => {
+    if (selfieStateRef.current === 'COUNTDOWN' || selfieStateRef.current === 'CAPTURING') return;
+    
+    setSelfieState('COUNTDOWN');
+    setCountdownRemaining(3);
+    countdownStartTimeRef.current = Date.now();
+    triggerHaptic(isIOS ? 20 : 30);
+
+    if (countdownTimerRef.current) clearInterval(countdownTimerRef.current);
+
+    countdownTimerRef.current = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - countdownStartTimeRef.current) / 1000);
+      const remaining = 3 - elapsedSec;
+
+      if (remaining > 0) {
+        setCountdownRemaining(remaining);
+        triggerHaptic(10);
       } else {
-        setRingProgress(1);
-        startBurstCapture();
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+        setCountdownRemaining(0);
+        executeCapture();
       }
+    }, 200);
+  }, [triggerHaptic, executeCapture]);
+
+  // Start front camera with 350ms sensor cooldown and defensive listener binding
+  const startCamera = useCallback(async () => {
+    setErrorMessage(null);
+    setCapturedPreview(null);
+    setCountdownRemaining(3);
+    setSelfieState('CAMERA_INITIALIZING');
+    setGuidanceMessage('Opening front camera…');
+    stabilityBufferRef.current.reset();
+
+    // MANDATORY SENSOR COOLDOWN:
+    // Prevents NotReadableError contention on Android Camera2 HAL (Realme, Samsung, Xiaomi)
+    // and iOS AVFoundation when transitioning from rear QR scanner.
+    await new Promise((r) => setTimeout(r, 350));
+    if (isDestroyedRef.current) return;
+
+    try {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {}
+        });
+        streamRef.current = null;
+      }
+
+      setSelfieState('CAMERA_PERMISSION_REQUESTING');
+
+      let mediaStream: MediaStream;
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: 'user' },
+            width: { ideal: 1080 },
+            height: { ideal: 1080 },
+          },
+          audio: false,
+        });
+      } catch (idealErr) {
+        // Fallback for devices rejecting exact resolution or ideal constraints
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user' },
+          audio: false,
+        });
+      }
+
+      if (isDestroyedRef.current) {
+        mediaStream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+
+      streamRef.current = mediaStream;
+      setStream(mediaStream);
+
+      const video = videoRef.current;
+      if (video) {
+        video.playsInline = true;
+        video.muted = true;
+        video.autoplay = true;
+
+        const onVideoActive = () => {
+          setSelfieState('CAMERA_READY');
+          setTimeout(() => {
+            if (!isDestroyedRef.current) {
+              setSelfieState('FACE_DETECTING');
+              setGuidanceMessage('Position your face inside the oval');
+            }
+          }, 300);
+        };
+
+        // Bind listener BEFORE assigning srcObject to eliminate metadata race condition
+        video.onloadedmetadata = () => {
+          video.play().then(onVideoActive).catch((playErr) => {
+            console.warn('[Selfie] Video play exception:', playErr);
+            onVideoActive();
+          });
+        };
+
+        video.srcObject = mediaStream;
+      }
+    } catch (err: any) {
+      console.warn('[Selfie Camera Acquisition Failed]:', err);
+      if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
+        setSelfieState('CAMERA_PERMISSION_DENIED');
+        setErrorMessage(
+          'Front camera permission was denied. You can allow camera access or safely skip without losing your PRESENT status.'
+        );
+      } else {
+        setSelfieState('CAMERA_PERMISSION_DENIED');
+        setErrorMessage(
+          'Front camera unavailable on this device. You may safely skip without losing your attendance.'
+        );
+      }
+      setGuidanceMessage('Camera unavailable');
+    }
+  }, []);
+
+  // Continuous face detection loop throttled to ~14 FPS (70ms)
+  useEffect(() => {
+    const runDetection = async (timestamp: number) => {
+      if (isDestroyedRef.current) return;
+
+      const currentState = selfieStateRef.current;
+      const isDetectionActive =
+        currentState === 'FACE_DETECTING' ||
+        currentState === 'FACE_NOT_DETECTED' ||
+        currentState === 'FACE_DETECTED' ||
+        currentState === 'COUNTDOWN';
+
+      if (
+        isDetectionActive &&
+        videoRef.current &&
+        videoRef.current.readyState >= 2 &&
+        timestamp - lastDetectionTimeRef.current >= 70
+      ) {
+        lastDetectionTimeRef.current = timestamp;
+
+        try {
+          const res = await detectFaceInVideo(videoRef.current, OVAL_BOUNDS);
+          setDetectionMetrics(res);
+
+          if (res.faceCount > 1) {
+            // Quality gate: Multiple faces
+            stabilityBufferRef.current.reset();
+            if (currentState === 'COUNTDOWN') {
+              cancelCountdown('Multiple faces visible');
+            } else {
+              setSelfieState('FACE_NOT_DETECTED');
+            }
+            setGuidanceMessage('Multiple faces visible. Ensure only your face is in frame.');
+          } else if (!res.hasFace) {
+            // Quality gate: No face
+            stabilityBufferRef.current.reset();
+            if (currentState === 'COUNTDOWN') {
+              cancelCountdown('Face moved out of frame');
+            } else {
+              setSelfieState('FACE_NOT_DETECTED');
+            }
+            setGuidanceMessage('Position your face inside the oval');
+          } else if (!res.isValid) {
+            // Face present but fails centering, size, lighting, or blur criteria
+            const { wasCancelled } = stabilityBufferRef.current.registerFrame(false);
+            if (wasCancelled && currentState === 'COUNTDOWN') {
+              cancelCountdown(res.message);
+            }
+            setGuidanceMessage(res.message);
+          } else {
+            // All quality criteria passed!
+            const { isStable } = stabilityBufferRef.current.registerFrame(true);
+            setGuidanceMessage('Face detected. Hold still…');
+
+            if (isStable) {
+              if (currentState === 'FACE_DETECTING' || currentState === 'FACE_NOT_DETECTED') {
+                setSelfieState('FACE_DETECTED');
+                startCountdown();
+              }
+            }
+          }
+        } catch (cvErr) {
+          console.warn('[Face Detection Exception]:', cvErr);
+        }
+      }
+
+      detectionLoopRef.current = requestAnimationFrame(runDetection);
     };
 
-    animationFrameRef.current = requestAnimationFrame(tick);
+    detectionLoopRef.current = requestAnimationFrame(runDetection);
 
     return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
+      if (detectionLoopRef.current) {
+        cancelAnimationFrame(detectionLoopRef.current);
+        detectionLoopRef.current = null;
       }
     };
-  }, [captureStage, startBurstCapture]);
+  }, [cancelCountdown, startCountdown]);
 
-  // Handle user or camera error skip (Strict Rule: NEVER revokes PRESENT status)
+  // Mount initialization & unmount teardown
+  useEffect(() => {
+    isDestroyedRef.current = false;
+    startCamera();
+
+    return () => {
+      isDestroyedRef.current = true;
+      stopCamera();
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+        countdownTimerRef.current = null;
+      }
+      if (detectionLoopRef.current) {
+        cancelAnimationFrame(detectionLoopRef.current);
+        detectionLoopRef.current = null;
+      }
+    };
+  }, [startCamera, stopCamera]);
+
+  // Decoupled skip handler: Attendance status NEVER reverts from PRESENT
   const handleSkip = async (reason: string = 'USER_SKIPPED') => {
     setIsSkipping(true);
     stopCamera();
     try {
       await apiRequest(`/attendance/records/${attendanceId}/selfie-skip`, {
         method: 'POST',
-        body: JSON.stringify({ reason })
+        body: JSON.stringify({ reason }),
       });
     } catch (err) {
       console.warn('[Selfie Skip Notice]:', err);
@@ -307,42 +536,45 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
     }
   };
 
-  // Radial Timer Ring SVG Calculations
-  const RADIUS = 46;
-  const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
-  const strokeDashoffset = CIRCUMFERENCE * (1 - ringProgress);
+  // Determine current oval border state and colors
+  const isLocked = selfieState === 'FACE_DETECTED' || selfieState === 'COUNTDOWN';
+  const isMultipleFaces = detectionMetrics && detectionMetrics.faceCount > 1;
+  const isErrorState =
+    selfieState === 'CAMERA_PERMISSION_DENIED' ||
+    selfieState === 'CAMERA_PERMISSION_PERMANENTLY_DENIED' ||
+    selfieState === 'UPLOAD_FAILED';
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 select-none animate-in fade-in duration-200">
-      <div className="bg-[#0b1329] border border-white/10 rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl p-5 text-center space-y-4 font-sans text-white relative">
+    <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-lg flex items-center justify-center p-3 select-none animate-in fade-in duration-200">
+      <div className="bg-[#080d1a] border border-white/10 rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl p-5 text-center font-sans text-white relative">
         
-        {/* Shutter White Flash Overlay */}
-        <div 
+        {/* Shutter White Flash Effect */}
+        <div
           className={`absolute inset-0 bg-white pointer-events-none transition-opacity duration-150 z-40 ${
-            isFlashing ? 'opacity-90' : 'opacity-0'
-          }`} 
+            isFlashing ? 'opacity-95' : 'opacity-0'
+          }`}
         />
 
-        {/* Top Header Bar */}
+        {/* ── Top Header Bar ── */}
         <div className="flex items-center justify-between border-b border-white/10 pb-3">
-          <div className="flex items-center gap-2 text-left">
-            <div className="w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex items-center justify-center">
+          <div className="flex items-center gap-2.5 text-left">
+            <div className="w-8 h-8 rounded-full bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 flex items-center justify-center">
               <CheckCircle2 className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-1.5">
                 <h3 className="font-bold text-sm text-white">Attendance Confirmed</h3>
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
                   PRESENT
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 flex items-center gap-1">
                 <Sparkles className="w-3 h-3 text-cyan-400" />
-                AI Face Model Dataset Enrollment
+                <span>Verification Selfie Capture</span>
               </p>
             </div>
           </div>
-          
+
           <button
             type="button"
             onClick={() => handleSkip('USER_CLOSED')}
@@ -353,43 +585,50 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
           </button>
         </div>
 
-        {/* Student Credential Badge */}
-        <div className="bg-white/5 border border-white/10 rounded-2xl p-2.5 flex items-center justify-between text-xs px-3">
+        {/* ── Student Credential Badge ── */}
+        <div className="mt-3 bg-white/5 border border-white/10 rounded-2xl p-2.5 flex items-center justify-between text-xs px-3">
           <div className="text-left">
-            <span className="text-[10px] uppercase font-bold tracking-wider text-cyan-400 block">Student Identity</span>
+            <span className="text-[9px] uppercase font-bold tracking-wider text-cyan-400 block">
+              Student ID
+            </span>
             <span className="font-mono font-bold text-slate-100">{rollNumber}</span>
-            {studentName && <span className="text-slate-300 ml-1.5 font-medium">({studentName})</span>}
+            {studentName && (
+              <span className="text-slate-300 ml-1.5 font-medium truncate max-w-[110px] inline-block align-bottom">
+                ({studentName})
+              </span>
+            )}
           </div>
           {subjectName && (
             <div className="text-right">
-              <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 block">Class</span>
-              <span className="font-semibold text-slate-200 truncate max-w-[120px] inline-block">{subjectName}</span>
+              <span className="text-[9px] uppercase font-bold tracking-wider text-slate-400 block">
+                Class
+              </span>
+              <span className="font-semibold text-slate-200 truncate max-w-[110px] inline-block">
+                {subjectName}
+              </span>
             </div>
           )}
         </div>
 
         {/* ── Main Viewport Area ── */}
-        {captureStage === 'SUCCESS' ? (
+        {selfieState === 'UPLOAD_SUCCESS' || selfieState === 'COMPLETED' ? (
+          /* Success Screen */
           <div className="py-6 space-y-3 animate-in zoom-in-95 duration-300">
-            <div className="w-20 h-20 bg-emerald-500/20 text-emerald-400 border-2 border-emerald-500/40 rounded-full flex items-center justify-center mx-auto shadow-lg shadow-emerald-500/20">
+            <div className="w-20 h-20 bg-emerald-500/20 text-emerald-400 border-2 border-emerald-500/50 rounded-full flex items-center justify-center mx-auto shadow-lg shadow-emerald-500/20">
               <ShieldCheck className="w-12 h-12 animate-bounce" />
             </div>
-            <h4 className="font-black text-lg text-white">Dataset Photos Archived!</h4>
+            <h4 className="font-black text-lg text-white">Selfie Verified & Archived!</h4>
             <p className="text-xs text-slate-300 max-w-xs mx-auto leading-relaxed">
-              {TOTAL_BURST_FRAMES} biometric burst frames saved under roll number <strong className="text-emerald-400">{rollNumber}</strong> for model training.
+              Biometric verification photo saved for roll number <strong className="text-emerald-400">{rollNumber}</strong>.
             </p>
-            
-            {/* Captured Frames Thumbnail Row */}
-            <div className="flex justify-center gap-2 pt-2">
-              {capturedFrames.map((img, idx) => (
-                <div key={idx} className="relative w-16 h-16 rounded-xl overflow-hidden border border-emerald-400/60 shadow-md">
-                  <img src={img} alt={`Burst ${idx + 1}`} className="w-full h-full object-cover" />
-                  <span className="absolute bottom-0 right-0 px-1 bg-black/70 text-[9px] font-bold text-emerald-300">
-                    f{idx + 1}
-                  </span>
+
+            {capturedPreview && (
+              <div className="pt-1 flex justify-center">
+                <div className="w-20 h-24 rounded-2xl overflow-hidden border-2 border-emerald-400/80 shadow-md">
+                  <img src={capturedPreview} alt="Selfie Preview" className="w-full h-full object-cover" />
                 </div>
-              ))}
-            </div>
+              </div>
+            )}
 
             <div className="pt-2">
               <button
@@ -402,19 +641,20 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
               </button>
             </div>
           </div>
-        ) : cameraError || captureStage === 'ERROR' ? (
-          /* Error / Camera Fallback Screen */
-          <div className="py-4 space-y-3">
+        ) : isErrorState ? (
+          /* Error & Permission Denial Screen */
+          <div className="py-5 space-y-3">
             <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-2xl text-center space-y-2 text-rose-200">
               <AlertCircle className="w-8 h-8 mx-auto text-rose-400" />
-              <p className="text-xs leading-relaxed">{cameraError || uploadError || 'Unable to access camera.'}</p>
+              <h5 className="font-bold text-xs text-rose-300">Camera Notice</h5>
+              <p className="text-xs leading-relaxed">{errorMessage || 'Unable to access camera.'}</p>
             </div>
 
             <div className="space-y-2 pt-2">
               <button
                 type="button"
                 onClick={() => startCamera()}
-                className="w-full py-3 bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs rounded-2xl shadow transition flex items-center justify-center gap-2 cursor-pointer"
+                className="w-full py-3 bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs rounded-xl shadow transition flex items-center justify-center gap-2 cursor-pointer"
               >
                 <RefreshCw className="w-4 h-4" />
                 <span>Retry Front Camera</span>
@@ -422,130 +662,133 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
               <button
                 type="button"
                 disabled={isSkipping}
-                onClick={() => handleSkip('CAMERA_UNAVAILABLE')}
+                onClick={() => handleSkip('CAMERA_PERMISSION_DENIED')}
                 className="w-full py-2.5 bg-white/10 hover:bg-white/15 text-slate-300 font-semibold text-xs rounded-xl transition cursor-pointer"
               >
-                {isSkipping ? 'Finalizing Attendance…' : 'Skip Photo Step (Attendance Remains PRESENT)'}
+                {isSkipping ? 'Finalizing Attendance…' : 'Skip Photo (Attendance Remains PRESENT)'}
               </button>
             </div>
           </div>
         ) : (
-          /* ── Camera Viewfinder with Circular Animated Timer Ring ── */
-          <div className="space-y-3">
-            <div className="relative w-64 h-64 mx-auto flex items-center justify-center">
+          /* ── Camera Viewfinder with Oval Face Reticle ── */
+          <div className="space-y-3 mt-3">
+            
+            <div className="relative w-64 h-80 mx-auto flex items-center justify-center overflow-hidden rounded-3xl bg-slate-950 border border-white/10 shadow-inner">
               
-              {/* Circular SVG Timer Ring */}
-              <svg className="absolute inset-0 w-full h-full -rotate-90 pointer-events-none z-20" viewBox="0 0 100 100">
-                <defs>
-                  <linearGradient id="timerRingGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                    <stop offset="0%" stopColor="#06b6d4" />
-                    <stop offset="50%" stopColor="#10b981" />
-                    <stop offset="100%" stopColor="#3b82f6" />
-                  </linearGradient>
-                </defs>
-                {/* Background Ring Track */}
-                <circle
-                  cx="50"
-                  cy="50"
-                  r={RADIUS}
-                  fill="none"
-                  stroke="rgba(255, 255, 255, 0.12)"
-                  strokeWidth="4.5"
-                />
-                {/* Active Animated Countdown Ring */}
-                <circle
-                  cx="50"
-                  cy="50"
-                  r={RADIUS}
-                  fill="none"
-                  stroke="url(#timerRingGradient)"
-                  strokeWidth="4.5"
-                  strokeLinecap="round"
-                  strokeDasharray={CIRCUMFERENCE}
-                  strokeDashoffset={strokeDashoffset}
-                  className="transition-all duration-75"
-                />
-              </svg>
+              {/* Live Front Camera Video */}
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="absolute inset-0 w-full h-full object-cover -scale-x-100"
+              />
 
-              {/* Circular Video Camera Feed */}
-              <div className="w-[214px] h-[214px] rounded-full overflow-hidden bg-slate-950 border-2 border-white/20 shadow-inner flex items-center justify-center relative z-10">
-                <video
-                  ref={videoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover -scale-x-100"
-                />
+              {/* ── Platform-Adaptive Oval Reticle ── */}
+              <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center z-20">
+                
+                {/* Oval Mask Frame */}
+                <div
+                  className={`relative w-48 h-64 rounded-[100px] transition-all duration-300 ${
+                    isLocked
+                      ? isIOS
+                        ? 'border-4 border-emerald-400 shadow-[0_0_25px_rgba(52,211,153,0.6)]'
+                        : 'border-4 border-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.5)]'
+                      : isMultipleFaces
+                      ? 'border-4 border-rose-500 shadow-[0_0_20px_rgba(244,63,94,0.5)] animate-pulse'
+                      : isIOS
+                      ? 'border-2 border-cyan-400/80 shadow-[0_0_15px_rgba(6,182,212,0.3)]'
+                      : 'border-2 border-dashed border-cyan-400/70'
+                  }`}
+                >
+                  {/* iOS Style: Subtle Face-ID-inspired sweep beam across oval */}
+                  {isIOS && !isLocked && !isMultipleFaces && (
+                    <div className="absolute inset-x-0 h-1 bg-gradient-to-r from-transparent via-cyan-300 to-transparent blur-xs animate-[bounce_2.5s_infinite] opacity-75" />
+                  )}
 
-                {/* Biometric Face Guide Reticle */}
-                <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                  <div className="w-32 h-40 border-2 border-dashed border-cyan-400/40 rounded-[50px] animate-pulse" />
+                  {/* Android Style: Material pulsating radar ripple */}
+                  {isAndroid && !isLocked && (
+                    <div className="absolute inset-0 rounded-[100px] border border-cyan-400/30 animate-ping" />
+                  )}
+
+                  {/* Corner Accent Guides */}
+                  <div className="absolute -top-1 -left-1 w-4 h-4 border-t-2 border-l-2 border-white/60 rounded-tl-lg" />
+                  <div className="absolute -top-1 -right-1 w-4 h-4 border-t-2 border-r-2 border-white/60 rounded-tr-lg" />
+                  <div className="absolute -bottom-1 -left-1 w-4 h-4 border-b-2 border-l-2 border-white/60 rounded-bl-lg" />
+                  <div className="absolute -bottom-1 -right-1 w-4 h-4 border-b-2 border-r-2 border-white/60 rounded-br-lg" />
                 </div>
 
-                {/* Countdown Large Number Overlay */}
-                {captureStage === 'COUNTDOWN' && (
-                  <div className="absolute inset-0 bg-black/30 backdrop-blur-xs flex items-center justify-center">
-                    <span className="font-mono font-black text-6xl text-white drop-shadow-[0_4px_12px_rgba(0,0,0,0.8)] animate-ping">
-                      {countdownRemaining}
+                {/* Large 3-2-1 Countdown Animation Overlay */}
+                {selfieState === 'COUNTDOWN' && (
+                  <div className="absolute inset-0 bg-black/25 backdrop-blur-[1px] flex flex-col items-center justify-center z-30">
+                    <div className="w-20 h-20 rounded-full bg-emerald-500/20 border-2 border-emerald-400 flex items-center justify-center shadow-lg shadow-emerald-500/30">
+                      <span className="font-mono font-black text-5xl text-white drop-shadow-md animate-pulse">
+                        {countdownRemaining}
+                      </span>
+                    </div>
+                    <span className="mt-2 text-xs font-bold uppercase tracking-wider text-emerald-300 bg-black/60 px-3 py-1 rounded-full">
+                      Hold Still…
                     </span>
                   </div>
                 )}
 
-                {/* Burst Capturing Status Overlay */}
-                {captureStage === 'BURST_CAPTURING' && (
-                  <div className="absolute inset-0 bg-black/40 backdrop-blur-xs flex flex-col items-center justify-center space-y-1">
-                    <Zap className="w-8 h-8 text-amber-400 animate-bounce" />
+                {/* Capturing Status */}
+                {selfieState === 'CAPTURING' && (
+                  <div className="absolute inset-0 bg-black/40 flex flex-col items-center justify-center space-y-1 z-30">
+                    <Zap className="w-10 h-10 text-amber-400 animate-bounce" />
                     <span className="font-mono font-black text-sm tracking-wider text-amber-300">
-                      CAPTURING {currentFrameIndex}/{TOTAL_BURST_FRAMES}
+                      CAPTURING…
                     </span>
                   </div>
                 )}
 
-                {/* Uploading Status Overlay */}
-                {captureStage === 'UPLOADING' && (
-                  <div className="absolute inset-0 bg-black/60 backdrop-blur-xs flex flex-col items-center justify-center space-y-2">
+                {/* Uploading Status */}
+                {selfieState === 'UPLOAD_PENDING' && (
+                  <div className="absolute inset-0 bg-black/60 backdrop-blur-xs flex flex-col items-center justify-center space-y-2 z-30">
                     <RefreshCw className="w-8 h-8 text-cyan-400 animate-spin" />
-                    <span className="font-bold text-xs text-cyan-300">
-                      Saving to Training Storage…
-                    </span>
+                    <span className="font-bold text-xs text-cyan-300">Archiving Selfie…</span>
                   </div>
                 )}
+              </div>
+
+              {/* Status Pill Badge at Viewfinder Bottom */}
+              <div className="absolute bottom-3 inset-x-3 z-30 flex justify-center">
+                <div
+                  className={`px-3 py-1.5 rounded-full text-[11px] font-bold shadow-lg backdrop-blur-md transition-all flex items-center gap-1.5 ${
+                    isLocked
+                      ? 'bg-emerald-500/90 text-white'
+                      : isMultipleFaces
+                      ? 'bg-rose-600/90 text-white'
+                      : 'bg-black/75 text-slate-200 border border-white/20'
+                  }`}
+                >
+                  {isLocked ? (
+                    <Check className="w-3.5 h-3.5 text-white" />
+                  ) : isMultipleFaces ? (
+                    <Users className="w-3.5 h-3.5 text-white" />
+                  ) : (
+                    <Eye className="w-3.5 h-3.5 text-cyan-400" />
+                  )}
+                  <span>{guidanceMessage}</span>
+                </div>
               </div>
             </div>
 
-            {/* Hidden canvas for video frame extraction */}
+            {/* Hidden canvas for snapshot rasterization */}
             <canvas ref={canvasRef} className="hidden" />
 
-            {/* Frame Indicator Pill & Instructions */}
-            <div className="space-y-1.5 pt-1">
-              <div className="flex items-center justify-center gap-2">
-                {Array.from({ length: TOTAL_BURST_FRAMES }).map((_, i) => (
-                  <div
-                    key={i}
-                    className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-bold transition-all ${
-                      capturedFrames.length > i
-                        ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                        : i === currentFrameIndex - 1 && captureStage === 'BURST_CAPTURING'
-                        ? 'bg-amber-500/30 text-amber-300 border border-amber-500/50 animate-pulse'
-                        : 'bg-white/5 text-slate-500 border border-white/10'
-                    }`}
-                  >
-                    {capturedFrames.length > i ? (
-                      <Check className="w-3 h-3 text-emerald-400" />
-                    ) : (
-                      <Camera className="w-3 h-3" />
-                    )}
-                    <span>Frame {i + 1}</span>
-                  </div>
-                ))}
-              </div>
-
-              <p className="text-[11px] text-slate-400 leading-tight">
-                {captureStage === 'INITIALIZING' && 'Initializing front selfie camera…'}
-                {captureStage === 'COUNTDOWN' && 'Center your face inside the circle. Capturing automatically…'}
-                {captureStage === 'BURST_CAPTURING' && 'Hold still! Taking rapid burst frames…'}
-                {captureStage === 'UPLOADING' && 'Encoding frames and cataloging dataset records…'}
-              </p>
+            {/* Subtle Platform UX Indicator */}
+            <div className="flex items-center justify-between px-1 text-[11px] text-slate-400">
+              <span className="flex items-center gap-1">
+                {isIOS ? 'Face-Scan UX' : isAndroid ? 'Material Motion' : 'Auto Face Gate'}
+              </span>
+              <span className="font-mono text-[10px] text-slate-400">
+                {selfieState === 'COUNTDOWN'
+                  ? `Capture in ${countdownRemaining}s`
+                  : isLocked
+                  ? 'Face Locked'
+                  : 'Waiting for face'}
+              </span>
             </div>
 
             {/* Bottom Actions: Retake / Skip */}
@@ -554,10 +797,10 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
                 type="button"
                 onClick={() => startCamera()}
                 className="text-slate-400 hover:text-white flex items-center gap-1 transition cursor-pointer"
-                title="Restart countdown"
+                title="Reset Camera"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span>Restart Timer</span>
+                <span>Reset Camera</span>
               </button>
 
               <button
