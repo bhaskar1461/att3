@@ -834,6 +834,41 @@ def reset_student_pin(
     }
 
 
+@router.post("/reject/{roll_number}")
+def reject_onboarding_request(
+    roll_number: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """
+    Rejects or suspends a pending student onboarding request.
+    Removes student from open approval queues and logs audit event.
+    """
+    from sqlalchemy import func
+    clean_roll = roll_number.upper().strip()
+    record = db.query(StudentOnboarding).filter(
+        func.upper(StudentOnboarding.roll_number) == clean_roll
+    ).first()
+    if not record:
+        raise HTTPException(status_code=404, detail=f"No onboarding record for {clean_roll}")
+
+    record.state = OnboardingState.SUSPENDED
+    log_onboarding_event(
+        db=db,
+        event_type="ONBOARDING_REJECTED",
+        action="ONBOARDING_REJECTED",
+        roll_number=clean_roll,
+        details=f"Onboarding request for {clean_roll} rejected by admin {admin.username}",
+        performed_by=admin.id,
+    )
+    db.commit()
+    return {
+        "status": "success",
+        "message": f"Onboarding request for {clean_roll} rejected",
+        "roll_number": clean_roll
+    }
+
+
 @router.get("/login-link/{roll_number}")
 def get_student_login_link(
     roll_number: str,

@@ -40,6 +40,22 @@ export const useSecurityClearLockoutsMutation = () => {
   });
 };
 
+export const useSecurityDismissAlertMutation = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (alertId: number | string) => securityEndpoints.dismissAlert(alertId),
+    onSettled: () => invalidateFor(qc, 'security.dismissAlert'),
+  });
+};
+
+export const useSecurityEscalateAlertMutation = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (alertId: number | string) => securityEndpoints.escalateAlert(alertId),
+    onSettled: () => invalidateFor(qc, 'security.escalateAlert'),
+  });
+};
+
 // Pure testable selectors
 export const selectAuditLogItems = (res: AuditLogList | undefined): AuditLogItem[] => {
   if (!res) return [];

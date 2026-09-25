@@ -1382,6 +1382,66 @@ def get_audit_logs(
         "timestamp": l.created_at.strftime("%Y-%m-%d %H:%M:%S") if l.created_at else ""
     } for l in logs]
 
+@router.post("/security/alerts/{alert_id}/dismiss")
+def dismiss_security_alert(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    try:
+        audit = db.query(AuditLog).filter(AuditLog.id == alert_id).first()
+        if not audit:
+            raise HTTPException(status_code=404, detail="Security alert not found")
+        
+        audit.details = (audit.details or "") + f" [RESOLVED: Dismissed by {current_user.username} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}]"
+        
+        resolution_log = AuditLog(
+            user_id=current_user.id,
+            roll_number=audit.roll_number,
+            event_type="SECURITY_ALERT_DISMISSED",
+            action="DISMISS_SECURITY_ALERT",
+            details=f"Alert #{alert_id} ({audit.action}) dismissed by admin {current_user.username}",
+            created_at=datetime.utcnow()
+        )
+        db.add(resolution_log)
+        db.commit()
+        return {"status": "success", "message": f"Alert #{alert_id} dismissed", "alert_id": alert_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error dismissing alert #{alert_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to dismiss security alert")
+
+@router.post("/security/alerts/{alert_id}/escalate")
+def escalate_security_alert(
+    alert_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    try:
+        audit = db.query(AuditLog).filter(AuditLog.id == alert_id).first()
+        if not audit:
+            raise HTTPException(status_code=404, detail="Security alert not found")
+        
+        audit.details = (audit.details or "") + f" [ESCALATED to security committee by {current_user.username} at {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}]"
+        
+        escalation_log = AuditLog(
+            user_id=current_user.id,
+            roll_number=audit.roll_number,
+            event_type="SECURITY_ALERT_ESCALATED",
+            action="ESCALATE_SECURITY_ALERT",
+            details=f"Alert #{alert_id} ({audit.action}) escalated by admin {current_user.username}",
+            created_at=datetime.utcnow()
+        )
+        db.add(escalation_log)
+        db.commit()
+        return {"status": "success", "message": f"Alert #{alert_id} escalated", "alert_id": alert_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error escalating alert #{alert_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to escalate security alert")
+
 @router.post("/export/students-google-sheet")
 def export_students_google_sheet(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     # Single query with eager loads for unpaginated batch export

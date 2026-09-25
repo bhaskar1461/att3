@@ -1,16 +1,20 @@
 import React, { useState } from 'react';
+import { useSearchParams, useNavigate, useLocation } from 'react-router-dom';
 import { IconRail } from './IconRail';
 import { SecondarySidebar } from './SecondarySidebar';
 import { Topbar } from './Topbar';
 import { BreadcrumbRow } from './BreadcrumbRow';
-import { ContentGridPlaceholder } from './ContentGridPlaceholder';
 import { DashboardGrid } from '../../core/components/DashboardGrid';
 import { MockBanner } from './MockBanner';
 import { useSidebarState } from '../../hooks/useSidebarState';
 import { useNavigation } from '../../hooks/useNavigation';
 import { useTheme } from '../../hooks/useTheme';
+import { useAuth } from '../../features/auth/hooks';
 
 export const DashboardShell: React.FC = () => {
+  const navigate = useNavigate();
+  const location = useLocation();
+
   // Theme hook: sets dark/light classes on document root and persists to localStorage
   useTheme();
 
@@ -28,6 +32,24 @@ export const DashboardShell: React.FC = () => {
   const [activeRailId, setActiveRailId] = useState<string>('dashboard');
   const [activeSidebarId, setActiveSidebarId] = useState<string>('overview');
 
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawRange = searchParams.get('range');
+  const range: 'today' | 'week' | 'month' =
+    rawRange === 'today' || rawRange === 'week' || rawRange === 'month'
+      ? rawRange
+      : 'today'; // default today
+
+  const handleRangeChange = (newRange: 'today' | 'week' | 'month') => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set('range', newRange);
+      return next;
+    });
+  };
+
+  const { user } = useAuth();
+  const currentRole = (user?.role || '').toLowerCase() === 'teacher' ? 'teacher' : 'admin';
+
   const { railItems, sidebarItems, proCard, breadcrumb } = useNavigation(activeSection);
 
   const handleRailSelect = (id: string) => {
@@ -35,6 +57,9 @@ export const DashboardShell: React.FC = () => {
     const matchedItem = railItems.find((item) => item.id === id);
     if (matchedItem) {
       setActiveSection(matchedItem.label);
+      if (matchedItem.path && matchedItem.path !== location.pathname && matchedItem.path !== '/dashboard') {
+        navigate(matchedItem.path);
+      }
     }
   };
 
@@ -43,6 +68,9 @@ export const DashboardShell: React.FC = () => {
     const matchedItem = sidebarItems.find((item) => item.id === id);
     if (matchedItem) {
       setActiveSection(matchedItem.label);
+      if (matchedItem.path && matchedItem.path !== location.pathname && matchedItem.path !== '/dashboard') {
+        navigate(matchedItem.path);
+      }
     }
   };
 
@@ -115,18 +143,22 @@ export const DashboardShell: React.FC = () => {
           onToggleMobileSidebar={toggleMobile}
         />
 
-        {/* Breadcrumb Row: Trail and Server-Time status */}
-        <BreadcrumbRow breadcrumb={breadcrumb} />
+        {/* Breadcrumb Row: Trail and Server-Time status with Range Selector */}
+        <BreadcrumbRow
+          breadcrumb={breadcrumb}
+          range={range}
+          onRangeChange={handleRangeChange}
+        />
 
-        {/* 12-Column Content Grid Placeholder: Purple hero card, metric slots, charts, tables */}
+        {/* 12-Column Responsive Dashboard Grid: KPI row on top, Main (col-8) + Side (col-4) below */}
         <main className="flex-1 pb-12">
-          {/* Wiring Point 3: Overview page content area renders <DashboardGrid zone="..." /> for each zone */}
           <div className="p-4 sm:p-6 space-y-6">
-            <DashboardGrid zone="kpi" />
-            <DashboardGrid zone="main" />
-            <DashboardGrid zone="side" />
+            <DashboardGrid zone="kpi" role={currentRole} range={range} />
+            <div className="grid grid-cols-12 gap-6">
+              <DashboardGrid zone="main" role={currentRole} range={range} />
+              <DashboardGrid zone="side" role={currentRole} range={range} />
+            </div>
           </div>
-          <ContentGridPlaceholder />
         </main>
       </div>
 

@@ -40,6 +40,14 @@ export const useOnboardingResendLinkMutation = () => {
   });
 };
 
+export const useOnboardingRejectMutation = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rollNumber: string) => onboardingEndpoints.reject(rollNumber),
+    onSettled: () => invalidateFor(qc, 'onboarding.reject'),
+  });
+};
+
 export const useOnboardingApproveRebindMutation = () => {
   const qc = useQueryClient();
   return useMutation({

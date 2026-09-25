@@ -1566,6 +1566,78 @@ def _require_student(current_user: User = Depends(get_current_user)) -> Student:
         )
     return current_user.student_profile
 
+@router.get("/records")
+def list_attendance_records(
+    range: str = "today",
+    scope: str = "all",
+    teacher_id: Optional[int] = None,
+    limit: int = 1000,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Retrieves filtered attendance records for overview analytics and status breakdown.
+    Supports range ('today' | 'week' | 'month') and role-scoped teacher isolation.
+    """
+    try:
+        from datetime import timedelta
+        safe_limit = min(limit, 1000)
+        query = db.query(AttendanceRecord)
+
+        today_ist = get_server_ist_datetime().strftime("%Y-%m-%d")
+
+        if range == "today":
+            query = query.filter(AttendanceRecord.session_date == today_ist)
+        elif range == "week":
+            week_ago = (get_server_ist_datetime() - timedelta(days=7)).strftime("%Y-%m-%d")
+            query = query.filter(AttendanceRecord.session_date >= week_ago)
+        elif range == "month":
+            month_ago = (get_server_ist_datetime() - timedelta(days=30)).strftime("%Y-%m-%d")
+            query = query.filter(AttendanceRecord.session_date >= month_ago)
+
+        effective_teacher_id = teacher_id
+        if current_user.role == UserRole.TEACHER:
+            if current_user.teacher_profile:
+                effective_teacher_id = current_user.teacher_profile.id
+        elif scope == "mine" and effective_teacher_id is None and current_user.teacher_profile:
+            effective_teacher_id = current_user.teacher_profile.id
+
+        if effective_teacher_id:
+            query = query.join(AttendanceSession, AttendanceRecord.session_id == AttendanceSession.id)\
+                         .filter(AttendanceSession.teacher_id == effective_teacher_id)
+
+        records = query.order_by(AttendanceRecord.id.desc()).offset(offset).limit(safe_limit).all()
+
+        results = []
+        for r in records:
+            method = "QR"
+            if r.selfie_status == "ACCEPTED":
+                method = "FACE"
+            elif r.scan_mode == "MANUAL":
+                method = "MANUAL"
+            elif r.scan_mode and "KIOSK" in r.scan_mode.upper():
+                method = "KIOSK"
+            elif r.scan_mode:
+                method = r.scan_mode
+
+            sap_val = r.student.sap_id if (r.student and getattr(r.student, "sap_id", None)) else r.roll_number
+
+            results.append({
+                "id": r.id,
+                "student_id": r.student_id,
+                "session_id": r.session_id,
+                "status": r.status.value if hasattr(r.status, "value") else str(r.status),
+                "verification_method": method,
+                "verified_at": r.scanned_at.isoformat() if r.scanned_at else None,
+                "sap_id": sap_val,
+                "created_at": r.scanned_at.isoformat() if r.scanned_at else None
+            })
+        return results
+    except Exception as e:
+        logger.error(f"Error fetching attendance records: {e}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to retrieve attendance records")
+
 
 @router.post("/records/{attendance_id}/selfie")
 async def upload_attendance_selfie(

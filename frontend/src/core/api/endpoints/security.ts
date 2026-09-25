@@ -17,4 +17,14 @@ export const securityEndpoints = {
       method: 'POST',
       body: JSON.stringify({}),
     }),
+
+  dismissAlert: (alertId: number | string) =>
+    api(`/api/v1/admin/security/alerts/${alertId}/dismiss`, z.record(z.string(), z.unknown()), {
+      method: 'POST',
+    }),
+
+  escalateAlert: (alertId: number | string) =>
+    api(`/api/v1/admin/security/alerts/${alertId}/escalate`, z.record(z.string(), z.unknown()), {
+      method: 'POST',
+    }),
 };

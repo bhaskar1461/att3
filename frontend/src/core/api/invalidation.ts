@@ -26,12 +26,15 @@ const INVALIDATION_MAP: Record<string, readonly (readonly unknown[])[]> = {
   // Onboarding mutations
   'onboarding.dispatchLinks': [keys.onboarding.all()],
   'onboarding.resendLink': [keys.onboarding.all()],
-  'onboarding.approveRebind': [keys.onboarding.all(), keys.devices.all()],
-  'onboarding.denyRebind': [keys.onboarding.all()],
+  'onboarding.approveRebind': [keys.onboarding.all(), keys.devices.all(), keys.overview.all()],
+  'onboarding.denyRebind': [keys.onboarding.all(), keys.overview.all()],
+  'onboarding.reject': [keys.onboarding.all(), keys.overview.all()],
   'onboarding.dispatchCredentials': [keys.onboarding.all()],
 
   // Security mutations
   'security.clearLockouts': [keys.devices.all(), keys.security.all()],
+  'security.dismissAlert': [keys.security.all(), keys.overview.all()],
+  'security.escalateAlert': [keys.security.all(), keys.overview.all()],
 
   // Sync mutations
   'sync.batchScan': [keys.attendance.all(), keys.sessions.all(), keys.reports.all(), keys.sync.all(), keys.overview.all()],

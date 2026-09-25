@@ -23,6 +23,11 @@ export const onboardingEndpoints = {
       method: 'POST',
     }),
 
+  reject: (rollNumber: string) =>
+    api(`/api/v1/admin/onboard/reject/${encodeURIComponent(rollNumber)}`, z.record(z.string(), z.unknown()), {
+      method: 'POST',
+    }),
+
   listRebindRequests: () =>
     api('/api/v1/admin/onboard/rebind-requests', s.RebindRequestsListSchema),
 

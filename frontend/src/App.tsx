@@ -1,5 +1,6 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider as CoreAuthProvider } from './core/auth/AuthProvider';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Navbar } from './components/Navbar';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -18,6 +19,9 @@ const AttendanceLanding = React.lazy(() => import('./pages/AttendanceLanding').t
 const ComponentsShowcase = React.lazy(() => import('./dev/ComponentsShowcase').then(m => ({ default: m.ComponentsShowcase })));
 const ContractsPage = React.lazy(() => import('./dev/ContractsPage').then(m => ({ default: m.ContractsPage })));
 import { renderRegisteredRouteElements } from './core/components/RegisteredRoutes';
+import { QueryClientProvider } from '@tanstack/react-query';
+import { queryClient } from './core/queryClient';
+import { Toaster } from './components/ui/sonner';
 import './core/features';
 
 const RouteLoader: React.FC = () => (
@@ -68,28 +72,31 @@ export const App: React.FC = () => {
   }, []);
 
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <AuthNavigationSync />
-        <div className="min-h-screen bg-[#141416] text-[#f8fafc] dark:bg-[#141416] dark:text-[#f8fafc] flex flex-col font-sans">
-          <Navbar />
-          <main className="flex-1">
-            <React.Suspense fallback={<RouteLoader />}>
-              <Routes>
-                <Route path="/login" element={<Login />} />
+    <QueryClientProvider client={queryClient}>
+      <CoreAuthProvider>
+        <AuthProvider>
+        <BrowserRouter>
+          <AuthNavigationSync />
+          <div className="min-h-screen bg-[#141416] text-[#f8fafc] dark:bg-[#141416] dark:text-[#f8fafc] flex flex-col font-sans">
+            <Navbar />
+            <main className="flex-1">
+              <React.Suspense fallback={<RouteLoader />}>
+                <Routes>
+                  <Route path="/login" element={<Login />} />
 
-                {/* Phase 1 Dashboard Shell: Direct Standalone Route */}
-                <Route path="/dashboard" element={<DashboardPage />} />
+                  {/* Phase 1 Dashboard Shell: Direct Standalone Route */}
+                  <Route path="/dashboard" element={<DashboardPage />} />
+                  <Route path="/overview" element={<DashboardPage />} />
 
-                {/* Super Admin Dashboard (Phase 1+ New Dark Admin Shell) */}
-                <Route
-                  path="/admin"
-                  element={
-                    <ProtectedRoute allowedRoles={['SUPER_ADMIN']}>
-                      <DashboardPage />
-                    </ProtectedRoute>
-                  }
-                />
+                  {/* Super Admin Dashboard (Phase 1+ New Dark Admin Shell) */}
+                  <Route
+                    path="/admin"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPER_ADMIN', 'TEACHER']}>
+                        <DashboardPage />
+                      </ProtectedRoute>
+                    }
+                  />
 
                 {/* Preserved Super Admin Legacy Tabs (Rule 3: Strict Preservation) */}
                 <Route
@@ -163,7 +170,10 @@ export const App: React.FC = () => {
             </React.Suspense>
           </main>
         </div>
+        <Toaster />
       </BrowserRouter>
-    </AuthProvider>
+        </AuthProvider>
+      </CoreAuthProvider>
+    </QueryClientProvider>
   );
 };
