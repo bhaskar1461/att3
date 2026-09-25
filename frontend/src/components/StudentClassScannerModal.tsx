@@ -144,6 +144,8 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
   // Stage 5 & Stage 6: GPS Geofence, Controlled Fallback & Post-Attendance Selfie
   const [showSelfieModal, setShowSelfieModal] = useState<boolean>(false);
   const [selfieAttendanceId, setSelfieAttendanceId] = useState<number | null>(null);
+  const [selfieSessionId, setSelfieSessionId] = useState<number | null>(null);
+  const [selfieCompleted, setSelfieCompleted] = useState<boolean>(false);
   const [showFallbackInput, setShowFallbackInput] = useState<boolean>(false);
   const [fallbackCode, setFallbackCode] = useState<string>('');
   const [fallbackSubmitting, setFallbackSubmitting] = useState<boolean>(false);
@@ -226,10 +228,11 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
       triggerFeedback(true);
       setSuccessResult(res);
-      if (res.attendance_id) {
-        setSelfieAttendanceId(res.attendance_id);
-        setShowSelfieModal(true);
-      }
+      const attId = res?.attendance_id || (res?.session_id ? Number(res.session_id) : 1);
+      const sId = res?.session_id ? Number(res.session_id) : null;
+      setSelfieAttendanceId(attId);
+      setSelfieSessionId(sId);
+      setShowSelfieModal(true);
       setShowFallbackInput(false);
       setShowHelpSheet(false);
       stopCamera();
@@ -873,10 +876,11 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
       triggerFeedback(true);
       setSuccessResult(res);
-      if (res.attendance_id) {
-        setSelfieAttendanceId(res.attendance_id);
-        setShowSelfieModal(true);
-      }
+      const attId = res?.attendance_id || (res?.session_id ? Number(res.session_id) : 1);
+      const sId = res?.session_id ? Number(res.session_id) : null;
+      setSelfieAttendanceId(attId);
+      setSelfieSessionId(sId);
+      setShowSelfieModal(true);
       stopCamera();
 
     } catch (err: any) {
@@ -2110,14 +2114,16 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
               </div>
 
               {/* Institutional Selfie CTA if required */}
-              {selfieAttendanceId && (
+              {(selfieAttendanceId || selfieSessionId) && (
                 <div className="w-full p-4 bg-indigo-50 border border-indigo-200 rounded-2xl text-left space-y-2 animate-in fade-in">
                   <div className="flex items-center gap-2 text-indigo-900 font-bold text-xs">
                     <Camera className="w-4 h-4 text-indigo-600" />
-                    <span>Quick Photo Verification</span>
+                    <span>{selfieCompleted ? 'Photo Record Attached' : 'Quick Photo Verification'}</span>
                   </div>
                   <p className="text-xs text-indigo-700 leading-relaxed">
-                    Attendance recorded! Take a quick front-camera selfie to verify institutional photo records.
+                    {selfieCompleted
+                      ? 'Institutional selfie has been recorded and verified for this session.'
+                      : 'Attendance recorded! Take a quick front-camera selfie to verify institutional photo records.'}
                   </p>
                   <button
                     type="button"
@@ -2125,7 +2131,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                     className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition flex items-center justify-center gap-1.5 shadow-sm active:scale-98 cursor-pointer"
                   >
                     <Camera className="w-3.5 h-3.5" />
-                    <span>Take Selfie</span>
+                    <span>{selfieCompleted ? 'Retake Selfie' : 'Take Selfie'}</span>
                   </button>
                 </div>
               )}
@@ -2691,21 +2697,25 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
       </div>
 
       {/* Stage 6: Post-Attendance Selfie Collection Modal */}
-      {showSelfieModal && selfieAttendanceId && (
+      {showSelfieModal && (selfieAttendanceId || selfieSessionId) && (
         <PostAttendanceSelfieModal
-          attendanceId={selfieAttendanceId}
+          attendanceId={selfieAttendanceId || selfieSessionId || 1}
+          sessionId={selfieSessionId || successResult?.session_id}
           rollNumber={studentInfo.roll_number || studentRoll || 'STUDENT'}
           studentName={studentInfo.name}
           subjectName={successResult?.subject_name}
           onComplete={() => {
+            setSelfieCompleted(true);
             setShowSelfieModal(false);
-            onScanComplete();
-            onClose();
+            if (onScanComplete) {
+              onScanComplete(successResult);
+            }
           }}
           onSkip={() => {
             setShowSelfieModal(false);
-            onScanComplete();
-            onClose();
+            if (onScanComplete) {
+              onScanComplete(successResult);
+            }
           }}
         />
       )}

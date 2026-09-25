@@ -60,7 +60,8 @@ def store_attendance_selfie(
     image_bytes: bytes,
     frame_index: int = 1,
     total_frames: int = 1,
-    ip_address: Optional[str] = None
+    ip_address: Optional[str] = None,
+    session_id: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Validates, saves to private storage, and links selfie to attendance record.
@@ -78,10 +79,24 @@ def store_attendance_selfie(
         raise ValueError(f"Unsupported image type '{mime_type}'. Supported: JPEG, PNG, WebP.")
 
     # 1. Fetch attendance record & student details
-    record = db.query(AttendanceRecord).filter(
-        AttendanceRecord.id == attendance_id,
-        AttendanceRecord.student_id == student_id
-    ).first()
+    record = None
+    if attendance_id and attendance_id > 0:
+        record = db.query(AttendanceRecord).filter(
+            AttendanceRecord.id == attendance_id,
+            AttendanceRecord.student_id == student_id
+        ).first()
+
+    # Fallback lookup by session_id & student_id (with retry for async writer queue)
+    if not record and session_id:
+        import time as _t
+        for _ in range(5):
+            record = db.query(AttendanceRecord).filter(
+                AttendanceRecord.session_id == session_id,
+                AttendanceRecord.student_id == student_id
+            ).order_by(AttendanceRecord.id.desc()).first()
+            if record:
+                break
+            _t.sleep(0.15)
 
     if not record:
         raise ValueError(f"Attendance record {attendance_id} for student {student_id} not found.")
@@ -160,20 +175,36 @@ def skip_attendance_selfie(
     attendance_id: int,
     student_id: int,
     reason: str = "USER_SKIPPED",
-    ip_address: Optional[str] = None
+    ip_address: Optional[str] = None,
+    session_id: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Records that a selfie was skipped or failed.
     CRITICAL RULE: Never invalidates or reverses the existing attendance record.
     Attendance remains AttendanceStatus.PRESENT.
     """
-    record = db.query(AttendanceRecord).filter(
-        AttendanceRecord.id == attendance_id,
-        AttendanceRecord.student_id == student_id
-    ).first()
+    record = None
+    if attendance_id and attendance_id > 0:
+        record = db.query(AttendanceRecord).filter(
+            AttendanceRecord.id == attendance_id,
+            AttendanceRecord.student_id == student_id
+        ).first()
+
+    if not record and session_id:
+        record = db.query(AttendanceRecord).filter(
+            AttendanceRecord.session_id == session_id,
+            AttendanceRecord.student_id == student_id
+        ).order_by(AttendanceRecord.id.desc()).first()
 
     if not record:
-        raise ValueError(f"Attendance record {attendance_id} for student {student_id} not found.")
+        # Graceful return if record is still pending in async writer queue: attendance validity remains PRESENT
+        return {
+            "status": "SKIPPED",
+            "attendance_id": attendance_id or 0,
+            "attendance_status": "PRESENT",
+            "selfie_status": "SKIPPED",
+            "message": "Selfie skipped gracefully."
+        }
 
     record.selfie_status = "SKIPPED" if reason == "USER_SKIPPED" else "FAILED"
     db.commit()
@@ -183,7 +214,7 @@ def skip_attendance_selfie(
             db=db,
             event_type=SecurityEventType.ATTENDANCE_SUBMITTED,
             action="SELFIE_SKIPPED",
-            details=f"Selfie skipped for attendance #{attendance_id} (reason: {reason})",
+            details=f"Selfie skipped for attendance #{record.id} (reason: {reason})",
             roll_number=record.roll_number,
             ip_address=ip_address
         )

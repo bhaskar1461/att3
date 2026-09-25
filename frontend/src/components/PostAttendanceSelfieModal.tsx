@@ -45,6 +45,7 @@ export type SelfieState =
 
 interface PostAttendanceSelfieModalProps {
   attendanceId: number;
+  sessionId?: number;
   rollNumber: string;
   studentName?: string;
   subjectName?: string;
@@ -71,6 +72,7 @@ const isAndroid =
 
 export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps> = ({
   attendanceId,
+  sessionId,
   rollNumber,
   studentName,
   subjectName,
@@ -175,9 +177,13 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
       
       // Clean single file submission (avoids duplicate appending)
       formData.append('file', blob, filename);
+      if (sessionId) {
+        formData.append('session_id', String(sessionId));
+      }
 
       const token = localStorage.getItem('token');
-      const response = await fetch(`/api/v1/attendance/records/${attendanceId}/selfie`, {
+      const targetId = attendanceId && attendanceId > 0 ? attendanceId : (sessionId || 0);
+      const response = await fetch(`/api/v1/attendance/records/${targetId}/selfie`, {
         method: 'POST',
         credentials: 'include',
         headers: {
@@ -209,7 +215,7 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
       setErrorMessage(err.message || 'Network error while uploading photo.');
       setGuidanceMessage('Upload failed. Your attendance remains PRESENT.');
     }
-  }, [attendanceId, rollNumber, studentName, onComplete, stopCamera, triggerHaptic]);
+  }, [attendanceId, sessionId, rollNumber, studentName, onComplete, stopCamera, triggerHaptic]);
 
   // Execute snapshot capture from front camera
   const executeCapture = useCallback(async () => {
@@ -520,9 +526,10 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
     setIsSkipping(true);
     stopCamera();
     try {
-      await apiRequest(`/attendance/records/${attendanceId}/selfie-skip`, {
+      const targetId = attendanceId && attendanceId > 0 ? attendanceId : (sessionId || 0);
+      await apiRequest(`/attendance/records/${targetId}/selfie-skip`, {
         method: 'POST',
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify({ reason, session_id: sessionId }),
       });
     } catch (err) {
       console.warn('[Selfie Skip Notice]:', err);
@@ -545,7 +552,7 @@ export const PostAttendanceSelfieModal: React.FC<PostAttendanceSelfieModalProps>
     selfieState === 'UPLOAD_FAILED';
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-lg flex items-center justify-center p-3 select-none animate-in fade-in duration-200">
+    <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-lg flex items-center justify-center p-3 select-none animate-in fade-in duration-200">
       <div className="bg-[#080d1a] border border-white/10 rounded-3xl w-full max-w-sm overflow-hidden shadow-2xl p-5 text-center font-sans text-white relative">
         
         {/* Shutter White Flash Effect */}

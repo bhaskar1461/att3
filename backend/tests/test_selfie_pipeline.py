@@ -279,6 +279,53 @@ class TestSelfiePipeline(unittest.TestCase):
         self.assertNotEqual(res_identity.headers.get("content-encoding"), "gzip")
         self.assertNotEqual(res_identity.headers.get("content-encoding"), "zstd")
 
+    def test_selfie_upload_via_session_id_fallback(self):
+        """Verify selfie upload succeeds using session_id fallback when attendance_id is 0 or pending."""
+        jpeg_data = generate_test_jpeg()
+        headers = {
+            "Authorization": f"Bearer {self.token_s1}",
+            "X-Device-Id": "test-dev-uuid-1",
+        }
+        files = {
+            "file": ("selfie.jpg", jpeg_data, "image/jpeg")
+        }
+        data = {
+            "session_id": str(self.sess.id)
+        }
+
+        # Target ID 0 with session_id provided in form data
+        res = self.client.post(
+            "/api/v1/attendance/records/0/selfie",
+            headers=headers,
+            files=files,
+            data=data
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.json()["status"], "ACCEPTED")
+
+        # Verify database record updated
+        record = self.db.query(AttendanceRecord).filter(AttendanceRecord.id == self.att1.id).first()
+        self.assertEqual(record.selfie_status, "ACCEPTED")
+
+    def test_selfie_skip_via_session_id_fallback(self):
+        """Verify selfie skip succeeds using session_id fallback when attendance_id is 0."""
+        headers = {
+            "Authorization": f"Bearer {self.token_s1}",
+            "X-Device-Id": "test-dev-uuid-1",
+        }
+        res = self.client.post(
+            "/api/v1/attendance/records/0/selfie-skip",
+            headers=headers,
+            json={"reason": "CAMERA_UNAVAILABLE", "session_id": self.sess.id}
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.json()["status"], "SKIPPED")
+
+        # Core attendance status remains PRESENT
+        record = self.db.query(AttendanceRecord).filter(AttendanceRecord.id == self.att1.id).first()
+        self.assertEqual(record.status, AttendanceStatus.PRESENT)
+        self.assertEqual(record.selfie_status, "FAILED")
+
 
 if __name__ == "__main__":
     unittest.main()

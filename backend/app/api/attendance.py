@@ -3,7 +3,7 @@ import time
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response, UploadFile, File, Request
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Response, UploadFile, File, Form, Request
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -1555,6 +1555,7 @@ def batch_mark_admin_daily_attendance(
 
 class SelfieSkipRequest(BaseModel):
     reason: Optional[str] = "USER_SKIPPED"
+    session_id: Optional[int] = None
 
 
 def _require_student(current_user: User = Depends(get_current_user)) -> Student:
@@ -1571,6 +1572,7 @@ async def upload_attendance_selfie(
     attendance_id: int,
     file: Optional[UploadFile] = File(None),
     files: Optional[List[UploadFile]] = File(None),
+    session_id: Optional[int] = Form(None),
     request: Request = None,
     db: Session = Depends(get_db),
     current_student: Student = Depends(_require_student)
@@ -1607,7 +1609,8 @@ async def upload_attendance_selfie(
                 image_bytes=contents,
                 frame_index=idx + 1,
                 total_frames=total,
-                ip_address=ip_addr
+                ip_address=ip_addr,
+                session_id=session_id
             )
             stored_results.append(res)
 
@@ -1649,13 +1652,15 @@ def skip_attendance_selfie_endpoint(
     from app.services.selfie_service import skip_attendance_selfie
     ip_addr = request.client.host if request and request.client else None
     reason = req.reason if req and req.reason else "USER_SKIPPED"
+    session_id = req.session_id if req else None
     try:
         res = skip_attendance_selfie(
             db=db,
             attendance_id=attendance_id,
             student_id=current_student.id,
             reason=reason,
-            ip_address=ip_addr
+            ip_address=ip_addr,
+            session_id=session_id
         )
         return res
     except ValueError as ve:

@@ -7,6 +7,7 @@ from pydantic import BaseModel
 import time
 import threading
 import logging
+import asyncio
 
 logger = logging.getLogger("snist_erp.scan_telemetry")
 
@@ -1304,8 +1305,13 @@ async def student_scan_session(
                     invalidate_attendance_cache(student_id=current_student.id, roll_number=clean_roll)
                 except Exception:
                     pass
+                existing_record = db.query(AttendanceRecord).filter(
+                    AttendanceRecord.session_id == session_id,
+                    AttendanceRecord.student_id == current_student.id
+                ).first()
                 return {
                     "status": "ALREADY_MARKED",
+                    "attendance_id": existing_record.id if existing_record else None,
                     "message": "You have already been marked present for this session.",
                     "session_id": session_id,
                     "token_format": token_data.get("token_format", "legacy"),
@@ -1366,14 +1372,25 @@ async def student_scan_session(
             except Exception:
                 pass
 
+            # Fast-resolution: Wait briefly (up to 200ms) for background worker to commit and retrieve attendance_id
+            resolved_att_id = None
+            t_wait_start = time.perf_counter()
+            while (time.perf_counter() - t_wait_start) < 0.20:
+                status_data = async_attendance_writer.get_status(job_id)
+                if status_data and status_data.get("attendance_id"):
+                    resolved_att_id = status_data["attendance_id"]
+                    break
+                await asyncio.sleep(0.015)
+
             t_total_ms = (time.perf_counter() - t_scan_start) * 1000
             logger.info(
                 f"[SCAN_TIMINGS] roll={clean_roll} bucket={device_bucket} token_age_ms={token_age_ms} "
-                f"hmac_ms={t_hmac_ms:.2f} enroll_ms={t_enrollment_ms:.2f} total_ms={t_total_ms:.2f} mode=ASYNC"
+                f"hmac_ms={t_hmac_ms:.2f} enroll_ms={t_enrollment_ms:.2f} total_ms={t_total_ms:.2f} mode=ASYNC att_id={resolved_att_id}"
             )
 
             return {
                 "status": "SUCCESS",
+                "attendance_id": resolved_att_id,
                 "job_id": job_id,
                 "message": f"Successfully marked present for {period_count} period{'s' if period_count > 1 else ''}!",
                 "session_id": session_id,

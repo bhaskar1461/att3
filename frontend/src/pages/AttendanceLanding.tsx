@@ -63,6 +63,8 @@ export const AttendanceLanding: React.FC = () => {
   const [, setGeoStatus] = useState<'idle' | 'acquiring' | 'ready' | 'denied'>('idle');
   const [showSelfieModal, setShowSelfieModal] = useState(false);
   const [selfieAttendanceId, setSelfieAttendanceId] = useState<number | null>(null);
+  const [selfieSessionId, setSelfieSessionId] = useState<number | null>(null);
+  const [selfieCompleted, setSelfieCompleted] = useState<boolean>(false);
 
   // Validate and exchange the launch token for a 3-minute claim ticket on mount
   useEffect(() => {
@@ -332,10 +334,11 @@ export const AttendanceLanding: React.FC = () => {
         sessionStorage.removeItem('snist_launch_claim');
       } catch {}
       setSubmissionSuccess(res);
-      if (res?.attendance_id) {
-        setSelfieAttendanceId(res.attendance_id);
-        setShowSelfieModal(true);
-      }
+      const attId = res?.attendance_id || (res?.session_id ? Number(res.session_id) : (sessionData?.session_id ? Number(sessionData.session_id) : 1));
+      const sId = res?.session_id ? Number(res.session_id) : (sessionData?.session_id ? Number(sessionData.session_id) : null);
+      setSelfieAttendanceId(attId);
+      setSelfieSessionId(sId);
+      setShowSelfieModal(true);
     } catch (err: any) {
       const rawMsg = err?.message || err?.detail || '';
       const lowerMsg = rawMsg.toLowerCase();
@@ -488,10 +491,20 @@ export const AttendanceLanding: React.FC = () => {
               <p className="text-xs text-slate-400 mt-1">Period: {sessionData.period}</p>
             )}
 
-            <div className="mt-8">
+            <div className="mt-8 space-y-3">
+              {(selfieAttendanceId || selfieSessionId) && (
+                <button
+                  type="button"
+                  onClick={() => setShowSelfieModal(true)}
+                  className="w-full py-2.5 px-4 rounded-xl bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-xs font-semibold transition flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>{selfieCompleted ? '✓ Photo Record Attached (Retake)' : 'Take Photo Verification'}</span>
+                </button>
+              )}
               <button
                 onClick={() => navigate('/student')}
-                className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-sm shadow-lg transition flex items-center justify-center gap-2"
+                className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-sm shadow-lg transition flex items-center justify-center gap-2 cursor-pointer"
               >
                 <span>Continue to Student Portal</span>
                 <ArrowRight className="w-4 h-4" />
@@ -741,13 +754,15 @@ export const AttendanceLanding: React.FC = () => {
       </div>
 
       {/* Post-Attendance Selfie Collection Modal */}
-      {showSelfieModal && selfieAttendanceId && (
+      {showSelfieModal && (selfieAttendanceId || selfieSessionId) && (
         <PostAttendanceSelfieModal
-          attendanceId={selfieAttendanceId}
+          attendanceId={selfieAttendanceId || selfieSessionId || 1}
+          sessionId={selfieSessionId || sessionData?.session_id}
           rollNumber={user?.username || loginRoll.trim().toUpperCase()}
           studentName={user?.full_name}
           subjectName={sessionData?.subject_name}
           onComplete={() => {
+            setSelfieCompleted(true);
             setShowSelfieModal(false);
           }}
           onSkip={() => {
