@@ -68,7 +68,7 @@ class AssignmentCreate(BaseModel):
     google_sheet_id: Optional[str] = None
 
 class AssignmentGSheetUpdate(BaseModel):
-    google_sheet_id: str
+    google_sheet_id: Optional[str] = ""
 
 class SettingsUpdate(BaseModel):
     settings: Dict[str, str]
@@ -538,12 +538,16 @@ def get_teachers(
                 joinedload(TeacherAssignment.section)
             ).filter(TeacherAssignment.teacher_id.in_(teacher_ids)).all()
             for asg in all_asg:
+                asg_sp_id = asg.google_sheet_id or ""
+                asg_sp_url = f"https://docs.google.com/spreadsheets/d/{asg_sp_id}/edit" if asg_sp_id else ""
                 assignments_map.setdefault(asg.teacher_id, []).append({
                     "id": asg.id,
                     "subject_code": asg.subject.code if asg.subject else "",
                     "subject_name": asg.subject.name if asg.subject else "",
                     "section_name": asg.section.name if asg.section else "",
-                    "excel_file_name": asg.excel_file_name or f"Register_{asg.id}.xlsx"
+                    "excel_file_name": asg.excel_file_name or f"Register_{asg.id}.xlsx",
+                    "google_sheet_id": asg_sp_id,
+                    "google_sheet_url": asg_sp_url
                 })
 
         for t in teachers:
@@ -582,12 +586,16 @@ def get_teachers(
             joinedload(TeacherAssignment.section)
         ).filter(TeacherAssignment.teacher_id.in_(teacher_ids)).all()
         for asg in all_asg:
+            asg_sp_id = asg.google_sheet_id or ""
+            asg_sp_url = f"https://docs.google.com/spreadsheets/d/{asg_sp_id}/edit" if asg_sp_id else ""
             assignments_map.setdefault(asg.teacher_id, []).append({
                 "id": asg.id,
                 "subject_code": asg.subject.code if asg.subject else "",
                 "subject_name": asg.subject.name if asg.subject else "",
                 "section_name": asg.section.name if asg.section else "",
-                "excel_file_name": asg.excel_file_name or f"Register_{asg.id}.xlsx"
+                "excel_file_name": asg.excel_file_name or f"Register_{asg.id}.xlsx",
+                "google_sheet_id": asg_sp_id,
+                "google_sheet_url": asg_sp_url
             })
 
     res = []
@@ -866,15 +874,207 @@ def admin_update_assignment_google_sheet(
     if not assignment:
         raise HTTPException(status_code=404, detail="Class assignment not found")
 
-    sp_id = extract_spreadsheet_id(req.google_sheet_id) if req.google_sheet_id else None
+    raw_val = (req.google_sheet_id or "").strip()
+    sp_id = extract_spreadsheet_id(raw_val) if raw_val else None
     assignment.google_sheet_id = sp_id
     db.commit()
     sp_url = f"https://docs.google.com/spreadsheets/d/{sp_id}/edit" if sp_id else ""
     return {
-        "message": f"Updated Google Sheet ID for class assignment #{assignment.id}",
+        "message": f"Updated Google Sheet ID for class assignment #{assignment.id}" if sp_id else f"Cleared Google Sheet ID for class assignment #{assignment.id} (will fallback to faculty default)",
         "google_sheet_id": sp_id or "",
         "google_sheet_url": sp_url
     }
+
+@router.post("/assignments/{assignment_id}/sync-roster-from-sheet")
+def admin_sync_assignment_roster_from_sheet(
+    assignment_id: int,
+    req: Optional[AssignmentGSheetUpdate] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """
+    Admin: Synchronizes student roster (Roll Number, Name, Agency) from the assigned class Google Sheet
+    directly into the assigned section in the database.
+    """
+    assignment = db.query(TeacherAssignment).options(
+        joinedload(TeacherAssignment.section),
+        joinedload(TeacherAssignment.teacher)
+    ).filter(TeacherAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Class assignment not found")
+
+    target_sheet_id = None
+    if req and req.google_sheet_id and req.google_sheet_id.strip():
+        target_sheet_id = extract_spreadsheet_id(req.google_sheet_id.strip())
+        if target_sheet_id != assignment.google_sheet_id:
+            assignment.google_sheet_id = target_sheet_id
+            db.commit()
+
+    if not target_sheet_id:
+        target_sheet_id = assignment.google_sheet_id
+    if not target_sheet_id and assignment.teacher:
+        target_sheet_id = assignment.teacher.google_sheet_id
+    if not target_sheet_id:
+        raise HTTPException(status_code=400, detail="No Google Sheet configured for this class or faculty member.")
+
+    section = assignment.section
+    if not section:
+        raise HTTPException(status_code=400, detail="No section associated with this class assignment.")
+
+    from app.services.gsheets_service import GoogleSheetsService
+    from app.core.config import settings
+    from app.models.models import Student, User, UserRole
+    from app.core.security import get_password_hash
+
+    creds_file = settings.GOOGLE_CREDENTIALS_FILE or os.path.join(settings.BACKEND_DIR, "credentials.json")
+    try:
+        client = GoogleSheetsService._get_client(creds_file)
+        spreadsheet = client.open_by_key(target_sheet_id)
+        try:
+            worksheet = spreadsheet.worksheet("Attendance Register")
+        except Exception:
+            worksheet = spreadsheet.sheet1
+
+        vals = worksheet.get_all_values()
+        if len(vals) < 7:
+            raise HTTPException(status_code=400, detail="Sheet has no student rows (expected student rows starting row 7)")
+
+        synced_count = 0
+        for r_idx in range(6, len(vals)):
+            row = vals[r_idx]
+            if len(row) < 2:
+                continue
+            roll = str(row[1]).strip().upper()
+            if not roll or roll in ["ROLL NO", "ROLL NUMBER", "SNO", "TOTAL", "S.NO"]:
+                continue
+            name = str(row[2]).strip() if len(row) > 2 and row[2] else f"Student {roll}"
+            agency = str(row[3]).strip() if len(row) > 3 and row[3] else "Regular"
+
+            existing = db.query(Student).filter(Student.roll_number == roll).first()
+            if existing:
+                existing.section_id = section.id
+                existing.name = name
+                existing.agency = agency
+                synced_count += 1
+            else:
+                user = db.query(User).filter(User.username == roll).first()
+                if not user:
+                    user = User(
+                        username=roll,
+                        email=f"{roll.lower()}@snist.edu.in",
+                        password_hash=get_password_hash("student123"),
+                        role=UserRole.STUDENT
+                    )
+                    db.add(user)
+                    db.flush()
+                st = Student(
+                    user_id=user.id,
+                    roll_number=roll,
+                    name=name,
+                    department_id=section.department_id,
+                    academic_year_id=section.academic_year_id,
+                    section_id=section.id,
+                    email=f"{roll.lower()}@snist.edu.in",
+                    agency=agency
+                )
+                db.add(st)
+                synced_count += 1
+
+        db.commit()
+        return {
+            "status": "SUCCESS",
+            "message": f"Successfully synchronized {synced_count} students into {section.name} from class Google Sheet!",
+            "synced_count": synced_count,
+            "section_name": section.name,
+            "google_sheet_id": target_sheet_id
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Admin sync roster from sheet failed for assignment {assignment_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to sync roster from Google Sheet: {str(e)}")
+
+@router.post("/assignments/{assignment_id}/format-sheet")
+def admin_format_assignment_google_sheet(
+    assignment_id: int,
+    req: Optional[AssignmentGSheetUpdate] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """
+    Admin: Formats the class Google Sheet according to the official SNIST Attendance Register template
+    and populates it with all currently enrolled students in the assigned section.
+    """
+    assignment = db.query(TeacherAssignment).options(
+        joinedload(TeacherAssignment.section).joinedload(Section.department),
+        joinedload(TeacherAssignment.section).joinedload(Section.academic_year),
+        joinedload(TeacherAssignment.subject),
+        joinedload(TeacherAssignment.teacher)
+    ).filter(TeacherAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Class assignment not found")
+
+    target_sheet_id = None
+    if req and req.google_sheet_id and req.google_sheet_id.strip():
+        target_sheet_id = extract_spreadsheet_id(req.google_sheet_id.strip())
+        if target_sheet_id != assignment.google_sheet_id:
+            assignment.google_sheet_id = target_sheet_id
+            db.commit()
+
+    if not target_sheet_id:
+        target_sheet_id = assignment.google_sheet_id
+    if not target_sheet_id and assignment.teacher:
+        target_sheet_id = assignment.teacher.google_sheet_id
+    if not target_sheet_id:
+        raise HTTPException(status_code=400, detail="No Google Sheet configured for this class assignment.")
+
+    section = assignment.section
+    if not section:
+        raise HTTPException(status_code=400, detail="No section associated with this class assignment.")
+
+    from app.services.gsheets_service import GoogleSheetsService
+    from app.core.config import settings
+    from app.models.models import Student
+
+    students = db.query(Student).filter(Student.section_id == section.id).order_by(Student.roll_number.asc()).all()
+    students_list = [
+        {
+            "roll_number": s.roll_number,
+            "name": s.name or s.roll_number,
+            "agency": s.agency or "Regular"
+        }
+        for s in students
+    ]
+
+    dept_name = section.department.name.upper() if (section and section.department) else "ENGINEERING"
+    acad_name = section.academic_year.name if (section and section.academic_year) else "2026-27"
+    batch_info = f"SECTION:{section.name}  AY:{acad_name}"
+
+    creds_file = settings.GOOGLE_CREDENTIALS_FILE or os.path.join(settings.BACKEND_DIR, "credentials.json")
+    try:
+        res = GoogleSheetsService.format_and_populate_snist_sheet(
+            credentials_json=creds_file,
+            spreadsheet_id=target_sheet_id,
+            students=students_list,
+            dept_name=dept_name,
+            batch_info=batch_info
+        )
+        if not res.get("success", False):
+            raise HTTPException(status_code=500, detail=f"Google Sheets API error: {res.get('error')}")
+
+        return {
+            "status": "SUCCESS",
+            "message": f"Successfully initialized and formatted official SNIST sheet with {len(students_list)} students!",
+            "student_count": len(students_list),
+            "google_sheet_id": target_sheet_id,
+            "google_sheet_url": f"https://docs.google.com/spreadsheets/d/{target_sheet_id}/edit"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Admin format sheet failed for assignment {assignment_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to format Google Sheet: {str(e)}")
 
 # --- Student Management & Bulk Excel Import ---
 @router.get("/students")

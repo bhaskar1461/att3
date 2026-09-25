@@ -99,8 +99,23 @@ def get_cached_session_meta(db: Session, session_id: int) -> Optional[Dict[str, 
         return None
 
     teacher_gsheet = ""
-    if session.teacher:
+    # 1. Prioritize class-specific Google Sheet from TeacherAssignment
+    try:
+        asgn = db.query(TeacherAssignment).filter(
+            TeacherAssignment.teacher_id == session.teacher_id,
+            TeacherAssignment.subject_id == session.subject_id,
+            TeacherAssignment.section_id == session.section_id
+        ).first()
+        if asgn and asgn.google_sheet_id:
+            teacher_gsheet = asgn.google_sheet_id.strip()
+    except Exception:
+        pass
+
+    # 2. Fall back to teacher's individual Google Sheet
+    if not teacher_gsheet and session.teacher:
         teacher_gsheet = (session.teacher.google_sheet_id or "").strip()
+
+    # 3. Fall back to global system setting Google Sheet
     if not teacher_gsheet:
         setting = db.query(SystemSettings).filter(SystemSettings.key == "GOOGLE_SPREADSHEET_ID").first()
         teacher_gsheet = setting.value.strip() if (setting and setting.value) else getattr(settings, "GOOGLE_SPREADSHEET_ID", "")

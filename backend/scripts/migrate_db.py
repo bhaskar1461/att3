@@ -42,6 +42,7 @@ def run_migrations():
         ("qr_audit_logs", "ip_address", "ALTER TABLE qr_audit_logs ADD COLUMN ip_address VARCHAR(50) NULL"),
         ("qr_audit_logs", "created_at", "ALTER TABLE qr_audit_logs ADD COLUMN created_at DATETIME NULL"),
         ("qr_teachers", "google_sheet_id", "ALTER TABLE qr_teachers ADD COLUMN google_sheet_id VARCHAR(255) NULL"),
+        ("qr_teacher_assignments", "google_sheet_id", "ALTER TABLE qr_teacher_assignments ADD COLUMN google_sheet_id VARCHAR(255) NULL"),
         ("qr_attendance_records", "period_count", "ALTER TABLE qr_attendance_records ADD COLUMN period_count INT DEFAULT 4 NULL"),
     ]
 

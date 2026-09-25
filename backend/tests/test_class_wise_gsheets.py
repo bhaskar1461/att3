@@ -107,12 +107,27 @@ class TestClassWiseGSheets(unittest.TestCase):
             section_id=self.sec_a.id
         )
         self.db.add_all([self.asgn1, self.asgn2, self.asgn_other])
+        self.db.flush()
+
+        # 7. Setup Super Admin
+        self.user_admin = User(
+            username="adminuser",
+            email="admin@sreenidhi.edu.in",
+            password_hash=get_password_hash("admin@2026"),
+            role=UserRole.SUPER_ADMIN,
+            is_active=True
+        )
+        self.db.add(self.user_admin)
+        self.db.flush()
+
         self.db.commit()
 
         self.t1_token = create_access_token(data={"sub": "demoteacher"})
         self.t2_token = create_access_token(data={"sub": "otherteacher"})
+        self.admin_token = create_access_token(data={"sub": "adminuser"})
         self.t1_headers = {"Authorization": f"Bearer {self.t1_token}"}
         self.t2_headers = {"Authorization": f"Bearer {self.t2_token}"}
+        self.admin_headers = {"Authorization": f"Bearer {self.admin_token}"}
 
     def tearDown(self):
         app.dependency_overrides.clear()
@@ -183,3 +198,47 @@ class TestClassWiseGSheets(unittest.TestCase):
         self.assertEqual(c1["google_sheet_id"], "sheet_cet_class_a")
         self.assertEqual(c2["google_sheet_id"], "sheet_cn_class_b")
         self.assertNotEqual(c1["google_sheet_id"], c2["google_sheet_id"])
+
+    def test_admin_get_teachers_includes_class_google_sheets(self):
+        """Verify Admin GET /api/v1/admin/teachers includes class-wise google_sheet_id in assigned_classes."""
+        res = self.client.get("/api/v1/admin/teachers", headers=self.admin_headers)
+        self.assertEqual(res.status_code, 200)
+        data = res.json()
+        items = data["items"] if isinstance(data, dict) and "items" in data else data
+        t1_data = next((t for t in items if t["id"] == self.teacher1.id), None)
+        self.assertIsNotNone(t1_data)
+        self.assertIn("assigned_classes", t1_data)
+        
+        # Verify assigned classes contain google_sheet_id
+        ac1 = next((ac for ac in t1_data["assigned_classes"] if ac["id"] == self.asgn1.id), None)
+        self.assertIsNotNone(ac1)
+        self.assertEqual(ac1["google_sheet_id"], "sheet_csea_cet_001")
+        self.assertIn("https://docs.google.com/spreadsheets/d/sheet_csea_cet_001/edit", ac1["google_sheet_url"])
+
+    def test_admin_update_and_clear_class_google_sheet(self):
+        """Verify Admin can set, update, and clear class Google Sheets."""
+        # 1. Update via URL
+        sheet_url = "https://docs.google.com/spreadsheets/d/admin_configured_sheet_999/edit#gid=0"
+        res = self.client.put(
+            f"/api/v1/admin/assignments/{self.asgn2.id}/google-sheet",
+            headers=self.admin_headers,
+            json={"google_sheet_id": sheet_url}
+        )
+        self.assertEqual(res.status_code, 200)
+        payload = res.json()
+        self.assertEqual(payload["google_sheet_id"], "admin_configured_sheet_999")
+
+        # Verify DB
+        refreshed = self.db.query(TeacherAssignment).filter(TeacherAssignment.id == self.asgn2.id).first()
+        self.assertEqual(refreshed.google_sheet_id, "admin_configured_sheet_999")
+
+        # 2. Clear / Unlink
+        res_clear = self.client.put(
+            f"/api/v1/admin/assignments/{self.asgn2.id}/google-sheet",
+            headers=self.admin_headers,
+            json={"google_sheet_id": None}
+        )
+        self.assertEqual(res_clear.status_code, 200)
+        refreshed_clear = self.db.query(TeacherAssignment).filter(TeacherAssignment.id == self.asgn2.id).first()
+        self.assertIsNone(refreshed_clear.google_sheet_id)
+

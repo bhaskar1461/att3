@@ -1089,7 +1089,14 @@ def update_session_period(
     )
 
     if session.status == SessionStatus.LOCKED:
-        teacher_sheet_id = (current_teacher.google_sheet_id or "").strip()
+        asgn = db.query(TeacherAssignment).filter(
+            TeacherAssignment.teacher_id == current_teacher.id,
+            TeacherAssignment.subject_id == session.subject_id,
+            TeacherAssignment.section_id == session.section_id
+        ).first()
+        teacher_sheet_id = (asgn.google_sheet_id or "").strip() if asgn else ""
+        if not teacher_sheet_id:
+            teacher_sheet_id = (current_teacher.google_sheet_id or "").strip()
         if teacher_sheet_id:
             background_tasks.add_task(_async_full_session_sync, session_id, teacher_sheet_id)
 

@@ -55,6 +55,8 @@ export interface Teacher {
     subject_name: string;
     section_name: string;
     excel_file_name?: string;
+    google_sheet_id?: string;
+    google_sheet_url?: string;
   }>;
 }
 

@@ -4,7 +4,7 @@ import { Department, Section, Subject, Teacher, Student, AdminClassAssignment } 
 import { 
   UserPlus, FileSpreadsheet, Settings, ExternalLink, Edit, 
   Download, Upload, RefreshCw, Trash2, Plus, Check, Search, 
-  Filter, BookOpen, Layers, Users, ChevronRight, X, AlertCircle
+  Filter, BookOpen, Layers, Users, ChevronRight, X, AlertCircle, Loader2
 } from 'lucide-react';
 import { Toast } from '../components/Toast';
 
@@ -51,6 +51,8 @@ export const Management: React.FC = () => {
   // Class Google Sheet Modal
   const [editingAssignmentGSheet, setEditingAssignmentGSheet] = useState<AdminClassAssignment | null>(null);
   const [assignmentGSheetInput, setAssignmentGSheetInput] = useState('');
+  const [isSyncingRoster, setIsSyncingRoster] = useState(false);
+  const [isFormattingSheet, setIsFormattingSheet] = useState(false);
 
   // New Student Form
   const [newRoll, setNewRoll] = useState('');
@@ -381,15 +383,79 @@ export const Management: React.FC = () => {
     e.preventDefault();
     if (!editingAssignmentGSheet) return;
     try {
+      const trimmed = assignmentGSheetInput.trim();
       const res: any = await apiRequest(`/admin/assignments/${editingAssignmentGSheet.id}/google-sheet`, {
         method: 'PUT',
-        body: JSON.stringify({ google_sheet_id: assignmentGSheetInput })
+        body: JSON.stringify({ google_sheet_id: trimmed || null })
       });
       setToast({ message: res.message || 'Updated class Google Sheet', type: 'success' });
       setEditingAssignmentGSheet(null);
       fetchAssignments();
+      fetchTeachers(teacherPage);
     } catch (err: any) {
       setToast({ message: err.message || 'Failed to update Google Sheet', type: 'error' });
+    }
+  };
+
+  const handleClearAssignmentGSheet = async () => {
+    if (!editingAssignmentGSheet) return;
+    try {
+      const res: any = await apiRequest(`/admin/assignments/${editingAssignmentGSheet.id}/google-sheet`, {
+        method: 'PUT',
+        body: JSON.stringify({ google_sheet_id: null })
+      });
+      setToast({ message: res.message || 'Class Google Sheet unlinked (reverted to faculty default)', type: 'success' });
+      setEditingAssignmentGSheet(null);
+      fetchAssignments();
+      fetchTeachers(teacherPage);
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to unlink Google Sheet', type: 'error' });
+    }
+  };
+
+  const handleSyncAssignmentRoster = async () => {
+    if (!editingAssignmentGSheet) return;
+    const currentSheetId = assignmentGSheetInput.trim() || editingAssignmentGSheet.google_sheet_id;
+    if (!currentSheetId) {
+      setToast({ message: 'Please provide or save a Google Sheet ID / URL first', type: 'error' });
+      return;
+    }
+    setIsSyncingRoster(true);
+    try {
+      const res: any = await apiRequest(`/admin/assignments/${editingAssignmentGSheet.id}/sync-roster-from-sheet`, {
+        method: 'POST',
+        body: JSON.stringify({ google_sheet_id: currentSheetId })
+      });
+      setToast({ message: res.message || 'Successfully synced student roster from Google Sheet!', type: 'success' });
+      fetchAssignments();
+      fetchStudents(studentPage);
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to sync roster from Google Sheet', type: 'error' });
+    } finally {
+      setIsSyncingRoster(false);
+    }
+  };
+
+  const handleFormatAssignmentSheet = async () => {
+    if (!editingAssignmentGSheet) return;
+    const currentSheetId = assignmentGSheetInput.trim() || editingAssignmentGSheet.google_sheet_id;
+    if (!currentSheetId) {
+      setToast({ message: 'Please provide or save a Google Sheet ID / URL first', type: 'error' });
+      return;
+    }
+    setIsFormattingSheet(true);
+    try {
+      const res: any = await apiRequest(`/admin/assignments/${editingAssignmentGSheet.id}/format-sheet`, {
+        method: 'POST',
+        body: JSON.stringify({ google_sheet_id: currentSheetId })
+      });
+      setToast({ message: res.message || 'Successfully formatted Google Sheet with SNIST register template!', type: 'success' });
+      fetchAssignments();
+      fetchTeachers(teacherPage);
+    } catch (err: any) {
+      setToast({ message: err.message || 'Failed to format Google Sheet', type: 'error' });
+    } finally {
+      setIsFormattingSheet(false);
     }
   };
 
@@ -607,9 +673,53 @@ export const Management: React.FC = () => {
                           {t.assigned_classes.map((cls: any) => (
                             <div 
                               key={cls.id} 
-                              className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-50 border border-blue-200 text-[#15347e] rounded-md font-semibold text-[11px]"
+                              className="inline-flex items-center gap-1.5 px-2 py-0.5 bg-blue-50 border border-blue-200 text-[#15347e] rounded-md font-semibold text-[11px]"
                             >
                               <span>{cls.section_name} ({cls.subject_code})</span>
+                              {cls.google_sheet_id ? (
+                                <button
+                                  onClick={() => {
+                                    setEditingAssignmentGSheet({
+                                      id: cls.id,
+                                      teacher_name: t.name,
+                                      teacher_id: t.id,
+                                      teacher_code: t.teacher_code,
+                                      subject_name: cls.subject_name || cls.subject_code,
+                                      subject_code: cls.subject_code,
+                                      section_name: cls.section_name,
+                                      student_count: 0,
+                                      google_sheet_id: cls.google_sheet_id,
+                                      google_sheet_url: cls.google_sheet_url
+                                    } as any);
+                                    setAssignmentGSheetInput(cls.google_sheet_id || '');
+                                  }}
+                                  title={`Dedicated Class Sheet: ${cls.google_sheet_id}. Click to configure or sync.`}
+                                  className="text-emerald-600 hover:text-emerald-800 p-0.5 rounded hover:bg-emerald-100 transition-colors flex items-center"
+                                >
+                                  <FileSpreadsheet className="w-3 h-3 text-emerald-600" />
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    setEditingAssignmentGSheet({
+                                      id: cls.id,
+                                      teacher_name: t.name,
+                                      teacher_id: t.id,
+                                      teacher_code: t.teacher_code,
+                                      subject_name: cls.subject_name || cls.subject_code,
+                                      subject_code: cls.subject_code,
+                                      section_name: cls.section_name,
+                                      student_count: 0,
+                                      google_sheet_id: ''
+                                    } as any);
+                                    setAssignmentGSheetInput('');
+                                  }}
+                                  title="Link dedicated Google Sheet for this class"
+                                  className="text-slate-400 hover:text-blue-600 p-0.5 rounded hover:bg-blue-100 transition-colors flex items-center"
+                                >
+                                  <FileSpreadsheet className="w-3 h-3 opacity-40 hover:opacity-100" />
+                                </button>
+                              )}
                               <button
                                 onClick={() => handleDownloadRegister(cls.id, cls.excel_file_name)}
                                 title={`Download Live Register: ${cls.excel_file_name}`}
@@ -1241,11 +1351,14 @@ export const Management: React.FC = () => {
       {/* MODAL 3: Edit Class-Specific Google Sheet */}
       {editingAssignmentGSheet && (
         <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-md p-6 space-y-4 shadow-2xl">
+          <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-lg p-6 space-y-4 shadow-2xl">
             <div className="flex items-center justify-between">
-              <h3 className="font-heading text-lg font-bold text-[#15347e]">
-                Set Class Google Sheet
-              </h3>
+              <div className="flex items-center gap-2">
+                <FileSpreadsheet className="w-5 h-5 text-emerald-600" />
+                <h3 className="font-heading text-lg font-bold text-[#15347e]">
+                  Class Google Sheet Configuration
+                </h3>
+              </div>
               <button 
                 onClick={() => setEditingAssignmentGSheet(null)}
                 className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
@@ -1255,36 +1368,116 @@ export const Management: React.FC = () => {
             </div>
 
             <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
-              <div><span className="font-bold text-slate-600">Faculty:</span> {editingAssignmentGSheet.teacher_name}</div>
-              <div><span className="font-bold text-slate-600">Class:</span> {editingAssignmentGSheet.section_name} ({editingAssignmentGSheet.subject_code})</div>
+              <div><span className="font-bold text-slate-600">Faculty:</span> <span className="text-[#17233c] font-semibold">{editingAssignmentGSheet.teacher_name}</span></div>
+              <div><span className="font-bold text-slate-600">Class:</span> <span className="text-[#17233c] font-semibold">{editingAssignmentGSheet.section_name}</span> ({editingAssignmentGSheet.subject_code})</div>
             </div>
 
-            <form onSubmit={handleSaveAssignmentGSheet} className="space-y-3">
+            <p className="text-xs text-[#6a7894]">
+              Assign a dedicated Google Sheet specifically for this class. Attendance recorded by this faculty for this class will sync directly into this sheet. If unassigned, it will use the faculty member's default sheet.
+            </p>
+
+            <form onSubmit={handleSaveAssignmentGSheet} className="space-y-4">
               <div>
                 <label className="block text-xs font-bold text-[#17233c] mb-1">Google Sheet URL or Spreadsheet ID</label>
                 <input
                   type="text"
-                  placeholder="https://docs.google.com/spreadsheets/d/.../edit"
+                  placeholder="https://docs.google.com/spreadsheets/d/.../edit or Spreadsheet ID"
                   value={assignmentGSheetInput}
                   onChange={(e) => setAssignmentGSheetInput(e.target.value)}
                   className="snist-input w-full text-xs"
                 />
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setEditingAssignmentGSheet(null)}
-                  className="px-4 py-2 bg-slate-100 text-slate-700 font-bold text-xs rounded-xl border border-slate-200"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 snist-btn-primary font-bold text-xs"
-                >
-                  Save Class Sheet
-                </button>
+              {(assignmentGSheetInput.trim() || editingAssignmentGSheet.google_sheet_id) && (
+                <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-emerald-900 flex items-center gap-1.5">
+                      <Check className="w-3.5 h-3.5 text-emerald-600" /> Connected Class Sheet
+                    </span>
+                    <a
+                      href={
+                        (assignmentGSheetInput.trim() || editingAssignmentGSheet.google_sheet_id || '').startsWith('http')
+                          ? (assignmentGSheetInput.trim() || editingAssignmentGSheet.google_sheet_id || '')
+                          : `https://docs.google.com/spreadsheets/d/${assignmentGSheetInput.trim() || editingAssignmentGSheet.google_sheet_id}/edit`
+                      }
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs font-bold text-[#2f53d7] hover:underline flex items-center gap-1"
+                    >
+                      Open Sheet <ExternalLink className="w-3 h-3" />
+                    </a>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                    {/* Format Sheet Button */}
+                    <button
+                      type="button"
+                      disabled={isFormattingSheet}
+                      onClick={handleFormatAssignmentSheet}
+                      className="p-2 bg-white hover:bg-emerald-50 border border-emerald-300 text-emerald-800 rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition disabled:opacity-50"
+                      title="Format sheet with SNIST attendance table and enrolled students roster"
+                    >
+                      {isFormattingSheet ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Formatting...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5" /> Format Template
+                        </>
+                      )}
+                    </button>
+
+                    {/* Sync Roster Button */}
+                    <button
+                      type="button"
+                      disabled={isSyncingRoster}
+                      onClick={handleSyncAssignmentRoster}
+                      className="p-2 bg-white hover:bg-blue-50 border border-blue-300 text-[#15347e] rounded-lg text-xs font-bold flex items-center justify-center gap-1.5 transition disabled:opacity-50"
+                      title="Read student roll numbers from Google Sheet and enroll into this class section"
+                    >
+                      {isSyncingRoster ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" /> Syncing...
+                        </>
+                      ) : (
+                        <>
+                          <Users className="w-3.5 h-3.5" /> Sync Roster From Sheet
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between pt-2">
+                <div>
+                  {editingAssignmentGSheet.google_sheet_id && (
+                    <button
+                      type="button"
+                      onClick={handleClearAssignmentGSheet}
+                      className="px-3 py-2 text-rose-600 hover:text-rose-800 hover:bg-rose-50 border border-rose-200 rounded-xl font-bold text-xs transition"
+                    >
+                      Clear / Unlink
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingAssignmentGSheet(null)}
+                    className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl border border-slate-200 transition"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2 snist-btn-primary font-bold text-xs"
+                  >
+                    Save Class Sheet
+                  </button>
+                </div>
               </div>
             </form>
           </div>
