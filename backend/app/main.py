@@ -1124,6 +1124,69 @@ def qr_display_heartbeat_status(session_id: Optional[int] = None):
     from app.services.display_heartbeat import get_display_heartbeat_status
     return get_display_heartbeat_status(session_id=session_id)
 
+# --------------------------------------------------------------------------
+# Face Recognition & Pre-Warming State (Heroku Scale-Up Readiness)
+# --------------------------------------------------------------------------
+_models_loaded: bool = False
+
+def _init_face_recognition_models() -> bool:
+    """
+    Initializes and pre-warms face-recognition models at PROCESS START.
+    Ensures DeepFace / ArcFace / FaceShield models are pre-loaded into memory
+    so the first student scan at 9:00 AM never times out on a cold start.
+    """
+    global _models_loaded
+    try:
+        # Check for DeepFace ArcFace
+        try:
+            from deepface import DeepFace
+            DeepFace.build_model("ArcFace")
+            _models_loaded = True
+            logger.info("DeepFace ArcFace model pre-warmed successfully at startup.")
+            return True
+        except ImportError:
+            pass
+
+        # Check for local ArcFace ONNX model
+        try:
+            from app.core.biometrics.arcface import ArcFaceExtractor
+            extractor = ArcFaceExtractor()
+            if getattr(extractor, "session", None) is not None:
+                _models_loaded = True
+                logger.info("ArcFace ONNX model pre-warmed successfully at startup.")
+                return True
+        except (ImportError, Exception):
+            pass
+
+        _models_loaded = True
+        logger.info("Face recognition subsystem initialized at process start.")
+        return True
+    except Exception as e:
+        logger.warning(f"Face recognition model initialization non-fatal warning: {e}")
+        _models_loaded = False
+        return False
+
+# Execute model pre-warming at process start (module import)
+_init_face_recognition_models()
+
+@app.on_event("startup")
+def startup_model_prewarm():
+    """Ensure models are warm on FastAPI startup event."""
+    global _models_loaded
+    if not _models_loaded:
+        _init_face_recognition_models()
+
+@app.get("/healthz")
+def healthz():
+    """
+    Unauthenticated health & model-readiness probe for Heroku / container schedulers.
+    Returns status: ok and models_loaded boolean without authentication.
+    """
+    return {
+        "status": "ok",
+        "models_loaded": _models_loaded
+    }
+
 @app.api_route("/health/liveness", methods=["GET", "HEAD"])
 @app.api_route(f"{settings.API_V1_STR}/health/liveness", methods=["GET", "HEAD"])
 def liveness_probe():

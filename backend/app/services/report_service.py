@@ -14,6 +14,15 @@ from reportlab.lib import colors
 
 class ReportService:
     @staticmethod
+    def generate_weekly_register(data: List[Dict[str, Any]], title: str = "Weekly Attendance Register") -> bytes:
+        """
+        Generates official weekly attendance register by traversing to ExcelAttendanceService.
+        Chain: reports.py -> report_service.py -> excel_service.py
+        """
+        from app.services.excel_service import ExcelAttendanceService
+        return ExcelAttendanceService.generate_weekly_register(data, title=title)
+
+    @staticmethod
     def generate_excel_report(data: List[Dict[str, Any]], title: str = "Attendance Report") -> bytes:
         """
         Generates clean formatted Excel report from attendance records.

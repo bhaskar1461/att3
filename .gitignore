@@ -33,3 +33,14 @@ backend/.env
 .claude-flow/data/
 .claude-flow/logs/
 .claude-flow/sessions/
+
+# Credentials & Secrets
+*client_secret*.json
+credentials.json
+backend/credentials.json
+token.json
+backend/token.json
+token.pickle
+backend/token.pickle
+certs/
+*.tar.gz

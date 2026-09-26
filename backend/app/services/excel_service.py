@@ -337,3 +337,105 @@ class ExcelAttendanceService:
 
         wb.close()
         return students
+
+    @classmethod
+    def generate_weekly_register(cls, records: List[Dict[str, Any]], title: str = "Weekly Attendance Register") -> bytes:
+        """
+        Generates official weekly attendance register spreadsheet byte stream.
+        Produces standardized headers matching the official SNIST register export:
+        Row 1: College header
+        Row 2: Report timestamp
+        Row 4: Headers: S.No, Roll Number, Student Name, Department, Section, Subject, Status, Date
+        Row 5+: Filtered weekly student check-in records.
+        """
+        import io
+        from openpyxl.utils import get_column_letter
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Weekly Register"
+
+        # Title Block
+        ws.merge_cells("A1:H1")
+        title_cell = ws["A1"]
+        title_cell.value = f"COLLEGE ATTENDANCE MANAGEMENT SYSTEM — {title.upper()}"
+        title_cell.font = Font(name="Arial", size=14, bold=True, color="FFFFFF")
+        title_cell.fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+        title_cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[1].height = 35
+
+        # Generated Timestamp
+        ws.merge_cells("A2:H2")
+        sub_cell = ws["A2"]
+        sub_cell.value = f"Report Generated On: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (IST)"
+        sub_cell.font = Font(name="Arial", size=10, italic=True, color="64748B")
+        sub_cell.alignment = Alignment(horizontal="center", vertical="center")
+        ws.row_dimensions[2].height = 20
+
+        # Table Headers
+        headers = ["S.No", "Roll Number", "Student Name", "Department", "Section", "Subject", "Status", "Date"]
+        ws.append([])  # Row 3 blank
+        ws.append(headers)  # Row 4 headers
+
+        header_font = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+        header_fill = PatternFill(start_color="0F172A", end_color="0F172A", fill_type="solid")
+        thin_border = Border(
+            left=Side(style='thin', color='CBD5E1'),
+            right=Side(style='thin', color='CBD5E1'),
+            top=Side(style='thin', color='CBD5E1'),
+            bottom=Side(style='thin', color='CBD5E1')
+        )
+
+        for col_num, header in enumerate(headers, 1):
+            cell = ws.cell(row=4, column=col_num)
+            cell.font = header_font
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            cell.border = thin_border
+
+        ws.row_dimensions[4].height = 25
+
+        # Populate Rows
+        for i, item in enumerate(records, 1):
+            row_data = [
+                i,
+                item.get("roll_number", ""),
+                item.get("student_name", ""),
+                item.get("department", ""),
+                item.get("section", ""),
+                item.get("subject", ""),
+                item.get("status", ""),
+                item.get("date", "")
+            ]
+            ws.append(row_data)
+            current_row = 4 + i
+            ws.row_dimensions[current_row].height = 20
+
+            fill_color = "F8FAFC" if i % 2 == 0 else "FFFFFF"
+            row_fill = PatternFill(start_color=fill_color, end_color=fill_color, fill_type="solid")
+
+            for col_num in range(1, len(headers) + 1):
+                cell = ws.cell(row=current_row, column=col_num)
+                cell.fill = row_fill
+                cell.border = thin_border
+                if col_num in [1, 2, 7, 8]:
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                else:
+                    cell.alignment = Alignment(horizontal="left", vertical="center")
+
+                if col_num == 7:
+                    if str(cell.value).upper() in ["PRESENT", "4"]:
+                        cell.font = Font(name="Arial", size=10, bold=True, color="16A34A")
+                    else:
+                        cell.font = Font(name="Arial", size=10, bold=True, color="DC2626")
+
+        for col in ws.columns:
+            max_len = max(len(str(cell.value or '')) for cell in col)
+            col_letter = get_column_letter(col[0].column)
+            ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        return output.getvalue()
+
