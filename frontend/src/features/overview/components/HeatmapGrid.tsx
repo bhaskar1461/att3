@@ -108,7 +108,6 @@ export const HeatmapGrid: React.FC<HeatmapGridProps> = ({
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' || e.key === ' ') {
                             e.preventDefault();
-                            // TODO-DRILL: Phase 8 registers page drill-down
                             onTileClick?.(cell);
                           }
                         }}
@@ -119,7 +118,6 @@ export const HeatmapGrid: React.FC<HeatmapGridProps> = ({
                           label={cell.label}
                           suppressTitle={true}
                           onClick={() => {
-                            // TODO-DRILL: Phase 8 registers page drill-down
                             onTileClick?.(cell);
                           }}
                         />

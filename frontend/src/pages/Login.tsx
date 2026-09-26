@@ -14,10 +14,32 @@ export function isRouteAllowedForRole(path: string, role?: string): boolean {
   if (!role) return true;
   const cleanPath = path.split('?')[0].split('#')[0];
   if (role === 'SUPER_ADMIN') {
-    return cleanPath.startsWith('/admin') || cleanPath.startsWith('/reports');
+    return (
+      cleanPath.startsWith('/admin') ||
+      cleanPath.startsWith('/reports') ||
+      cleanPath.startsWith('/overview') ||
+      cleanPath.startsWith('/dashboard') ||
+      cleanPath.startsWith('/roster') ||
+      cleanPath.startsWith('/compliance') ||
+      cleanPath.startsWith('/devices') ||
+      cleanPath.startsWith('/sessions') ||
+      cleanPath.startsWith('/security') ||
+      cleanPath.startsWith('/onboarding') ||
+      cleanPath.startsWith('/attendance') ||
+      cleanPath.startsWith('/dev')
+    );
   }
   if (role === 'TEACHER') {
-    return cleanPath.startsWith('/teacher') || cleanPath.startsWith('/reports') || cleanPath.startsWith('/qr-size-test');
+    return (
+      cleanPath.startsWith('/teacher') ||
+      cleanPath.startsWith('/reports') ||
+      cleanPath.startsWith('/qr-size-test') ||
+      cleanPath.startsWith('/overview') ||
+      cleanPath.startsWith('/dashboard') ||
+      cleanPath.startsWith('/roster') ||
+      cleanPath.startsWith('/sessions') ||
+      cleanPath.startsWith('/attendance')
+    );
   }
   if (role === 'STUDENT') {
     return cleanPath.startsWith('/student') || cleanPath.startsWith('/a/');
@@ -119,9 +141,9 @@ export const Login: React.FC = () => {
             if (safeNext) {
               performAuthRedirect(safeNext);
             } else if (userData.role === 'SUPER_ADMIN') {
-              performAuthRedirect('/admin');
+              performAuthRedirect('/overview');
             } else if (userData.role === 'TEACHER') {
-              performAuthRedirect('/teacher');
+              performAuthRedirect('/overview');
             } else {
               performAuthRedirect('/student?scan=true');
             }
@@ -233,9 +255,9 @@ export const Login: React.FC = () => {
         if (safeNext) {
           performAuthRedirect(safeNext);
         } else if (data.role === 'SUPER_ADMIN') {
-          performAuthRedirect('/admin');
+          performAuthRedirect('/overview');
         } else if (data.role === 'TEACHER') {
-          performAuthRedirect('/teacher');
+          performAuthRedirect('/overview');
         } else {
           performAuthRedirect('/student?scan=true');
         }
@@ -354,9 +376,9 @@ export const Login: React.FC = () => {
       if (safeNext) {
         performAuthRedirect(safeNext);
       } else if (response.role === 'SUPER_ADMIN') {
-        performAuthRedirect('/admin');
+        performAuthRedirect('/overview');
       } else if (response.role === 'TEACHER') {
-        performAuthRedirect('/teacher');
+        performAuthRedirect('/overview');
       } else {
         performAuthRedirect('/student?scan=true');
       }

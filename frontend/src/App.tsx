@@ -7,11 +7,7 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { Login, getSafeNextDestination } from './pages/Login';
 
 const DashboardPage = React.lazy(() => import('./pages/DashboardPage').then(m => ({ default: m.DashboardPage })));
-const AdminDashboard = React.lazy(() => import('./pages/AdminDashboard').then(m => ({ default: m.AdminDashboard })));
-const TeacherDashboard = React.lazy(() => import('./pages/TeacherDashboard').then(m => ({ default: m.TeacherDashboard })));
 const StudentPortal = React.lazy(() => import('./pages/StudentPortal').then(m => ({ default: m.StudentPortal })));
-const Management = React.lazy(() => import('./pages/Management').then(m => ({ default: m.Management })));
-const Reports = React.lazy(() => import('./pages/Reports').then(m => ({ default: m.Reports })));
 const OnboardingWizard = React.lazy(() => import('./pages/OnboardingWizard').then(m => ({ default: m.OnboardingWizard })));
 const PublicQrDisplay = React.lazy(() => import('./pages/PublicQrDisplay').then(m => ({ default: m.PublicQrDisplay })));
 const QrSizeTest = React.lazy(() => import('./pages/QrSizeTest').then(m => ({ default: m.QrSizeTest })));
@@ -59,8 +55,8 @@ const RoleBasedRedirect: React.FC = () => {
   }
   const safeNext = getSafeNextDestination(typeof window !== 'undefined' ? window.location.search : '', user.role);
   if (safeNext) return <Navigate to={safeNext} replace />;
-  if (user.role === 'SUPER_ADMIN') return <Navigate to="/admin" replace />;
-  if (user.role === 'TEACHER') return <Navigate to="/teacher" replace />;
+  if (user.role === 'SUPER_ADMIN') return <Navigate to="/overview" replace />;
+  if (user.role === 'TEACHER') return <Navigate to="/overview" replace />;
   return <Navigate to="/student" replace />;
 };
 
@@ -99,30 +95,11 @@ export const App: React.FC = () => {
                     }
                   />
 
-                {/* Preserved Super Admin Legacy Tabs (Rule 3: Strict Preservation) */}
-                <Route
-                  path="/admin/legacy"
-                  element={
-                    <ProtectedRoute allowedRoles={['SUPER_ADMIN']}>
-                      <AdminDashboard />
-                    </ProtectedRoute>
-                  }
-                />
-
-                <Route
-                  path="/admin/management"
-                  element={
-                    <ProtectedRoute allowedRoles={['SUPER_ADMIN']}>
-                      <Management />
-                    </ProtectedRoute>
-                  }
-                />
-
                 <Route
                   path="/teacher"
                   element={
-                    <ProtectedRoute allowedRoles={['TEACHER']}>
-                      <TeacherDashboard />
+                    <ProtectedRoute allowedRoles={['TEACHER', 'SUPER_ADMIN']}>
+                      <Navigate to="/overview" replace />
                     </ProtectedRoute>
                   }
                 />
@@ -132,16 +109,6 @@ export const App: React.FC = () => {
                   element={
                     <ProtectedRoute allowedRoles={['STUDENT']}>
                       <StudentPortal />
-                    </ProtectedRoute>
-                  }
-                />
-
-                {/* Preserved Legacy Reports (Rule 3: Strict Preservation) */}
-                <Route
-                  path="/reports/legacy"
-                  element={
-                    <ProtectedRoute allowedRoles={['SUPER_ADMIN', 'TEACHER']}>
-                      <Reports />
                     </ProtectedRoute>
                   }
                 />

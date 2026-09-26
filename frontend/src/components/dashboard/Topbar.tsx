@@ -5,7 +5,6 @@ import {
   Calendar,
   Menu,
   X,
-  Layers,
 } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip';
@@ -84,23 +83,6 @@ export const Topbar: React.FC<TopbarProps> = ({
 
         {/* Notification Bell with Live Dropdown & Unread Counter */}
         <NotificationsBell />
-
-        {/* Admin Operations Hub Button (Rule 3 Parity Access) */}
-        <Tooltip position="bottom">
-          <TooltipTrigger asChild>
-            <Link
-              to="/admin/legacy"
-              aria-label="Open Admin Operations Center"
-              className="px-3 py-1.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors"
-            >
-              <Layers className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Admin Ops Hub</span>
-            </Link>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">
-            Open Classic Admin Operations & Management Tabs
-          </TooltipContent>
-        </Tooltip>
 
         {/* User Initials Avatar & Actions Menu */}
         <div className="pl-1 sm:pl-2 border-l border-[#2a2b31]">
