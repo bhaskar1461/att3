@@ -47,7 +47,14 @@ export const Navbar: React.FC = () => {
   };
 
   // Standalone routes with their own navigation shell (/qr projector display and Phase 1+ Dashboard shell)
-  if (location.pathname === '/qr' || location.pathname.startsWith('/dashboard') || location.pathname === '/admin') {
+  if (
+    location.pathname === '/qr' || 
+    location.pathname.startsWith('/dashboard') || 
+    location.pathname === '/admin' ||
+    location.pathname.startsWith('/overview') ||
+    location.pathname.startsWith('/roster') ||
+    location.pathname.startsWith('/sessions')
+  ) {
     return null;
   }
 

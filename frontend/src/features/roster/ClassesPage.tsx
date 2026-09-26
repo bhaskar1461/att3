@@ -23,6 +23,7 @@ import {
   useRosterSectionsQuery,
   useRosterSubjectsQuery,
 } from './hooks';
+import { useAuth } from '../../context/AuthContext';
 
 export interface ClassAssignment {
   id: number;
@@ -45,6 +46,8 @@ export interface ClassAssignment {
 }
 
 export const ClassesPage: React.FC = () => {
+  const { user } = useAuth();
+  const isAdmin = (user?.role || '').toLowerCase().includes('admin');
   const [searchParams] = useSearchParams();
   const openId = searchParams.get('open');
   const queryClient = useQueryClient();
@@ -146,13 +149,15 @@ export const ClassesPage: React.FC = () => {
         title="Class Allocations"
         description="Course sections, assigned faculty educators, schedules, and active student rosters"
         actions={
-          <Button
-            onClick={handleOpenCreate}
-            className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow-sm transition-colors"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Assign Class</span>
-          </Button>
+          isAdmin ? (
+            <Button
+              onClick={handleOpenCreate}
+              className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow-sm transition-colors"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Assign Class</span>
+            </Button>
+          ) : undefined
         }
       />
 
@@ -279,14 +284,16 @@ export const ClassesPage: React.FC = () => {
                         students
                       </td>
                       <td className="py-2.5 px-3 text-right">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => handleDelete(a.id)}
-                          className="h-7 w-7 p-0 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </Button>
+                        {isAdmin && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => handleDelete(a.id)}
+                            className="h-7 w-7 p-0 text-rose-400 hover:text-rose-300 hover:bg-rose-500/10"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
                       </td>
                     </tr>
                   );

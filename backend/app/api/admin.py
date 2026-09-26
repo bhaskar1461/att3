@@ -12,7 +12,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from app.core.database import get_db
-from app.api.auth import get_current_user, require_admin
+from app.api.auth import get_current_user, require_admin, require_teacher
 from app.core.security import get_password_hash
 from app.core.config import settings
 from app.models.models import (
@@ -508,7 +508,7 @@ def get_teachers(
     department_id: Optional[int] = None,
     search: Optional[str] = None,
     db: Session = Depends(get_db), 
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_teacher)
 ):
     query = db.query(Teacher).options(
         joinedload(Teacher.department),
@@ -719,7 +719,7 @@ def list_assignments(
     teacher_id: Optional[int] = None,
     section_id: Optional[int] = None,
     db: Session = Depends(get_db), 
-    current_user: User = Depends(require_admin)
+    current_user: User = Depends(require_teacher)
 ):
     from app.services.register_service import get_assignment_register_info
     query = db.query(TeacherAssignment).options(
