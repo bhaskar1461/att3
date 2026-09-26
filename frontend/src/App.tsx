@@ -7,6 +7,7 @@ import { ProtectedRoute } from './components/ProtectedRoute';
 import { Login, getSafeNextDestination } from './pages/Login';
 
 const DashboardPage = React.lazy(() => import('./pages/DashboardPage').then(m => ({ default: m.DashboardPage })));
+const TeacherDashboard = React.lazy(() => import('./pages/TeacherDashboard').then(m => ({ default: m.TeacherDashboard })));
 const StudentPortal = React.lazy(() => import('./pages/StudentPortal').then(m => ({ default: m.StudentPortal })));
 const OnboardingWizard = React.lazy(() => import('./pages/OnboardingWizard').then(m => ({ default: m.OnboardingWizard })));
 const PublicQrDisplay = React.lazy(() => import('./pages/PublicQrDisplay').then(m => ({ default: m.PublicQrDisplay })));
@@ -56,7 +57,7 @@ const RoleBasedRedirect: React.FC = () => {
   const safeNext = getSafeNextDestination(typeof window !== 'undefined' ? window.location.search : '', user.role);
   if (safeNext) return <Navigate to={safeNext} replace />;
   if (user.role === 'SUPER_ADMIN') return <Navigate to="/overview" replace />;
-  if (user.role === 'TEACHER') return <Navigate to="/overview" replace />;
+  if (user.role === 'TEACHER') return <Navigate to="/teacher" replace />;
   return <Navigate to="/student" replace />;
 };
 
@@ -99,7 +100,7 @@ export const App: React.FC = () => {
                   path="/teacher"
                   element={
                     <ProtectedRoute allowedRoles={['TEACHER', 'SUPER_ADMIN']}>
-                      <Navigate to="/overview" replace />
+                      <TeacherDashboard />
                     </ProtectedRoute>
                   }
                 />

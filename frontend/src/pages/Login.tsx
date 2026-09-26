@@ -257,7 +257,7 @@ export const Login: React.FC = () => {
         } else if (data.role === 'SUPER_ADMIN') {
           performAuthRedirect('/overview');
         } else if (data.role === 'TEACHER') {
-          performAuthRedirect('/overview');
+          performAuthRedirect('/teacher');
         } else {
           performAuthRedirect('/student?scan=true');
         }
@@ -378,7 +378,7 @@ export const Login: React.FC = () => {
       } else if (response.role === 'SUPER_ADMIN') {
         performAuthRedirect('/overview');
       } else if (response.role === 'TEACHER') {
-        performAuthRedirect('/overview');
+        performAuthRedirect('/teacher');
       } else {
         performAuthRedirect('/student?scan=true');
       }
