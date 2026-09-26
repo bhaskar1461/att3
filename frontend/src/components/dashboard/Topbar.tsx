@@ -8,11 +8,15 @@ import {
   Menu,
   X,
   Command,
+  Layers,
+  LogOut,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { Avatar } from '../ui/avatar';
 import { Tooltip, TooltipTrigger, TooltipContent } from '../ui/tooltip';
 import { useDashboardHeader } from '../../hooks/useDashboardHeader';
 import { useTheme } from '../../hooks/useTheme';
+import { useAuth } from '../../context/AuthContext';
 
 interface TopbarProps {
   isMobileSidebarOpen: boolean;
@@ -26,6 +30,7 @@ export const Topbar: React.FC<TopbarProps> = ({
 }) => {
   const { livePillText, user, notificationCount, currentDateFormatted } = useDashboardHeader();
   const { isDark, toggleTheme } = useTheme();
+  const { logout } = useAuth();
 
   return (
     <header className="h-16 w-full sticky top-0 bg-[#17181c] border-b border-[#2a2b31] px-4 sm:px-6 flex items-center justify-between gap-3 z-20 select-none">
@@ -116,6 +121,23 @@ export const Topbar: React.FC<TopbarProps> = ({
           </TooltipContent>
         </Tooltip>
 
+        {/* Admin Operations Hub Button (Rule 3 Parity Access) */}
+        <Tooltip position="bottom">
+          <TooltipTrigger asChild>
+            <Link
+              to="/admin/legacy"
+              aria-label="Open Admin Operations Center"
+              className="px-3 py-1.5 rounded-xl bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Admin Ops Hub</span>
+            </Link>
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            Open Classic Admin Operations & Management Tabs
+          </TooltipContent>
+        </Tooltip>
+
         {/* User Avatar + Name & Role */}
         <div className="flex items-center gap-2.5 pl-1 sm:pl-2 border-l border-[#2a2b31]">
           <Avatar
@@ -130,6 +152,21 @@ export const Topbar: React.FC<TopbarProps> = ({
               {user.role}
             </span>
           </div>
+
+          <Tooltip position="bottom">
+            <TooltipTrigger asChild>
+              <button
+                onClick={logout}
+                aria-label="Sign Out"
+                className="w-8 h-8 rounded-xl bg-[#1e1f24] hover:bg-red-500/20 border border-[#2a2b31] hover:border-red-500/40 text-[#9ca3af] hover:text-red-300 flex items-center justify-center transition-colors ml-1"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              Sign Out
+            </TooltipContent>
+          </Tooltip>
         </div>
 
       </div>

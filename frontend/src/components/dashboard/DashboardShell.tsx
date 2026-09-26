@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { useSearchParams, useNavigate, useLocation } from 'react-router-dom';
 import { IconRail } from './IconRail';
 import { SecondarySidebar } from './SecondarySidebar';
@@ -10,8 +10,14 @@ import { useSidebarState } from '../../hooks/useSidebarState';
 import { useNavigation } from '../../hooks/useNavigation';
 import { useTheme } from '../../hooks/useTheme';
 import { useAuth } from '../../features/auth/hooks';
+import { navRegistry, routeRegistry } from '../../core/registries';
+import { BreadcrumbData } from '../../services/mockApi';
 
-export const DashboardShell: React.FC = () => {
+export interface DashboardShellProps {
+  children?: React.ReactNode;
+}
+
+export const DashboardShell: React.FC<DashboardShellProps> = ({ children }) => {
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -27,17 +33,14 @@ export const DashboardShell: React.FC = () => {
     toggleMobile,
   } = useSidebarState();
 
-  // Navigation data from typed mockApi hook
-  const [activeSection, setActiveSection] = useState<string>('Live Overview');
   const [activeRailId, setActiveRailId] = useState<string>('dashboard');
-  const [activeSidebarId, setActiveSidebarId] = useState<string>('overview');
 
   const [searchParams, setSearchParams] = useSearchParams();
   const rawRange = searchParams.get('range');
   const range: 'today' | 'week' | 'month' =
     rawRange === 'today' || rawRange === 'week' || rawRange === 'month'
       ? rawRange
-      : 'today'; // default today
+      : 'week'; // default week per Phase 7/8 specs
 
   const handleRangeChange = (newRange: 'today' | 'week' | 'month') => {
     setSearchParams((prev) => {
@@ -48,35 +51,69 @@ export const DashboardShell: React.FC = () => {
   };
 
   const { user } = useAuth();
-  const currentRole = (user?.role || '').toLowerCase() === 'teacher' ? 'teacher' : 'admin';
+  const currentRole = (user?.role || '').toLowerCase().includes('teacher') ? 'teacher' : 'admin';
 
-  const { railItems, sidebarItems, proCard, breadcrumb } = useNavigation(activeSection);
+  const { railItems, proCard } = useNavigation();
+
+  // Dynamic route & section discovery for clean breadcrumbs and active item
+  const currentCleanPath = location.pathname.split('?')[0].split('#')[0];
+  const allNavs = navRegistry.all(currentRole);
+  const matchedNav = allNavs.find((n) => n.path === currentCleanPath);
+  const matchedRoute = routeRegistry.all().find((r) => r.path === currentCleanPath);
+
+  const activeSidebarId = matchedNav?.id || currentCleanPath;
+
+  const derivedBreadcrumb: BreadcrumbData = useMemo(() => {
+    let section = 'Dashboard';
+    if (matchedNav?.section) {
+      section = matchedNav.section;
+    } else if (currentCleanPath.startsWith('/roster')) {
+      section = 'Roster';
+    } else if (currentCleanPath.startsWith('/devices')) {
+      section = 'Devices';
+    } else if (currentCleanPath.startsWith('/sessions')) {
+      section = 'Sessions';
+    } else if (currentCleanPath.startsWith('/security')) {
+      section = 'Security';
+    } else if (currentCleanPath.startsWith('/onboarding')) {
+      section = 'Onboarding';
+    } else if (currentCleanPath.startsWith('/admin')) {
+      section = 'Admin';
+    } else if (currentCleanPath.startsWith('/attendance')) {
+      section = 'Attendance';
+    }
+
+    const title =
+      matchedRoute?.title ||
+      matchedNav?.label ||
+      (currentCleanPath === '/dashboard' || currentCleanPath === '/overview'
+        ? 'Overview'
+        : 'Dashboard');
+
+    return {
+      rootLabel: 'Home',
+      sectionLabel: section.charAt(0).toUpperCase() + section.slice(1).toLowerCase(),
+      currentLabel: title,
+    };
+  }, [currentCleanPath, matchedNav, matchedRoute]);
 
   const handleRailSelect = (id: string) => {
     setActiveRailId(id);
     const matchedItem = railItems.find((item) => item.id === id);
-    if (matchedItem) {
-      setActiveSection(matchedItem.label);
-      if (matchedItem.path && matchedItem.path !== location.pathname && matchedItem.path !== '/dashboard') {
-        navigate(matchedItem.path);
-      }
+    if (matchedItem && matchedItem.path && matchedItem.path !== location.pathname) {
+      navigate(matchedItem.path);
     }
   };
 
   const handleSidebarSelect = (id: string) => {
-    setActiveSidebarId(id);
-    const matchedItem = sidebarItems.find((item) => item.id === id);
-    if (matchedItem) {
-      setActiveSection(matchedItem.label);
-      if (matchedItem.path && matchedItem.path !== location.pathname && matchedItem.path !== '/dashboard') {
-        navigate(matchedItem.path);
-      }
+    const matchedEntry = allNavs.find((item) => item.id === id || item.path === id);
+    if (matchedEntry && matchedEntry.path !== location.pathname) {
+      navigate(matchedEntry.path);
     }
   };
 
   return (
     <div className="min-h-screen w-full bg-[#141416] text-[#f8fafc] font-sans flex antialiased selection:bg-indigo-600 selection:text-white overflow-x-hidden">
-      
       {/* Desktop Navigation Shell (>= 1024px) */}
       <div className="hidden lg:flex shrink-0">
         {/* 56px Icon Rail */}
@@ -88,13 +125,13 @@ export const DashboardShell: React.FC = () => {
           onToggleSidebar={toggleSidebar}
         />
 
-        {/* 240px Collapsible Secondary Sidebar */}
+        {/* 240px Collapsible Secondary Sidebar (100% registry-driven) */}
         <SecondarySidebar
-          items={sidebarItems}
           activeId={activeSidebarId}
           onSelect={handleSidebarSelect}
           isCollapsed={isCollapsed}
           proCard={proCard}
+          currentRole={currentRole}
         />
       </div>
 
@@ -123,7 +160,6 @@ export const DashboardShell: React.FC = () => {
           onToggleSidebar={toggleSidebar}
         />
         <SecondarySidebar
-          items={sidebarItems}
           activeId={activeSidebarId}
           onSelect={(id) => {
             handleSidebarSelect(id);
@@ -131,6 +167,7 @@ export const DashboardShell: React.FC = () => {
           }}
           isCollapsed={false}
           proCard={proCard}
+          currentRole={currentRole}
           onCloseMobile={() => setIsMobileOpen(false)}
         />
       </div>
@@ -145,20 +182,26 @@ export const DashboardShell: React.FC = () => {
 
         {/* Breadcrumb Row: Trail and Server-Time status with Range Selector */}
         <BreadcrumbRow
-          breadcrumb={breadcrumb}
+          breadcrumb={derivedBreadcrumb}
           range={range}
           onRangeChange={handleRangeChange}
         />
 
-        {/* 12-Column Responsive Dashboard Grid: KPI row on top, Main (col-8) + Side (col-4) below */}
+        {/* Dynamic Page Content OR 12-Column Responsive Dashboard Overview Grid */}
         <main className="flex-1 pb-12">
-          <div className="p-4 sm:p-6 space-y-6">
-            <DashboardGrid zone="kpi" role={currentRole} range={range} />
-            <div className="grid grid-cols-12 gap-6">
-              <DashboardGrid zone="main" role={currentRole} range={range} />
-              <DashboardGrid zone="side" role={currentRole} range={range} />
+          {children ? (
+            <div className="p-4 sm:p-6 space-y-6 max-w-7xl mx-auto">
+              {children}
             </div>
-          </div>
+          ) : (
+            <div className="p-4 sm:p-6 space-y-6">
+              <DashboardGrid zone="kpi" role={currentRole} range={range} />
+              <div className="grid grid-cols-12 gap-6">
+                <DashboardGrid zone="main" role={currentRole} range={range} />
+                <DashboardGrid zone="side" role={currentRole} range={range} />
+              </div>
+            </div>
+          )}
         </main>
       </div>
 
@@ -166,3 +209,5 @@ export const DashboardShell: React.FC = () => {
     </div>
   );
 };
+
+export default DashboardShell;

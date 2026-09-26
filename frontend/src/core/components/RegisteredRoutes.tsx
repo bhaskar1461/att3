@@ -4,13 +4,14 @@ import { Role } from '../types';
 import { routeRegistry } from '../registries';
 import { RoleGate } from './RoleGate';
 import { SkeletonCard } from '../../components/dashboard/SkeletonCard';
+import { DashboardShell } from '../../components/dashboard/DashboardShell';
 
 export interface RegisteredRoutesProps {
   currentRole?: Role;
 }
 
 export const RegisteredRoutes: React.FC<RegisteredRoutesProps> = ({ currentRole = 'admin' }) => {
-  const routes = routeRegistry.all(currentRole);
+  const routes = routeRegistry.all();
 
   return (
     <Routes>
@@ -23,7 +24,9 @@ export const RegisteredRoutes: React.FC<RegisteredRoutesProps> = ({ currentRole 
             element={
               <RoleGate roles={entry.roles} currentRole={currentRole}>
                 <Suspense fallback={<SkeletonCard className="m-4" height={360} />}>
-                  <Component />
+                  <DashboardShell>
+                    <Component />
+                  </DashboardShell>
                 </Suspense>
               </RoleGate>
             }
@@ -34,8 +37,8 @@ export const RegisteredRoutes: React.FC<RegisteredRoutesProps> = ({ currentRole 
   );
 };
 
-export function renderRegisteredRouteElements(currentRole: Role = 'admin') {
-  const routes = routeRegistry.all(currentRole);
+export function renderRegisteredRouteElements(currentRole?: Role) {
+  const routes = routeRegistry.all();
   return routes.map((entry) => {
     const Component = entry.component;
     return (
@@ -45,7 +48,9 @@ export function renderRegisteredRouteElements(currentRole: Role = 'admin') {
         element={
           <RoleGate roles={entry.roles} currentRole={currentRole}>
             <Suspense fallback={<SkeletonCard className="m-4" height={360} />}>
-              <Component />
+              <DashboardShell>
+                <Component />
+              </DashboardShell>
             </Suspense>
           </RoleGate>
         }

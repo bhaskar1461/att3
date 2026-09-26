@@ -7,6 +7,8 @@ export interface HeatmapTileProps {
   onClick?: () => void;
   loading?: boolean;
   className?: string;
+  suppressTitle?: boolean;
+  tabIndex?: number;
 }
 
 export const HeatmapTile: React.FC<HeatmapTileProps> = ({
@@ -16,6 +18,8 @@ export const HeatmapTile: React.FC<HeatmapTileProps> = ({
   onClick,
   loading = false,
   className = '',
+  suppressTitle = false,
+  tabIndex,
 }) => {
   if (loading) {
     return (
@@ -25,12 +29,13 @@ export const HeatmapTile: React.FC<HeatmapTileProps> = ({
 
   const clamped = Math.min(1, Math.max(0, intensity));
   const percent = Math.round(clamped * 100);
-  const isInteractive = Boolean(onClick);
+  const isInteractive = Boolean(onClick) || tabIndex !== undefined;
+  const effectiveTabIndex = tabIndex !== undefined ? tabIndex : isInteractive ? 0 : undefined;
 
   return (
     <div
-      title={`${label} — ${count} check-ins`}
-      tabIndex={isInteractive ? 0 : undefined}
+      title={suppressTitle ? undefined : `${label} — ${count} check-ins`}
+      tabIndex={effectiveTabIndex}
       role={isInteractive ? 'button' : undefined}
       onClick={onClick}
       onKeyDown={
@@ -44,9 +49,9 @@ export const HeatmapTile: React.FC<HeatmapTileProps> = ({
           : undefined
       }
       style={{
-        backgroundColor: `color-mix(in srgb, #6366f1 ${percent}%, #1e1f24)`,
+        backgroundColor: `color-mix(in srgb, #6366f1 ${percent}%, var(--heatmap-tile-base, #1e1f24))`,
       }}
-      className={`w-[28px] h-[28px] rounded-md border border-[#2a2b31]/80 transition-all ${
+      className={`w-[28px] h-[28px] rounded-md border border-[#2a2b31]/80 dark:border-[#2a2b31]/80 border-slate-200 transition-all ${
         isInteractive
           ? 'cursor-pointer hover:scale-110 hover:border-indigo-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500'
           : ''

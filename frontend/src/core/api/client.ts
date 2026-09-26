@@ -50,7 +50,10 @@ export async function api<T>(path: string, schema: ZodType<T>, init?: RequestIni
     headers.set('Content-Type', 'application/json');
   }
 
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('access_token') : null;
+  const token =
+    typeof localStorage !== 'undefined'
+      ? localStorage.getItem('access_token') || localStorage.getItem('token')
+      : null;
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`);
   }

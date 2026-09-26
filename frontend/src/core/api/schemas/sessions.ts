@@ -29,7 +29,7 @@ export const HistoricalSessionSchema = z.object({
   period: z.string(),
   period_count: z.number().optional().nullable(),
   session_date: z.string(),
-  status: z.enum(['OPEN', 'LOCKED']),
+  status: z.enum(['OPEN', 'LOCKED', 'CLOSED']),
   total_students: z.number(),
   present_count: z.number().optional().nullable(),
   manual_count: z.number().optional().nullable(),

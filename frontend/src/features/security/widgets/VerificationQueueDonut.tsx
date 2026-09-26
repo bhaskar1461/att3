@@ -10,6 +10,7 @@ import {
 } from '../selectors';
 import { useOnboardingStatusQuery, useOnboardingRebindRequestsQuery } from '../../onboarding/hooks';
 import { useSecurityAuditLogsQuery } from '../hooks';
+import { setBadge } from '../../../core/badges';
 
 export const VerificationQueueDonut: React.FC<WidgetProps> = () => {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -75,6 +76,12 @@ export const VerificationQueueDonut: React.FC<WidgetProps> = () => {
       segments: segs,
     };
   }, [approvalsQuery.data, spoofQuery.data, recoveriesQuery.data]);
+
+  // Publish live badge counts to core store (Part A & Part E)
+  React.useEffect(() => {
+    setBadge('devices.recoveries', counts.recoveries);
+    setBadge('security.alerts', counts.spoof);
+  }, [counts.recoveries, counts.spoof]);
 
   if (isLoading) {
     return <SkeletonCard chart="donut" className="min-h-[340px] p-5" lines={4} />;

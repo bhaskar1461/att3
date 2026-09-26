@@ -4,12 +4,16 @@ import { BreadcrumbData } from '../../services/mockApi';
 
 interface BreadcrumbRowProps {
   breadcrumb: BreadcrumbData;
+  range?: 'today' | 'week' | 'month';
+  onRangeChange?: (range: 'today' | 'week' | 'month') => void;
   onRefresh?: () => void;
   isRefreshing?: boolean;
 }
 
 export const BreadcrumbRow: React.FC<BreadcrumbRowProps> = ({
   breadcrumb,
+  range = 'week',
+  onRangeChange,
   onRefresh,
   isRefreshing = false,
 }) => {
@@ -33,6 +37,26 @@ export const BreadcrumbRow: React.FC<BreadcrumbRowProps> = ({
 
       {/* Right Meta Pills / Actions */}
       <div className="flex items-center gap-2 text-xs">
+        {/* Range Selector: today | week | month */}
+        {onRangeChange && (
+          <div className="flex items-center rounded-lg bg-[#1e1f24] p-0.5 border border-[#2a2b31] text-xs mr-1">
+            {(['today', 'week', 'month'] as const).map((r) => (
+              <button
+                key={r}
+                type="button"
+                onClick={() => onRangeChange(r)}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors capitalize ${
+                  range === r
+                    ? 'bg-indigo-600 text-white font-semibold shadow-sm'
+                    : 'text-[#9ca3af] hover:text-white'
+                }`}
+              >
+                {r}
+              </button>
+            ))}
+          </div>
+        )}
+
         {/* Server Authoritative Time IST Badge */}
         <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#1e1f24] border border-[#2a2b31] text-[#9ca3af]">
           <Clock className="w-3 h-3 text-indigo-400" />

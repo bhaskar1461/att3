@@ -23,6 +23,7 @@
   --dash-topbar: #ffffff;
   --dash-text: #0f172a;
   --dash-muted: #64748b;
+  --heatmap-tile-base: #f4f4f5;
 }
 
 .dark {
@@ -35,6 +36,7 @@
   --dash-topbar: #17181c;
   --dash-text: #f3f4f6;
   --dash-muted: #9ca3af;
+  --heatmap-tile-base: #1e1f24;
 }
 
 @layer base {

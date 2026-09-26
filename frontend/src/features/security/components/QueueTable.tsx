@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { X, Smartphone, ShieldAlert, UserCheck, Inbox } from 'lucide-react';
+import { useSearchParams, Link } from 'react-router-dom';
+import { X, Smartphone, ShieldAlert, UserCheck, Inbox, ExternalLink } from 'lucide-react';
 import { Card, CardHeader, CardContent } from '../../../components/ui/card';
 import { useAuth } from '../../auth/hooks';
 import { can } from '../../../core/roles';
@@ -264,13 +264,29 @@ export const QueueTable: React.FC = () => {
           </div>
         )}
 
-        {/* Footer info & cap note */}
+        {/* Footer info & cap note linking to full queue page */}
         {totalCount > 0 && (
           <div className="p-3 px-4 border-t border-[#2a2b31] bg-[#17181c]/60 flex items-center justify-between text-[11px] text-[#9ca3af]">
             <span>
-              {totalCount > 50
-                ? `Showing 50 of ${totalCount} — full page in Phase 8`
-                : `Showing all ${totalCount} open items`}
+              <Link
+                to={
+                  queue === 'recoveries'
+                    ? '/devices/recoveries'
+                    : queue === 'spoof'
+                    ? '/security?tab=spoof'
+                    : queue === 'approvals'
+                    ? '/onboarding'
+                    : '/devices/recoveries'
+                }
+                className="text-indigo-400 hover:text-indigo-300 hover:underline font-medium inline-flex items-center gap-1"
+              >
+                <span>
+                  {totalCount > 50
+                    ? `Showing 50 of ${totalCount} — view full queue`
+                    : `Showing all ${totalCount} open items — view full queue`}
+                </span>
+                <ExternalLink className="w-3 h-3" />
+              </Link>
             </span>
             <span className="font-mono text-slate-500">Live Queue Synced</span>
           </div>

@@ -27,4 +27,13 @@ export const attendanceEndpoints = {
       method: 'POST',
       body: JSON.stringify({ session_id: sessionId }),
     }),
+
+  getAttendanceRecords: (params?: { range?: 'today' | 'week' | 'month'; scope?: 'mine' | 'all'; teacher_id?: number }) => {
+    const qp = new URLSearchParams();
+    if (params?.range) qp.set('range', params.range);
+    if (params?.scope) qp.set('scope', params.scope);
+    if (params?.teacher_id) qp.set('teacher_id', String(params.teacher_id));
+    const qs = qp.toString() ? `?${qp.toString()}` : '';
+    return api(`/api/v1/attendance/records${qs}`, z.array(s.AttendanceRecordSchema));
+  },
 };

@@ -55,7 +55,7 @@ export const keys = {
   },
   overview: {
     all: () => ['overview'] as const,
-    stats: (range: Range = 'today') => ['overview', 'stats', range] as const,
+    stats: (range: Range = 'today', scope: 'mine' | 'all' = 'all') => ['overview', 'stats', range, scope] as const,
     heatmap: (range: Range = 'today') => ['overview', 'heatmap', range] as const,
     sources: (range: Range = 'today') => ['overview', 'sources', range] as const,
     trends: (range: Range = 'week') => ['overview', 'trends', range] as const,

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../core/auth/AuthProvider';
+export { useAuth };
 import { keys } from '../../core/api/keys';
 import { authEndpoints } from '../../core/api/endpoints/auth';
 
@@ -42,7 +43,10 @@ export const useLogoutMutation = () => {
 };
 
 export const useCurrentUserQuery = () => {
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('access_token') : null;
+  const token =
+    typeof localStorage !== 'undefined'
+      ? localStorage.getItem('access_token') || localStorage.getItem('token')
+      : null;
   return useQuery({
     queryKey: keys.auth.me(),
     queryFn: authEndpoints.me,

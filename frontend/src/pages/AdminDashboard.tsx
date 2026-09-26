@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { apiRequest } from '../services/api';
 import { DashboardStats } from '../types';
 import { Users, UserCheck, BarChart2, Shield, ShieldCheck, Settings, FileText, CheckCircle2, RefreshCw, Layers, FileSpreadsheet, ClipboardList, Mail, Smartphone, Activity } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { ClassExcelRegisterModal } from '../components/ClassExcelRegisterModal';
 import { DepartmentEnrollmentModal } from '../components/admin/DepartmentEnrollmentModal';
 import { OnboardingManager } from '../components/admin/OnboardingManager';
@@ -17,7 +17,31 @@ export const AdminDashboard: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isExcelRegisterOpen, setIsExcelRegisterOpen] = useState(false);
   const [isEnrollmentModalOpen, setIsEnrollmentModalOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'compliance' | 'onboarding' | 'credentials' | 'devices' | 'scanner_health'>('dashboard');
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const validTabs = ['dashboard', 'compliance', 'onboarding', 'credentials', 'devices', 'scanner_health'] as const;
+  type TabType = typeof validTabs[number];
+  const urlTab = searchParams.get('tab') as TabType | null;
+
+  const [activeTab, setActiveTab] = useState<TabType>(
+    urlTab && validTabs.includes(urlTab) ? urlTab : 'dashboard'
+  );
+
+  useEffect(() => {
+    const tabFromUrl = searchParams.get('tab') as TabType | null;
+    if (tabFromUrl && validTabs.includes(tabFromUrl) && tabFromUrl !== activeTab) {
+      setActiveTab(tabFromUrl);
+    }
+  }, [searchParams]);
+
+  const handleTabChange = (tab: TabType) => {
+    setActiveTab(tab);
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev);
+      next.set('tab', tab);
+      return next;
+    });
+  };
 
   // Keyset / Offset Pagination State for Audit Logs
   const [auditPage, setAuditPage] = useState<number>(1);
@@ -78,7 +102,13 @@ export const AdminDashboard: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <Link
+            to="/admin"
+            className="px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white font-bold rounded-xl text-xs flex items-center gap-2 shadow-md shadow-indigo-600/20 transition active:scale-95"
+          >
+            <BarChart2 className="w-4 h-4 text-indigo-200" /> Live Analytics Dashboard
+          </Link>
           <button
             onClick={() => setIsExcelRegisterOpen(true)}
             className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl text-xs flex items-center gap-2 shadow-md shadow-emerald-600/20 transition active:scale-95"
@@ -114,7 +144,7 @@ export const AdminDashboard: React.FC = () => {
           return (
             <button
               key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
+              onClick={() => handleTabChange(tab.key)}
               className={`px-4 py-2 text-xs font-bold rounded-xl flex items-center gap-2 transition-all ${
                 activeTab === tab.key
                   ? 'bg-[#2f53d7] text-white shadow-md shadow-[#2f53d7]/20'

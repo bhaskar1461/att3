@@ -16,8 +16,11 @@ export const rosterEndpoints = {
     const qp = new URLSearchParams();
     if (params?.page) qp.set('page', String(params.page));
     if (params?.page_size) qp.set('page_size', String(params.page_size));
-    if (params?.q) qp.set('q', params.q);
     if (params?.section_id) qp.set('section_id', String(params.section_id));
+    if (params?.q) {
+      qp.set('q', params.q);
+      qp.set('search', params.q);
+    }
     if (params?.department_id) qp.set('department_id', String(params.department_id));
     const query = qp.toString() ? `?${qp.toString()}` : '';
     return api(`/api/v1/admin/students${query}`, s.StudentListSchema);

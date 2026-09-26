@@ -5,6 +5,7 @@ import { AttendanceRateCard } from './widgets/AttendanceRateCard';
 import { LiveSessionsCard } from './widgets/LiveSessionsCard';
 import { AttendanceHeroCard } from './widgets/AttendanceHeroCard';
 import { AttendanceTrendCard } from './widgets/AttendanceTrendCard';
+import { ScanHeatmapCard } from './widgets/ScanHeatmapCard';
 
 export const manifest: FeatureManifest = {
   name: 'overview',
@@ -13,7 +14,7 @@ export const manifest: FeatureManifest = {
       id: 'overview-dashboard',
       label: 'Overview',
       icon: 'LayoutDashboard',
-      path: '/dashboard',
+      path: '/overview',
       section: 'DASHBOARD',
       roles: ['admin', 'teacher'],
       order: 10,
@@ -57,8 +58,16 @@ export const manifest: FeatureManifest = {
       zone: 'main',
       order: 10,
       roles: ['admin', 'teacher'],
-      grid: { cols: 7, rows: 1 },
+      grid: { cols: 12, rows: 1 },
       component: AttendanceTrendCard,
+    },
+    {
+      id: 'overview.heatmap',
+      zone: 'main',
+      order: 20,
+      roles: ['admin', 'teacher'],
+      grid: { cols: 12, rows: 1 },
+      component: ScanHeatmapCard,
     },
     {
       id: 'overview.hero',

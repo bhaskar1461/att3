@@ -437,3 +437,146 @@ export const bucketBy = (
   });
 };
 
+export interface HeatmapCell {
+  dayIndex: number; // 0..6 (Mon..Sun)
+  hourIndex: number; // 0..5 (8am..6pm)
+  dayLabel: string; // 'Mon'..'Sun'
+  hourLabel: string; // '8am'..'6pm'
+  hourBand: number; // 8, 10, 12, 14, 16, 18
+  dateString: string; // YYYY-MM-DD
+  label: string; // e.g. 'Tue 10am'
+  count: number;
+  intensity: number; // 0..1
+}
+
+export interface WeekHourMatrixResult {
+  matrix: HeatmapCell[][]; // 6 rows (hours) x 7 cols (days)
+  cells: HeatmapCell[]; // 42 cells in row-major order
+  totalScans: number;
+  maxCount: number;
+  dayLabels: string[];
+  hourLabels: string[];
+}
+
+export const HEATMAP_DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+export const HEATMAP_HOUR_LABELS = ['8am', '10am', '12pm', '2pm', '4pm', '6pm'];
+const HEATMAP_HOUR_BANDS = [8, 10, 12, 14, 16, 18];
+
+/**
+ * Server TZ Note:
+ * Uses the backend's stored timestamp values (naive IST/server timestamp as stored without client drift).
+ * Timestamps are parsed matching the stored hour and calendar date directly.
+ * 
+ * TODO-REAL: replace client weekHourMatrix with server-aggregate endpoint
+ */
+export const weekHourMatrix = (
+  records: AttendanceRecord[] | undefined | null
+): WeekHourMatrixResult => {
+  // Initialize 6 rows x 7 cols count grid
+  const counts: number[][] = Array.from({ length: 6 }, () => Array(7).fill(0));
+  // Track representative calendar date for each bucket (hour x day)
+  const bucketDates: (string | null)[][] = Array.from({ length: 6 }, () => Array(7).fill(null));
+
+  if (records && Array.isArray(records)) {
+    for (const r of records) {
+      const timeStr = r.verified_at || r.created_at;
+      if (!timeStr) continue;
+
+      let dayIndex = -1;
+      let hour = -1;
+      let datePart = '';
+
+      // Extract calendar date and hour directly to respect stored server TZ
+      const match = String(timeStr).match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2})/);
+      if (match) {
+        datePart = `${match[1]}-${match[2]}-${match[3]}`;
+        const year = parseInt(match[1], 10);
+        const month = parseInt(match[2], 10) - 1;
+        const day = parseInt(match[3], 10);
+        hour = parseInt(match[4], 10);
+        const d = new Date(year, month, day);
+        // Map Monday -> 0, Tuesday -> 1, ..., Sunday -> 6
+        dayIndex = (d.getDay() + 6) % 7;
+      } else {
+        const d = new Date(timeStr);
+        if (!isNaN(d.getTime())) {
+          datePart = d.toISOString().split('T')[0];
+          hour = d.getHours();
+          dayIndex = (d.getDay() + 6) % 7;
+        }
+      }
+
+      // Check-ins whose timestamp falls in [band, band+2h) on that weekday
+      if (dayIndex >= 0 && dayIndex < 7 && hour >= 8 && hour < 20) {
+        const hourIndex = Math.floor((hour - 8) / 2);
+        if (hourIndex >= 0 && hourIndex < 6) {
+          counts[hourIndex][dayIndex]++;
+          if (datePart && !bucketDates[hourIndex][dayIndex]) {
+            bucketDates[hourIndex][dayIndex] = datePart;
+          }
+        }
+      }
+    }
+  }
+
+  // Fallback date calculation based on current week Monday
+  const now = new Date();
+  const currentDayIndex = (now.getDay() + 6) % 7;
+  const monday = new Date(now);
+  monday.setDate(now.getDate() - currentDayIndex);
+
+  let totalScans = 0;
+  let maxCount = 0;
+  for (let h = 0; h < 6; h++) {
+    for (let d = 0; d < 7; d++) {
+      const c = counts[h][d];
+      totalScans += c;
+      if (c > maxCount) maxCount = c;
+    }
+  }
+
+  const matrix: HeatmapCell[][] = [];
+  const cells: HeatmapCell[] = [];
+
+  for (let h = 0; h < 6; h++) {
+    const row: HeatmapCell[] = [];
+    const hourLabel = HEATMAP_HOUR_LABELS[h];
+    const hourBand = HEATMAP_HOUR_BANDS[h];
+
+    for (let d = 0; d < 7; d++) {
+      const dayLabel = HEATMAP_DAY_LABELS[d];
+      const count = counts[h][d];
+      const intensity = maxCount > 0 ? Math.min(1, Math.max(0, count / maxCount)) : 0;
+      
+      const dayOffsetDate = new Date(monday);
+      dayOffsetDate.setDate(monday.getDate() + d);
+      const fallbackDate = dayOffsetDate.toISOString().split('T')[0];
+      const dateString = bucketDates[h][d] || fallbackDate;
+
+      const cell: HeatmapCell = {
+        dayIndex: d,
+        hourIndex: h,
+        dayLabel,
+        hourLabel,
+        hourBand,
+        dateString,
+        label: `${dayLabel} ${hourLabel}`,
+        count,
+        intensity,
+      };
+      row.push(cell);
+      cells.push(cell);
+    }
+    matrix.push(row);
+  }
+
+  return {
+    matrix,
+    cells,
+    totalScans,
+    maxCount,
+    dayLabels: HEATMAP_DAY_LABELS,
+    hourLabels: HEATMAP_HOUR_LABELS,
+  };
+};
+

@@ -19,6 +19,7 @@ const AttendanceLanding = React.lazy(() => import('./pages/AttendanceLanding').t
 const ComponentsShowcase = React.lazy(() => import('./dev/ComponentsShowcase').then(m => ({ default: m.ComponentsShowcase })));
 const ContractsPage = React.lazy(() => import('./dev/ContractsPage').then(m => ({ default: m.ContractsPage })));
 import { renderRegisteredRouteElements } from './core/components/RegisteredRoutes';
+import { NotFoundPage } from './core/components/NotFoundPage';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { queryClient } from './core/queryClient';
 import { Toaster } from './components/ui/sonner';
@@ -135,8 +136,9 @@ export const App: React.FC = () => {
                   }
                 />
 
+                {/* Preserved Legacy Reports (Rule 3: Strict Preservation) */}
                 <Route
-                  path="/reports"
+                  path="/reports/legacy"
                   element={
                     <ProtectedRoute allowedRoles={['SUPER_ADMIN', 'TEACHER']}>
                       <Reports />
@@ -163,9 +165,10 @@ export const App: React.FC = () => {
                 <Route path="/dev/contracts" element={<ContractsPage />} />
 
                 {/* Dynamic Extensible Routes from Registries (Wiring Point 2) */}
-                {renderRegisteredRouteElements('admin')}
+                {renderRegisteredRouteElements()}
 
-                <Route path="*" element={<RoleBasedRedirect />} />
+                <Route path="/" element={<RoleBasedRedirect />} />
+                <Route path="*" element={<NotFoundPage />} />
               </Routes>
             </React.Suspense>
           </main>

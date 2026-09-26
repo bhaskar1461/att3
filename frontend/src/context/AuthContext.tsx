@@ -161,6 +161,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(newUser);
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem('token', newToken);
+      localStorage.setItem('access_token', newToken);
       if (newRefreshToken) {
         localStorage.setItem('refresh_token', newRefreshToken);
       }

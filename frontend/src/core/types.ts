@@ -25,6 +25,7 @@ export interface NavEntry {
   roles: Role[];
   order: number;
   badge?: () => number | null;
+  badgeId?: string;
 }
 
 export interface RouteEntry {
@@ -43,7 +44,7 @@ export interface WidgetEntry {
   roles: Role[];
   zone: 'kpi' | 'main' | 'side';
   order: number;
-  grid: { cols: 1 | 2 | 3 | 4 | 6 | 8 | 12; rows: number };
+  grid: { cols: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 12; rows: number };
   component: React.ComponentType<WidgetProps>;
 }
 

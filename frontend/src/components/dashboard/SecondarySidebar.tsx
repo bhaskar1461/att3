@@ -1,70 +1,159 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
-  Activity,
+  LayoutDashboard,
+  FileSpreadsheet,
+  ShieldCheck,
   Users,
   GraduationCap,
+  BookOpen,
+  Smartphone,
+  RefreshCw,
+  Radio,
+  History,
+  ShieldAlert,
+  UserPlus,
+  UserCog,
+  Settings,
+  CalendarCheck,
   CalendarDays,
   QrCode,
   ScanFace,
-  Smartphone,
-  ShieldAlert,
-  FileSpreadsheet,
-  Settings,
+  Activity,
   Sparkles,
-  ChevronRight,
-  ShieldCheck,
 } from 'lucide-react';
-import { Badge } from '../ui/badge';
-import { SecondarySidebarItem, ProInfoCardData } from '../../services/mockApi';
 import { navRegistry } from '../../core/registries';
-import { Role } from '../../core/types';
+import { Role, NavEntry } from '../../core/types';
+import { useBadge } from '../../core/badges';
+import { ProInfoCardData } from '../../services/mockApi';
 import '../../core/features';
 
 interface SecondarySidebarProps {
-  items: SecondarySidebarItem[];
   activeId: string;
   onSelect: (id: string) => void;
   isCollapsed: boolean;
-  proCard: ProInfoCardData | null;
+  proCard?: ProInfoCardData | null;
   currentRole?: Role;
   onCloseMobile?: () => void;
 }
 
 const SIDEBAR_ICON_MAP: Record<string, React.FC<{ className?: string }>> = {
-  Activity,
+  LayoutDashboard,
+  FileSpreadsheet,
+  ShieldCheck,
   Users,
   GraduationCap,
+  BookOpen,
+  Smartphone,
+  RefreshCw,
+  Radio,
+  History,
+  ShieldAlert,
+  UserPlus,
+  UserCog,
+  Settings,
+  CalendarCheck,
   CalendarDays,
   QrCode,
   ScanFace,
-  Smartphone,
-  ShieldAlert,
-  FileSpreadsheet,
-  Settings,
+  Activity,
   Sparkles,
 };
 
+const SECTION_ORDER = [
+  'DASHBOARD',
+  'ROSTER',
+  'DEVICES',
+  'SESSIONS',
+  'SECURITY',
+  'ONBOARDING',
+  'ADMIN',
+];
+
+interface NavItemButtonProps {
+  entry: NavEntry;
+  isActive: boolean;
+  onClick: () => void;
+}
+
+const NavItemButton: React.FC<NavItemButtonProps> = ({ entry, isActive, onClick }) => {
+  const badgeCount = useBadge(entry.badgeId);
+  const IconComp = SIDEBAR_ICON_MAP[entry.icon] || Activity;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={isActive ? 'page' : undefined}
+      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-all group ${
+        isActive
+          ? 'bg-[#1e1f24] text-white font-semibold border border-[#2a2b31] shadow-sm'
+          : 'text-[#9ca3af] hover:text-white hover:bg-[#1e1f24]/50'
+      }`}
+    >
+      <div className="flex items-center gap-2.5 min-w-0">
+        <div
+          className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+            isActive
+              ? 'bg-gradient-to-tr from-[#6366f1] to-[#8b5cf6] text-white shadow-sm'
+              : 'bg-[#1e1f24] text-[#9ca3af] group-hover:text-white'
+          }`}
+        >
+          <IconComp className="w-3.5 h-3.5" />
+        </div>
+        <span className="truncate text-left">{entry.label}</span>
+      </div>
+
+      {badgeCount > 0 && (
+        <span
+          className="ml-2 px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 shrink-0 font-mono"
+          aria-label={`${badgeCount} notifications`}
+        >
+          {badgeCount}
+        </span>
+      )}
+    </button>
+  );
+};
+
 export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({
-  items,
   activeId,
   onSelect,
   isCollapsed,
-  proCard,
   currentRole = 'admin',
   onCloseMobile,
 }) => {
-  // Wiring Point 1: Sidebar nav list renders from navRegistry.all(currentRole)
+  // 100% Registry-driven navigation filtered by role
   const registeredNav = navRegistry.all(currentRole);
-  const displayItems =
-    registeredNav.length > 0
-      ? registeredNav.map((entry) => ({
-          id: entry.id,
-          label: entry.label,
-          iconName: entry.icon,
-          path: entry.path,
-          badge: entry.badge ? (entry.badge() !== null ? String(entry.badge()) : undefined) : undefined,
-        }))
-      : items;
+
+  const sectionsWithItems = useMemo(() => {
+    const grouped: Record<string, NavEntry[]> = {};
+    for (const item of registeredNav) {
+      const sec = (item.section || 'DASHBOARD').toUpperCase();
+      if (!grouped[sec]) grouped[sec] = [];
+      grouped[sec].push(item);
+    }
+
+    // Sort items within each section ascending by order (10..90)
+    for (const sec in grouped) {
+      grouped[sec].sort((a, b) => a.order - b.order);
+    }
+
+    // Return ordered sections
+    const result: { section: string; items: NavEntry[] }[] = [];
+    for (const sec of SECTION_ORDER) {
+      if (grouped[sec] && grouped[sec].length > 0) {
+        result.push({ section: sec, items: grouped[sec] });
+      }
+    }
+    // Any remaining sections not in SECTION_ORDER
+    for (const sec in grouped) {
+      if (!SECTION_ORDER.includes(sec) && grouped[sec].length > 0) {
+        result.push({ section: sec, items: grouped[sec] });
+      }
+    }
+    return result;
+  }, [registeredNav]);
+
   return (
     <aside
       aria-label="Secondary Navigation Sidebar"
@@ -74,15 +163,15 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({
           : 'w-[240px] min-w-[240px] max-w-[240px] opacity-100 p-4'
       }`}
     >
-      <div className="flex flex-col gap-5 overflow-y-auto no-scrollbar">
-        {/* Section Header */}
-        <div className="flex items-center justify-between px-2 pt-1">
+      <div className="flex flex-col gap-4 overflow-y-auto no-scrollbar flex-1 pb-4">
+        {/* Header */}
+        <div className="flex items-center justify-between px-2 pt-1 pb-1 border-b border-[#2a2b31]/40">
           <div>
-            <span className="text-[11px] font-bold tracking-widest text-[#9ca3af] uppercase">
-              DASHBOARD
+            <span className="text-[10px] font-bold tracking-widest text-[#9ca3af] uppercase font-mono">
+              PORTAL NAV
             </span>
             <h2 className="text-sm font-bold text-white tracking-tight mt-0.5">
-              Attendance Portal
+              Attendance ERP
             </h2>
           </div>
           <span className="flex h-2 w-2 relative">
@@ -91,98 +180,40 @@ export const SecondarySidebar: React.FC<SecondarySidebarProps> = ({
           </span>
         </div>
 
-        {/* Navigation Items List */}
-        <nav className="flex flex-col gap-1 w-full" aria-label="Dashboard views">
-          {displayItems.map((item) => {
-            const IconComp = SIDEBAR_ICON_MAP[item.iconName] || Activity;
-            const isActive = activeId === item.id;
-
-            return (
-              <button
-                key={item.id}
-                onClick={() => {
-                  onSelect(item.id);
-                  onCloseMobile?.();
-                }}
-                aria-current={isActive ? 'page' : undefined}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-all ${
-                  isActive
-                    ? 'bg-[#1e1f24] text-white font-semibold border border-[#2a2b31] shadow-sm'
-                    : 'text-[#9ca3af] hover:text-white hover:bg-[#1e1f24]/50'
-                }`}
-              >
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <div
-                    className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
-                      isActive
-                        ? 'bg-gradient-to-tr from-[#6366f1] to-[#8b5cf6] text-white shadow-sm'
-                        : 'bg-[#1e1f24] text-[#9ca3af] group-hover:text-white'
-                    }`}
-                  >
-                    <IconComp className="w-3.5 h-3.5" />
-                  </div>
-                  <span className="truncate">{item.label}</span>
-                </div>
-
-                {/* Optional Badge */}
-                {item.badge && (
-                  <Badge
-                    variant={
-                      item.badgeVariant === 'success'
-                        ? 'success'
-                        : item.badgeVariant === 'purple'
-                        ? 'accent'
-                        : item.badgeVariant === 'warning'
-                        ? 'hero'
-                        : 'default'
-                    }
-                    className="text-[10px] px-1.5 py-0 tracking-tight shrink-0"
-                  >
-                    {item.badge}
-                  </Badge>
-                )}
-              </button>
-            );
-          })}
+        {/* Sections and Items List */}
+        <nav className="flex flex-col gap-4 w-full" aria-label="Portal navigation sections">
+          {sectionsWithItems.map(({ section, items }) => (
+            <div key={section} className="space-y-1.5">
+              <div className="px-2">
+                <span className="text-[10px] font-bold tracking-wider text-[#9ca3af]/70 uppercase">
+                  {section}
+                </span>
+              </div>
+              <div className="space-y-1">
+                {items.map((entry) => (
+                  <NavItemButton
+                    key={entry.id}
+                    entry={entry}
+                    isActive={activeId === entry.id || activeId === entry.path}
+                    onClick={() => {
+                      onSelect(entry.id);
+                      onCloseMobile?.();
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
         </nav>
       </div>
 
-      {/* Bottom: "Upgrade to Pro"-Style Info Card */}
-      {proCard && (
-        <div className="pt-4 border-t border-[#2a2b31] mt-auto">
-          <div className="relative overflow-hidden rounded-[12px] border border-[#2a2b31] bg-[#1e1f24] p-3.5 shadow-sm group">
-            {/* Subtle violet background glow */}
-            <div className="absolute -top-12 -right-12 w-24 h-24 bg-gradient-to-br from-[#6366f1]/20 to-[#8b5cf6]/10 rounded-full blur-xl pointer-events-none" />
-
-            <div className="flex items-start justify-between gap-2 mb-2 relative z-10">
-              <div className="flex items-center gap-1.5">
-                <div className="w-6 h-6 rounded-md bg-gradient-to-br from-[#6366f1] to-[#8b5cf6] flex items-center justify-center text-white shadow-sm">
-                  <Sparkles className="w-3.5 h-3.5" />
-                </div>
-                <h3 className="text-xs font-bold text-white tracking-tight">
-                  {proCard.title}
-                </h3>
-              </div>
-              <Badge variant="accent" className="text-[9px] px-1.5 py-0 font-bold">
-                {proCard.badge}
-              </Badge>
-            </div>
-
-            <p className="text-[11px] leading-relaxed text-[#9ca3af] mb-3 relative z-10">
-              {proCard.description}
-            </p>
-
-            <button
-              onClick={() => onSelect('system-setup')}
-              className="w-full flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-lg bg-gradient-to-r from-[#6366f1] to-[#8b5cf6] hover:from-[#5558e6] hover:to-[#7c4deb] text-white text-[11px] font-bold shadow-md shadow-indigo-500/20 active:scale-[0.98] transition-all"
-            >
-              <ShieldCheck className="w-3 h-3 text-indigo-100" />
-              <span>{proCard.buttonLabel}</span>
-              <ChevronRight className="w-3 h-3 opacity-80" />
-            </button>
-          </div>
-        </div>
-      )}
+      {/* Institutional Footer */}
+      <div className="pt-3 border-t border-[#2a2b31]/60 flex items-center justify-between text-[11px] text-[#9ca3af] px-1">
+        <span className="font-mono text-[10px] text-slate-500">SNIST R25</span>
+        <span className="text-emerald-400 font-medium text-[10px]">● Online</span>
+      </div>
     </aside>
   );
 };
+
+export default SecondarySidebar;

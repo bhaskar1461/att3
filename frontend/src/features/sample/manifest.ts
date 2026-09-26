@@ -4,17 +4,6 @@ import { SampleWidget } from './SampleWidget';
 
 export const manifest: FeatureManifest = {
   name: 'sample',
-  nav: [
-    {
-      id: 'sample-feature',
-      label: 'Sample Extension',
-      icon: 'Sparkles',
-      path: '/sample',
-      section: 'DASHBOARD',
-      roles: ['admin', 'teacher'],
-      order: 100,
-    },
-  ],
   routes: [
     {
       path: '/sample',
