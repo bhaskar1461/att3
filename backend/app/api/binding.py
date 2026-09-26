@@ -40,7 +40,9 @@ from app.models.models import (
     DeviceRebindOTP,
     AuditLog,
     RevokedReason,
-    EnrolledVia
+    EnrolledVia,
+    DeviceAccountBinding,
+    BindingStatus
 )
 from app.core.binding_crypto import (
     create_challenge_token,
@@ -112,6 +114,29 @@ class BindingVerifyRequest(BaseModel):
 
 class RebindOtpRequest(BaseModel):
     pass
+
+
+class AdminHardwareResetRequest(BaseModel):
+    student_id: Optional[int] = Field(None, description="Internal database student ID")
+    roll_number: Optional[str] = Field(None, description="Student institutional roll number")
+    sap_id: Optional[str] = Field(None, description="Student canonical SAP ID / roll number")
+    reason: str = Field("DEVICE_REPLACED", min_length=3, description="Institutional justification: DEVICE_LOST, PHONE_REPLACED, BROWSER_RESET, SECURITY_AUDIT")
+    notes: Optional[str] = Field(None, description="Optional administrative notes or ticket reference")
+
+
+class AdminHardwareResetResponse(BaseModel):
+    status: str
+    action: str
+    student_id: int
+    roll_number: str
+    sap_id: str
+    revoked_bindings_count: int
+    cleared_session_locks: int
+    can_enroll_immediately: bool
+    reset_at: str
+    authorized_by: str
+    reason: str
+    message: str
 
 
 # ============================================================
@@ -678,8 +703,96 @@ def request_rebind_otp(
 
 
 # ============================================================
-# API ENDPOINT 5: FACULTY / ADMIN RESET
+# API ENDPOINT 5: FACULTY / ADMIN RESET & HARDWARE RE-ENROLLMENT
 # ============================================================
+
+@router.post("/admin/reset-student-binding", dependencies=[Depends(check_binding_v2_enabled)], response_model=AdminHardwareResetResponse)
+def admin_reset_student_hardware_binding(
+    req: AdminHardwareResetRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Formal administrative reset workflow for P-256 WebCrypto key changes.
+    Enforces Canonical SAP ID / Roll Number lookup and immutable audit trail.
+    Revokes cryptographic hardware keys and clears device locks so the student can re-enroll.
+    """
+    if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.TEACHER]:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrative privileges required.")
+
+    clean_identifier = (req.sap_id or req.roll_number or "").strip().upper()
+    student = None
+    if req.student_id:
+        student = db.query(Student).filter(Student.id == req.student_id).first()
+    elif clean_identifier:
+        student = db.query(Student).filter(func.upper(Student.roll_number) == clean_identifier).first()
+
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student '{clean_identifier or req.student_id}' not found."
+        )
+
+    now_utc = datetime.utcnow()
+    # 1. Revoke all active cryptographic DeviceBinding records
+    active_bindings = db.query(DeviceBinding).filter(
+        DeviceBinding.student_id == student.id,
+        DeviceBinding.revoked_at == None
+    ).all()
+
+    revoked_keys = []
+    for b in active_bindings:
+        b.revoked_at = now_utc
+        b.revoked_reason = RevokedReason.ADMIN_RESET.value
+        b.status = "REVOKED"
+        revoked_keys.append(b.key_id[:12])
+
+    # 2. Clear Layer-2 device registration on Student model
+    student.registered_device_id = None
+
+    # 3. Expire active 30-minute account locks for this roll number
+    cleared_locks_count = db.query(DeviceAccountBinding).filter(
+        DeviceAccountBinding.roll_number == student.roll_number,
+        DeviceAccountBinding.status == BindingStatus.ACTIVE
+    ).update({DeviceAccountBinding.status: BindingStatus.EXPIRED}, synchronize_session=False)
+
+    # 4. Record immutable security audit log
+    role_str = current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role)
+    audit_details = (
+        f"Admin/Teacher {current_user.username} (ID {current_user.id}, Role {role_str}) "
+        f"reset hardware key binding for student {student.roll_number} (SAP ID: {student.roll_number}). "
+        f"Reason: {req.reason}. Notes: {req.notes or 'None'}. "
+        f"Revoked {len(active_bindings)} active P-256 key(s) ({', '.join(revoked_keys) if revoked_keys else 'None'}). "
+        f"Cleared {cleared_locks_count} active device lock(s)."
+    )
+    audit = AuditLog(
+        user_id=current_user.id,
+        roll_number=student.roll_number,
+        event_type="ADMIN_HARDWARE_RE_ENROLLMENT_RESET",
+        action="HARDWARE_KEY_RESET",
+        details=audit_details,
+        created_at=now_utc
+    )
+    db.add(audit)
+    db.commit()
+
+    logger.info(f"[ADMIN HARDWARE RESET] Student {student.roll_number} hardware binding reset by {current_user.username}. Reason: {req.reason}")
+
+    return AdminHardwareResetResponse(
+        status="RESET_COMPLETED",
+        action="HARDWARE_KEY_RESET",
+        student_id=student.id,
+        roll_number=student.roll_number,
+        sap_id=student.roll_number,
+        revoked_bindings_count=len(active_bindings),
+        cleared_session_locks=cleared_locks_count,
+        can_enroll_immediately=True,
+        reset_at=now_utc.isoformat(),
+        authorized_by=current_user.username,
+        reason=req.reason,
+        message=f"Hardware device binding for {student.roll_number} has been safely reset. Student can enroll fresh device immediately upon next login."
+    )
+
 
 @router.post("/admin/revoke/{student_id}", dependencies=[Depends(check_binding_v2_enabled)])
 def admin_revoke_student_binding(
@@ -699,23 +812,30 @@ def admin_revoke_student_binding(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Student not found.")
 
     now_utc = datetime.utcnow()
-    active_binding = db.query(DeviceBinding).filter(
+    active_bindings = db.query(DeviceBinding).filter(
         DeviceBinding.student_id == student_id,
         DeviceBinding.revoked_at == None
-    ).first()
+    ).all()
 
-    if not active_binding:
-        return {"status": "NO_OP", "message": "Student has no active device binding to revoke."}
+    for b in active_bindings:
+        b.revoked_at = now_utc
+        b.revoked_reason = RevokedReason.ADMIN_RESET.value
+        b.status = "REVOKED"
 
-    active_binding.revoked_at = now_utc
-    active_binding.revoked_reason = RevokedReason.ADMIN_RESET.value
+    # Synchronize Layer-2 device registration & session locks
+    student.registered_device_id = None
+    cleared_locks_count = db.query(DeviceAccountBinding).filter(
+        DeviceAccountBinding.roll_number == student.roll_number,
+        DeviceAccountBinding.status == BindingStatus.ACTIVE
+    ).update({DeviceAccountBinding.status: BindingStatus.EXPIRED}, synchronize_session=False)
 
+    role_str = current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role)
     audit = AuditLog(
         user_id=current_user.id,
         roll_number=student.roll_number,
         event_type="ADMIN_DEVICE_RESET",
         action="BINDING_REVOKED_BY_ADMIN",
-        details=f"Admin/Teacher (user_id={current_user.id}) revoked binding key_id={active_binding.key_id[:8]}...",
+        details=f"Admin/Teacher (user_id={current_user.id}, role={role_str}) revoked {len(active_bindings)} binding key(s) and cleared {cleared_locks_count} lock(s) for student {student.roll_number}",
         created_at=now_utc
     )
     db.add(audit)
@@ -729,6 +849,8 @@ def admin_revoke_student_binding(
         "student_id": student.id,
         "roll_number": student.roll_number,
         "revoked_at": now_utc.isoformat(),
+        "revoked_bindings_count": len(active_bindings),
+        "cleared_session_locks": cleared_locks_count,
         "message": f"Device binding for {student.roll_number} has been revoked. Student can enroll fresh device on next login."
     }
 

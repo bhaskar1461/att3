@@ -11,6 +11,30 @@
 
 import { apiRequest } from './api';
 
+export const MIN_RECONNECT_JITTER_MS = 2000;  // 2s minimum delay to eliminate simultaneous campus-wide Wi-Fi stampedes
+export const MAX_RECONNECT_JITTER_MS = 30000; // 30s maximum randomized spread
+export const MAX_QUEUE_CAPACITY = 50;         // Bounded queue limit; discards stale/oldest attempts when quota reached
+export const MAX_RETRY_ATTEMPTS = 5;          // Maximum retry attempts before dropping permanently failed scans
+export const MAX_ITEM_AGE_MS = 24 * 60 * 60 * 1000; // 24-hour TTL
+
+/**
+ * Calculates uniform pseudo-random jitter between minMs and maxMs to de-synchronize
+ * client reconnects during campus-wide network restoration.
+ */
+export function calculateJitterDelay(minMs: number = MIN_RECONNECT_JITTER_MS, maxMs: number = MAX_RECONNECT_JITTER_MS): number {
+  return Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+}
+
+/**
+ * Calculates exponential backoff with full jitter for retry attempts:
+ * backoff = min(maxMs, baseMs * 2^attempt) + random_jitter(0..1000ms)
+ */
+export function calculateExponentialBackoff(attempt: number, baseMs: number = 2000, maxMs: number = 30000): number {
+  const exp = Math.min(maxMs, baseMs * Math.pow(2, Math.max(0, attempt)));
+  const jitter = Math.floor(Math.random() * 1000);
+  return exp + jitter;
+}
+
 export interface QueuedSubmission {
   id?: number;
   client_id: string; // Unique idempotency key per scan attempt
@@ -22,6 +46,8 @@ export interface QueuedSubmission {
   queued_at: number; // Unix epoch ms
   attempts: number;
   last_error?: string;
+  next_retry_at?: number; // Unix epoch ms before which this item should not be retried
+  ttl_expires_at?: number; // Unix epoch ms after which this item is dropped
 }
 
 const DB_NAME = 'snist_offline_attendance_db';
@@ -36,13 +62,15 @@ class OfflineSubmissionQueueService {
   private db: IDBDatabase | null = null;
   private isInitialized = false;
   private isSyncing = false;
+  private reconnectTimer: any = null;
   private listeners: QueueListener[] = [];
 
   constructor() {
     if (typeof window !== 'undefined') {
       this.initDb();
       window.addEventListener('online', () => {
-        this.flush();
+        // Prevent reconnection stampede: apply exponential backoff jitter (2s-30s)
+        this.scheduleJitteredFlush();
       });
     }
   }
@@ -67,9 +95,9 @@ class OfflineSubmissionQueueService {
         this.db = e.target.result;
         this.isInitialized = true;
         this.notifyListeners();
-        // Check if there are pending submissions on startup if online
+        // Stagger startup sync via jittered flush to avoid multi-tab thundering herd
         if (navigator.onLine) {
-          this.flush();
+          this.scheduleJitteredFlush();
         }
       };
       req.onerror = () => {
@@ -78,6 +106,31 @@ class OfflineSubmissionQueueService {
     } catch {
       this.isInitialized = true;
     }
+  }
+
+  /**
+   * Schedules a flush operation delayed by a pseudo-random jitter window (2s-30s).
+   * Returns the scheduled delay in milliseconds.
+   */
+  public scheduleJitteredFlush(minMs: number = MIN_RECONNECT_JITTER_MS, maxMs: number = MAX_RECONNECT_JITTER_MS): number {
+    this.cancelScheduledFlush();
+    const delay = calculateJitterDelay(minMs, maxMs);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.flush();
+    }, delay);
+    return delay;
+  }
+
+  public cancelScheduledFlush(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  public isScheduled(): boolean {
+    return this.reconnectTimer !== null;
   }
 
   public subscribe(listener: QueueListener): () => void {
@@ -96,12 +149,25 @@ class OfflineSubmissionQueueService {
 
   /**
    * Enqueues a scanned token that could not be transmitted due to network drop.
+   * Enforces bounded queue capacity (MAX_QUEUE_CAPACITY=50) to prevent storage exhaustion.
    */
   public async enqueue(sub: Omit<QueuedSubmission, 'queued_at' | 'attempts'>): Promise<void> {
+    // 1. Bound check: Prune oldest submissions if queue capacity is reached
+    const existing = await this.getAllQueued();
+    if (existing.length >= MAX_QUEUE_CAPACITY) {
+      // Sort oldest first and prune
+      existing.sort((a, b) => a.queued_at - b.queued_at);
+      const toRemove = existing.slice(0, existing.length - MAX_QUEUE_CAPACITY + 1);
+      for (const oldItem of toRemove) {
+        await this.remove(oldItem);
+      }
+    }
+
     const item: QueuedSubmission = {
       ...sub,
       queued_at: Date.now(),
-      attempts: 0
+      attempts: 0,
+      ttl_expires_at: Date.now() + MAX_ITEM_AGE_MS
     };
 
     if (this.db) {
@@ -152,21 +218,42 @@ class OfflineSubmissionQueueService {
   }
 
   /**
-   * Synchronizes all queued submissions with the backend server.
-   * Server validates bounded submit-grace policy and handles idempotency.
+   * Synchronizes queued submissions with the backend server.
+   * If isManualUserAction is true (e.g. user pressed "Sync Now"), backoff delay checks are bypassed.
    */
-  public async flush(): Promise<{ success: number; failed: number }> {
+  public async flush(options?: { isManualUserAction?: boolean }): Promise<{ success: number; failed: number }> {
     if (this.isSyncing || !navigator.onLine) {
       return { success: 0, failed: 0 };
     }
 
+    this.cancelScheduledFlush();
     this.isSyncing = true;
     let successCount = 0;
     let failCount = 0;
+    const now = Date.now();
+    const isManual = Boolean(options?.isManualUserAction);
 
     try {
       const items = await this.getAllQueued();
       for (const item of items) {
+        // TTL Check: Drop items older than 24 hours
+        if (item.ttl_expires_at && now > item.ttl_expires_at) {
+          await this.remove(item);
+          continue;
+        }
+
+        // Retry limit check: Drop after max retries exhausted
+        if (item.attempts >= MAX_RETRY_ATTEMPTS) {
+          await this.remove(item);
+          failCount++;
+          continue;
+        }
+
+        // Exponential backoff check: Skip item if backoff window has not elapsed (unless manual sync)
+        if (!isManual && item.next_retry_at && now < item.next_retry_at) {
+          continue;
+        }
+
         try {
           const res: any = await apiRequest('/student/scan-session', {
             method: 'POST',
@@ -192,9 +279,10 @@ class OfflineSubmissionQueueService {
             await this.remove(item);
             failCount++;
           } else {
-            // Keep in queue for next reconnect retry
+            // Transient error: increment attempts and schedule exponential backoff with jitter
             item.attempts += 1;
             item.last_error = err.message || 'Network error';
+            item.next_retry_at = Date.now() + calculateExponentialBackoff(item.attempts);
             await this.update(item);
             failCount++;
           }

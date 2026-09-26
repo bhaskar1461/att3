@@ -49,17 +49,29 @@ export const BindingsPage: React.FC = () => {
   });
 
   const revokeMutation = useMutation({
-    mutationFn: async (studentId: number) => {
+    mutationFn: async (target: DeviceBindingItem) => {
       try {
-        return await api(`/api/v1/binding/admin/revoke/${studentId}`, z.any(), {
+        return await api('/api/v1/binding/admin/reset-student-binding', z.any(), {
           method: 'POST',
+          body: JSON.stringify({
+            student_id: target.id,
+            roll_number: target.roll_number,
+            reason: 'ADMIN_RESET',
+            notes: 'Administrative reset from Hardware Device Bindings dashboard'
+          }),
         });
       } catch {
-        // Fallback to generic devices revoke endpoint
-        return await api('/api/v1/devices/reset-student-enrollment', z.any(), {
-          method: 'POST',
-          body: JSON.stringify({ student_id: studentId }),
-        });
+        try {
+          return await api(`/api/v1/binding/admin/revoke/${target.id}`, z.any(), {
+            method: 'POST',
+          });
+        } catch {
+          // Fallback to generic devices revoke endpoint
+          return await api('/api/v1/devices/reset-student-enrollment', z.any(), {
+            method: 'POST',
+            body: JSON.stringify({ student_id: target.id, roll_number: target.roll_number }),
+          });
+        }
       }
     },
     onSuccess: () => {
@@ -85,7 +97,7 @@ export const BindingsPage: React.FC = () => {
   const handleRevokeConfirm = async () => {
     if (!revokeConfirmTarget) return;
     try {
-      await revokeMutation.mutateAsync(revokeConfirmTarget.id);
+      await revokeMutation.mutateAsync(revokeConfirmTarget);
     } catch (err: any) {
       alert(`Revocation failed: ${err.message || 'Unknown error'}`);
     }

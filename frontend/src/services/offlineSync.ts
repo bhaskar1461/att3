@@ -21,14 +21,24 @@ export const getOfflineQueue = (): PendingScan[] => {
   }
 };
 
+export const MAX_OFFLINE_QUEUE_SIZE = 50;
+
 export const saveScanToOfflineQueue = (scan: Omit<PendingScan, 'id'>) => {
   const queue = getOfflineQueue();
+  // Bound the queue to prevent local storage quota exhaustion
+  while (queue.length >= MAX_OFFLINE_QUEUE_SIZE) {
+    queue.shift(); // Evict oldest scan
+  }
   const newScan: PendingScan = {
     ...scan,
     id: `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
   };
   queue.push(newScan);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(queue));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(queue));
+  } catch (err) {
+    console.warn('Failed to save scan to localStorage offline queue:', err);
+  }
 };
 
 export const clearOfflineQueue = () => {

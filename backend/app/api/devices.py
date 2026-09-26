@@ -36,7 +36,11 @@ class DeviceRevokeRequest(BaseModel):
     device_public_id: str
 
 class DeviceResetEnrollmentRequest(BaseModel):
-    roll_number: str
+    roll_number: Optional[str] = None
+    student_id: Optional[int] = None
+    sap_id: Optional[str] = None
+    reason: Optional[str] = "ADMIN_RESET"
+    notes: Optional[str] = None
 
 class DeviceResetRequest(BaseModel):
     roll_number: str
@@ -639,6 +643,45 @@ def bulk_reset_devices(
         "reset_students": reset_results,
         "message": f"Successfully reset device bindings for {len(reset_results)} students."
     }
+
+@router.post("/reset-student-enrollment")
+def reset_student_enrollment_endpoint(
+    req: DeviceResetEnrollmentRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Admin/Teacher endpoint to reset a student's device enrollment,
+    supporting student_id, roll_number, or canonical sap_id.
+    """
+    if current_user.role not in [UserRole.SUPER_ADMIN, UserRole.TEACHER]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin or Teacher permission required."
+        )
+
+    clean_roll = (req.roll_number or req.sap_id or "").strip().upper()
+    student = None
+    if req.student_id:
+        student = db.query(Student).filter(Student.id == req.student_id).first()
+    elif clean_roll:
+        student = db.query(Student).filter(Student.roll_number == clean_roll).first()
+
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student '{clean_roll or req.student_id}' not found."
+        )
+
+    ip_address = request.client.host if request.client else None
+    res = reset_student_device_enrollment(
+        db=db,
+        roll_number=student.roll_number,
+        admin_user_id=current_user.id,
+        ip_address=ip_address
+    )
+    return res
 
 @router.get("/student-device-info")
 def get_student_device_info(

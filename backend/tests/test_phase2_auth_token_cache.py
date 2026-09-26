@@ -348,21 +348,22 @@ class TestPhase2AuthAndTokenCache:
         assert exc_cold.value.detail["code"] == "expired"
         assert exc_cold.value.detail["error_code"] == "QR-OLD"
 
-        # Warm pre-filter hit
+        # Warm pre-filter hit (test across multiple iterations for stable micro-benchmark)
+        N = 20
         t0 = time.perf_counter()
-        with pytest.raises(HTTPException) as exc_warm:
-            verify_and_resolve_scan_token(
-                req=req,
-                tracker_key="test_tracker",
-                current_student=student,
-                request=request,
-                db=mock_db,
-                failed_token_tracker=mock_tracker,
-                now_ts=current_time
-            )
-        warm_ms = (time.perf_counter() - t0) * 1000
-
-        assert exc_warm.value.status_code == 400
-        assert exc_warm.value.detail["code"] == "expired"
-        assert exc_warm.value.detail["error_code"] == "QR-OLD"
-        assert warm_ms < 0.1, f"Expected warm rejection < 0.1ms on single shot, got {warm_ms:.4f}ms"
+        for _ in range(N):
+            with pytest.raises(HTTPException) as exc_warm:
+                verify_and_resolve_scan_token(
+                    req=req,
+                    tracker_key="test_tracker",
+                    current_student=student,
+                    request=request,
+                    db=mock_db,
+                    failed_token_tracker=mock_tracker,
+                    now_ts=current_time
+                )
+            assert exc_warm.value.status_code == 400
+            assert exc_warm.value.detail["code"] == "expired"
+            assert exc_warm.value.detail["error_code"] == "QR-OLD"
+        warm_avg_ms = ((time.perf_counter() - t0) * 1000) / N
+        assert warm_avg_ms < 0.08, f"Expected warm rejection < 0.08ms avg, got {warm_avg_ms:.4f}ms"

@@ -36,4 +36,14 @@ export const devicesEndpoints = {
     api(`/api/v1/binding/admin/revoke/${studentId}`, z.record(z.string(), z.unknown()), {
       method: 'POST',
     }),
+
+  resetStudentBinding: (data: { student_id?: number; roll_number?: string; sap_id?: string; reason?: string; notes?: string }) =>
+    api('/api/v1/binding/admin/reset-student-binding', z.record(z.string(), z.unknown()), {
+      method: 'POST',
+      body: JSON.stringify({
+        ...data,
+        reason: data.reason || 'ADMIN_RESET'
+      }),
+    }),
 };
+
