@@ -499,13 +499,16 @@ def get_onboarding_status_table(
         "students": [
             {
                 "id": r.id,
+                "student_id": r.id,
                 "roll_number": r.roll_number,
                 "name": r.name,
                 "email": r.email,
                 "department": r.department,
                 "section": r.section,
                 "state": r.state.value if r.state else None,
+                "onboarding_state": r.state.value if r.state else "PENDING_ONBOARDING",
                 "link_sent_at": r.link_sent_at.isoformat() if r.link_sent_at else None,
+                "magic_link_sent_at": r.link_sent_at.isoformat() if r.link_sent_at else None,
                 "link_opened_at": r.link_opened_at.isoformat() if r.link_opened_at else None,
                 "activated_at": r.activated_at.isoformat() if r.activated_at else None,
                 "otp_verified": r.mobile_verified,
