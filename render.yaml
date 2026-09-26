@@ -19,7 +19,7 @@ services:
       - key: SECONDARY_DATABASE_URL
         value: mysql+pymysql://snist_admin:SnistAdmin2026Secure@snist-attendance-db.cngk2i8i29dn.ap-south-1.rds.amazonaws.com:3306/seg_demo
       - key: ENABLE_DUAL_DB
-        value: "True"
+        value: "False"
       - key: JNTUH_ELIGIBLE_THRESHOLD
         value: "75.0"
       - key: JNTUH_CONDONABLE_THRESHOLD
