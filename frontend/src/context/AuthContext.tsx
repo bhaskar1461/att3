@@ -79,6 +79,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       const storedToken = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
       const storedUser = typeof localStorage !== 'undefined' ? localStorage.getItem('user') : null;
 
+      if (storedUser && typeof localStorage !== 'undefined' && !localStorage.getItem('role')) {
+        try {
+          const parsed = JSON.parse(storedUser);
+          if (parsed.role) {
+            localStorage.setItem('role', parsed.role);
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      }
+
       if (!storedToken || !storedUser || isTokenExpired(storedToken)) {
         if (storedToken || storedUser) {
           await clearAllAuthArtifacts();
@@ -109,6 +120,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             setToken(storedToken);
             setUser(verifiedUser);
             localStorage.setItem('user', JSON.stringify(verifiedUser));
+            if (verifiedUser.role) {
+              localStorage.setItem('role', verifiedUser.role);
+            }
             scheduleTokenAutoRefresh();
             setIsLoading(false);
           }
@@ -167,6 +181,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localStorage.setItem('refresh_token', newRefreshToken);
       }
       localStorage.setItem('user', JSON.stringify(newUser));
+      if (newUser.role) {
+        localStorage.setItem('role', newUser.role);
+      }
       localStorage.setItem(SCHEMA_VERSION_KEY, AUTH_SCHEMA_VERSION);
     }
     scheduleTokenAutoRefresh();

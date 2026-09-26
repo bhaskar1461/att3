@@ -14,10 +14,21 @@ export const RoleGate: React.FC<RoleGateProps> = ({
   currentRole,
   children,
 }) => {
-  // Resolve active role: prop > localStorage (stored by auth) > 'student'
+  // Resolve active role: prop > localStorage ('role' or 'user' profile) > 'student'
   let activeRole: Role = currentRole || 'student';
   if (!currentRole && typeof localStorage !== 'undefined') {
-    const rawRole = localStorage.getItem('role') || '';
+    let rawRole = localStorage.getItem('role') || '';
+    if (!rawRole) {
+      try {
+        const storedUser = localStorage.getItem('user');
+        if (storedUser) {
+          const parsed = JSON.parse(storedUser);
+          rawRole = parsed.role || '';
+        }
+      } catch {
+        // Ignore JSON parse error
+      }
+    }
     const lower = rawRole.toLowerCase();
     if (lower.includes('admin')) {
       activeRole = 'admin';
