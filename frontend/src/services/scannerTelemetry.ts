@@ -22,7 +22,7 @@ import {
   TelemetryBatchPayload
 } from '../types/telemetry';
 import { getRuntimeDeviceBucket } from '../utils/deviceClassifier';
-import { getActiveScannerEngine } from './qrEngine';
+import { getActiveScannerEngine, onScannerFallback } from './qrEngine';
 
 const DB_NAME = 'snist_scanner_telemetry';
 const DB_VERSION = 1;
@@ -65,6 +65,21 @@ class ScannerTelemetryManager {
       this.initIndexedDb();
       this.setupLifecycleHooks();
       this.startFlushTimer();
+      onScannerFallback((detail) => {
+        this.recordFailure(
+          'engine_fallback',
+          'frame_decoded',
+          undefined,
+          {
+            error_detail: detail.error,
+            action: detail.action,
+            fallback_engine: detail.fallbackEngine,
+          },
+          undefined,
+          undefined,
+          'wasm'
+        );
+      });
     }
   }
 

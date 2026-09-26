@@ -1674,7 +1674,9 @@ async def upload_attendance_selfie(
             contents = await f.read()
             if not contents:
                 continue
-            res = store_attendance_selfie(
+            from starlette.concurrency import run_in_threadpool
+            res = await run_in_threadpool(
+                store_attendance_selfie,
                 db=db,
                 attendance_id=attendance_id,
                 student_id=current_student.id,

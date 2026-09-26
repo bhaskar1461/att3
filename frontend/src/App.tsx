@@ -71,9 +71,9 @@ export const App: React.FC = () => {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <CoreAuthProvider>
-        <AuthProvider>
-        <BrowserRouter>
+      <AuthProvider>
+        <CoreAuthProvider>
+          <BrowserRouter>
           <AuthNavigationSync />
           <div className="min-h-screen bg-[#141416] text-[#f8fafc] dark:bg-[#141416] dark:text-[#f8fafc] flex flex-col font-sans">
             <Navbar />
@@ -156,9 +156,9 @@ export const App: React.FC = () => {
           </main>
         </div>
         <Toaster />
-      </BrowserRouter>
-        </AuthProvider>
-      </CoreAuthProvider>
+          </BrowserRouter>
+        </CoreAuthProvider>
+      </AuthProvider>
     </QueryClientProvider>
   );
 };

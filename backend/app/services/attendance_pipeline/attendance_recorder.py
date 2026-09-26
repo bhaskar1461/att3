@@ -134,12 +134,12 @@ async def record_scan_attendance(
 
         resolved_att_id = None
         t_wait_start = time.perf_counter()
-        while (time.perf_counter() - t_wait_start) < 0.20:
+        while (time.perf_counter() - t_wait_start) < 0.80:
             status_data = async_attendance_writer.get_status(job_id)
             if status_data and status_data.get("attendance_id"):
                 resolved_att_id = status_data["attendance_id"]
                 break
-            await asyncio.sleep(0.015)
+            await asyncio.sleep(0.02)
 
         t_total_ms = (time.perf_counter() - t_scan_start) * 1000
         logger.info(

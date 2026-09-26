@@ -1,9 +1,10 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useMemo, useCallback } from 'react';
 import type { Role } from '../types';
 import { queryClient } from '../queryClient';
 import { authEndpoints } from '../api/endpoints/auth';
 import type { UserResponse } from '../api/schemas/auth';
 import { ApiError } from '../api/client';
+import { useAuth as useRootAuth } from '../../context/AuthContext';
 
 export type AuthUser = UserResponse;
 
@@ -19,72 +20,47 @@ export interface AuthContextType {
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export function normalizeRole(backendRole: string): Role {
-  const lower = backendRole.toLowerCase();
+  const lower = (backendRole || '').toLowerCase();
   if (lower.includes('admin')) return 'admin';
   if (lower.includes('teacher') || lower.includes('faculty')) return 'teacher';
   return 'student';
 }
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [role, setRole] = useState<Role | null>(null);
-  const [booting, setBooting] = useState<boolean>(true);
+  const rootAuth = useRootAuth();
+  const rootUser = rootAuth.user;
+  const booting = rootAuth.isLoading;
+
+  const user: AuthUser | null = useMemo(() => {
+    if (!rootUser) return null;
+    return {
+      id: rootUser.id,
+      username: rootUser.username,
+      email: rootUser.email || null,
+      role: rootUser.role,
+      full_name: rootUser.full_name,
+    };
+  }, [rootUser]);
+
+  const role: Role | null = useMemo(() => {
+    return user ? normalizeRole(user.role) : null;
+  }, [user]);
 
   const logout = useCallback(() => {
-    try {
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('token');
-      localStorage.removeItem('role');
-    } catch {
-      // Ignore storage errors
-    }
     queryClient.clear();
-    setUser(null);
-    setRole(null);
-  }, []);
+    rootAuth.logout();
+  }, [rootAuth]);
 
   const refreshUser = useCallback(async (): Promise<AuthUser | null> => {
     try {
-      const token = localStorage.getItem('access_token') || localStorage.getItem('token');
-      if (!token) {
-        setUser(null);
-        setRole(null);
-        return null;
-      }
       const meData = await authEndpoints.me();
-      setUser(meData);
-      setRole(normalizeRole(meData.role));
       return meData;
     } catch {
-      logout();
       return null;
     }
-  }, [logout]);
+  }, []);
 
-  // Initial boot check
-  useEffect(() => {
-    const token = typeof localStorage !== 'undefined' ? (localStorage.getItem('access_token') || localStorage.getItem('token')) : null;
-    if (!token) {
-      setBooting(false);
-      return;
-    }
-    refreshUser().finally(() => {
-      setBooting(false);
-    });
-  }, [refreshUser]);
-
-  // Global 401 unauthorized listener from core client
-  useEffect(() => {
-    const handleUnauthorized = () => {
-      logout();
-    };
-    window.addEventListener('auth:unauthorized', handleUnauthorized);
-    return () => {
-      window.removeEventListener('auth:unauthorized', handleUnauthorized);
-    };
-  }, [logout]);
-
-  const login = async (
+  const login = useCallback(async (
     username: string,
     password: string,
     devicePublicId?: string,
@@ -97,31 +73,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       device_secret: deviceSecret,
     });
 
-    localStorage.setItem('access_token', tokenData.access_token);
-    localStorage.setItem('token', tokenData.access_token);
-    if (tokenData.role) {
-      localStorage.setItem('role', tokenData.role);
-    }
+    rootAuth.login(
+      tokenData.access_token,
+      {
+        id: tokenData.user_id,
+        username: tokenData.username,
+        role: tokenData.role as any,
+        full_name: tokenData.full_name,
+      },
+      tokenData.refresh_token || undefined
+    );
 
     try {
       const meData = await authEndpoints.me();
-      setUser(meData);
-      const parsedRole = normalizeRole(meData.role);
-      setRole(parsedRole);
       return meData;
     } catch {
-      // Fallback to token payload if me() fails
       const fallbackUser: AuthUser = {
         id: tokenData.user_id,
         username: tokenData.username,
         role: tokenData.role,
         full_name: tokenData.full_name,
       };
-      setUser(fallbackUser);
-      setRole(normalizeRole(tokenData.role));
       return fallbackUser;
     }
-  };
+  }, [rootAuth]);
 
   return (
     <AuthContext.Provider

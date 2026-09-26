@@ -402,7 +402,7 @@ export function useAttendanceSubmission({
 
       const abortCtrl = new AbortController();
       currentAbortCtrlRef.current = abortCtrl;
-      const timeoutId = setTimeout(() => abortCtrl.abort('timeout_4s'), 4000);
+      const timeoutId = setTimeout(() => abortCtrl.abort('timeout_8s'), 8000);
 
       let res: any;
       try {
@@ -427,7 +427,7 @@ export function useAttendanceSubmission({
         });
       } catch (abortErr: any) {
         if (abortErr?.name === 'AbortError' || abortCtrl.signal.aborted) {
-          console.warn('[QR] Submission timed out after 4s — returning to scanning');
+          console.warn('[QR] Submission timed out after 8s — returning to scanning');
           failedTokensCacheRef.current.set(payloadToken, Date.now());
           lastFailedPayloadRef.current = payloadToken;
           const { step } = extractPayloadStep(payloadToken);

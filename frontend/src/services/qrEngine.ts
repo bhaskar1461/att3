@@ -11,7 +11,6 @@
 
 import jsQR from 'jsqr';
 import { decodeFrameWasm, isWasmScannerReady, initWasmScanner, DecodeHints, DecodeResult } from './wasmScanner';
-import { scannerTelemetry } from './scannerTelemetry';
 
 export type ScannerEngine = 'jsqr' | 'wasm';
 
@@ -19,6 +18,17 @@ export interface QrEngineConfig {
   activeEngine: ScannerEngine;
   source: 'default' | 'local_override' | 'url_param' | 'server_config';
   hasWasmFallbackOccurred: boolean;
+}
+
+export type FallbackListener = (detail: { error: string; action: string; fallbackEngine: ScannerEngine }) => void;
+const fallbackListeners: FallbackListener[] = [];
+
+export function onScannerFallback(listener: FallbackListener): () => void {
+  fallbackListeners.push(listener);
+  return () => {
+    const idx = fallbackListeners.indexOf(listener);
+    if (idx !== -1) fallbackListeners.splice(idx, 1);
+  };
 }
 
 // Runtime singleton state (Week 8: wasm flipped to default per W7 pre-registered GO verdict)
@@ -212,22 +222,16 @@ export async function decodeFrame(
     console.warn('[QREngine] WASM decode failed. Tripping automatic jsQR fallback:', err?.message || err);
     wasmFailedPermanently = true;
 
-    // Log telemetry engine_fallback event
-    try {
-      scannerTelemetry.recordFailure(
-        'engine_fallback',
-        'frame_decoded',
-        undefined,
-        {
-          error_detail: err?.message || 'WASM initialization/decode crash',
+    // Notify fallback listeners (e.g. telemetry) without circular imports
+    for (const listener of fallbackListeners) {
+      try {
+        listener({
+          error: err?.message || 'WASM initialization/decode crash',
           action: 'AUTOMATIC_FALLBACK_TO_JSQR',
-          fallback_engine: 'jsqr'
-        },
-        undefined,
-        undefined,
-        'wasm'
-      );
-    } catch {}
+          fallbackEngine: 'jsqr'
+        });
+      } catch {}
+    }
 
     // Immediate seamless failover to jsQR
     const fallbackRes = decodeWithJsQr(imageData);

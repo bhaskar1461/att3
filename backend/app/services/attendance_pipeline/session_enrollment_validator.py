@@ -80,14 +80,14 @@ def validate_session_and_enrollment(
                 logger.error(f"[BINDING V2] Non-fatal verification error for {clean_roll}: {binding_err}")
                 binding_proof_meta = {"binding_verified": False, "reason": "internal_error"}
     else:
-        # Phase 5 Server Cutover: Hard deprecation under flag-off for clients sending only legacy device ID
-        has_legacy_id = bool(req.device_uuid or request.headers.get("x-device-public-id"))
+        # Standard device binding path: verify V2 proof if provided, otherwise defer to Layer 1 & 2 binding in recorder
         has_v2_proof = bool(req.challenge_token and req.binding_signature)
-        if has_legacy_id and not has_v2_proof and not req.is_offline_submission:
-            raise HTTPException(
-                status_code=status.HTTP_410_GONE,
-                detail="legacy_binding_retired: Legacy soft-binding device ID has been retired. Device binding enrollment is required."
-            )
+        if has_v2_proof:
+            try:
+                binding_proof_meta = verify_binding_proof_fn(db, current_student, req, ip_addr)
+            except Exception as binding_err:
+                logger.info(f"[BINDING V2] Optional proof check for {clean_roll}: {binding_err}")
+                binding_proof_meta = {"binding_verified": False, "reason": "optional_fallback"}
 
     status_str = getattr(session_meta["status"], "value", str(session_meta["status"]))
     if status_str != "OPEN":

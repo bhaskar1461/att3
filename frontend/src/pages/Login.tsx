@@ -62,7 +62,7 @@ export function getSafeNextDestination(search: string, role?: string): string | 
 }
 
 export const Login: React.FC = () => {
-  const { login } = useAuth();
+  const { login, user: authUser, isLoading: authLoading } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -119,41 +119,6 @@ export const Login: React.FC = () => {
       setToast({ message: 'Your account is bound to another device. Please reset device binding or sign in on your registered device.', type: 'error' });
     }
 
-    // Single source of truth: /login redirects ONLY if GET /api/v1/auth/me returns 200
-    const storedToken = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-    if (storedToken && !loopTripped) {
-      fetch('/api/v1/auth/me', {
-        headers: {
-          'Authorization': `Bearer ${storedToken}`,
-          'Cache-Control': 'no-store, no-cache, must-revalidate'
-        },
-        credentials: 'include'
-      })
-        .then(async (res) => {
-          if (res.ok) {
-            const userData = await res.json();
-            const safeNext = getSafeNextDestination(window.location.search, userData.role);
-            resetLoopBreaker();
-            if (safeNext) {
-              performAuthRedirect(safeNext);
-            } else if (userData.role === 'SUPER_ADMIN') {
-              performAuthRedirect('/overview');
-            } else if (userData.role === 'TEACHER') {
-              performAuthRedirect('/teacher');
-            } else {
-              performAuthRedirect('/student?scan=true');
-            }
-          } else {
-            // Server rejected session -> wipe local storage and stay on /login
-            emergencyWipeAuthState();
-          }
-        })
-        .catch(() => {
-          // Network error -> wipe local state and stay on /login
-          emergencyWipeAuthState();
-        });
-    }
-
     const token = params.get('magic_token') || params.get('token');
     if (token) {
       setMagicToken(token);
@@ -178,6 +143,28 @@ export const Login: React.FC = () => {
         });
     }
   }, []);
+ 
+  // Single source of truth: redirect if already authenticated in AuthContext
+  React.useEffect(() => {
+    if (!authLoading && authUser) {
+      const params = new URLSearchParams(window.location.search);
+      const reason = params.get('reason');
+      const loopTripped = isLoopBreakerTripped() || reason === 'loop_breaker_tripped';
+      if (!loopTripped) {
+        const safeNext = getSafeNextDestination(window.location.search, authUser.role);
+        resetLoopBreaker();
+        if (safeNext) {
+          performAuthRedirect(safeNext);
+        } else if (authUser.role === 'SUPER_ADMIN') {
+          performAuthRedirect('/overview');
+        } else if (authUser.role === 'TEACHER') {
+          performAuthRedirect('/teacher');
+        } else {
+          performAuthRedirect('/student?scan=true');
+        }
+      }
+    }
+  }, [authUser, authLoading]);
 
   // Live lockout countdown timer
   useEffect(() => {
