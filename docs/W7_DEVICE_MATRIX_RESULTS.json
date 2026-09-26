@@ -1,0 +1,512 @@
+{
+  "test_timestamp": "2026-09-11T10:57:44.724655Z",
+  "total_scans": 800,
+  "gates": {
+    "gate_1_speedup_15m": {
+      "mean_speedup": 6.36,
+      "passed": true
+    },
+    "gate_2_old_15m_success": {
+      "min_success": 100.0,
+      "mean_success": 100.0,
+      "passed": true
+    },
+    "gate_3_zero_regression": {
+      "passed": true
+    }
+  },
+  "comparison_table": [
+    {
+      "cell_name": "Redmi 6A (2GB RAM, A8.1) \u00d7 Projector 3m",
+      "device_tier": "old",
+      "range_name": "Projector 3m",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 14.9,
+      "wasm_p50": 4.2,
+      "speedup": 3.55
+    },
+    {
+      "cell_name": "Galaxy A10 (2GB RAM, A9.0) \u00d7 Projector 3m",
+      "device_tier": "old",
+      "range_name": "Projector 3m",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 13.9,
+      "wasm_p50": 3.8,
+      "speedup": 3.66
+    },
+    {
+      "cell_name": "Galaxy M31 (4GB RAM, A11) \u00d7 Projector 3m",
+      "device_tier": "mid",
+      "range_name": "Projector 3m",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 8.4,
+      "wasm_p50": 2.8,
+      "speedup": 3.0
+    },
+    {
+      "cell_name": "Pixel 8 (8GB RAM, A14) \u00d7 Projector 3m",
+      "device_tier": "new",
+      "range_name": "Projector 3m",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 4.7,
+      "wasm_p50": 1.1,
+      "speedup": 4.27
+    },
+    {
+      "cell_name": "Redmi 6A (2GB RAM, A8.1) \u00d7 Projector 8m",
+      "device_tier": "old",
+      "range_name": "Projector 8m",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 52.1,
+      "wasm_p50": 8.9,
+      "speedup": 5.85
+    },
+    {
+      "cell_name": "Galaxy A10 (2GB RAM, A9.0) \u00d7 Projector 8m",
+      "device_tier": "old",
+      "range_name": "Projector 8m",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 49.5,
+      "wasm_p50": 8.5,
+      "speedup": 5.82
+    },
+    {
+      "cell_name": "Galaxy M31 (4GB RAM, A11) \u00d7 Projector 8m",
+      "device_tier": "mid",
+      "range_name": "Projector 8m",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 28.0,
+      "wasm_p50": 6.4,
+      "speedup": 4.38
+    },
+    {
+      "cell_name": "Pixel 8 (8GB RAM, A14) \u00d7 Projector 8m",
+      "device_tier": "new",
+      "range_name": "Projector 8m",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 15.5,
+      "wasm_p50": 2.5,
+      "speedup": 6.2
+    },
+    {
+      "cell_name": "Redmi 6A (2GB RAM, A8.1) \u00d7 Projector 15m (Hall)",
+      "device_tier": "old",
+      "range_name": "Projector 15m (Hall)",
+      "jsqr_success": 10.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 141.4,
+      "wasm_p50": 20.3,
+      "speedup": 6.97
+    },
+    {
+      "cell_name": "Galaxy A10 (2GB RAM, A9.0) \u00d7 Projector 15m (Hall)",
+      "device_tier": "old",
+      "range_name": "Projector 15m (Hall)",
+      "jsqr_success": 20.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 127.8,
+      "wasm_p50": 19.0,
+      "speedup": 6.73
+    },
+    {
+      "cell_name": "Galaxy M31 (4GB RAM, A11) \u00d7 Projector 15m (Hall)",
+      "device_tier": "mid",
+      "range_name": "Projector 15m (Hall)",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 68.8,
+      "wasm_p50": 13.9,
+      "speedup": 4.95
+    },
+    {
+      "cell_name": "Pixel 8 (8GB RAM, A14) \u00d7 Projector 15m (Hall)",
+      "device_tier": "new",
+      "range_name": "Projector 15m (Hall)",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 37.3,
+      "wasm_p50": 5.5,
+      "speedup": 6.78
+    },
+    {
+      "cell_name": "Redmi 6A (2GB RAM, A8.1) \u00d7 Phone-Screen 30cm",
+      "device_tier": "old",
+      "range_name": "Phone-Screen 30cm",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 15.1,
+      "wasm_p50": 4.1,
+      "speedup": 3.68
+    },
+    {
+      "cell_name": "Galaxy A10 (2GB RAM, A9.0) \u00d7 Phone-Screen 30cm",
+      "device_tier": "old",
+      "range_name": "Phone-Screen 30cm",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 15.2,
+      "wasm_p50": 4.0,
+      "speedup": 3.8
+    },
+    {
+      "cell_name": "Galaxy M31 (4GB RAM, A11) \u00d7 Phone-Screen 30cm",
+      "device_tier": "mid",
+      "range_name": "Phone-Screen 30cm",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 8.4,
+      "wasm_p50": 2.8,
+      "speedup": 3.0
+    },
+    {
+      "cell_name": "Pixel 8 (8GB RAM, A14) \u00d7 Phone-Screen 30cm",
+      "device_tier": "new",
+      "range_name": "Phone-Screen 30cm",
+      "jsqr_success": 100.0,
+      "wasm_success": 100.0,
+      "jsqr_p50": 4.5,
+      "wasm_p50": 1.1,
+      "speedup": 4.09
+    },
+    {
+      "cell_name": "Redmi 6A (2GB RAM, A8.1) \u00d7 Phone-Screen 1m",
+      "device_tier": "old",
+      "range_name": "Phone-Screen 1m",
+      "jsqr_success": 0.0,
+      "wasm_success": 80.0,
+      "jsqr_p50": 15.5,
+      "wasm_p50": 4.2,
+      "speedup": 3.69
+    },
+    {
+      "cell_name": "Galaxy A10 (2GB RAM, A9.0) \u00d7 Phone-Screen 1m",
+      "device_tier": "old",
+      "range_name": "Phone-Screen 1m",
+      "jsqr_success": 0.0,
+      "wasm_success": 80.0,
+      "jsqr_p50": 14.6,
+      "wasm_p50": 3.8,
+      "speedup": 3.84
+    },
+    {
+      "cell_name": "Galaxy M31 (4GB RAM, A11) \u00d7 Phone-Screen 1m",
+      "device_tier": "mid",
+      "range_name": "Phone-Screen 1m",
+      "jsqr_success": 0.0,
+      "wasm_success": 90.0,
+      "jsqr_p50": 8.5,
+      "wasm_p50": 2.8,
+      "speedup": 3.04
+    },
+    {
+      "cell_name": "Pixel 8 (8GB RAM, A14) \u00d7 Phone-Screen 1m",
+      "device_tier": "new",
+      "range_name": "Phone-Screen 1m",
+      "jsqr_success": 0.0,
+      "wasm_success": 0.0,
+      "jsqr_p50": 4.8,
+      "wasm_p50": 1.1,
+      "speedup": 4.36
+    }
+  ],
+  "raw_results": {
+    "proj_3m": {
+      "old_1_redmi6a": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 14.9,
+          "p95_ms": 17.0,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 4.2,
+          "p95_ms": 4.5,
+          "avg_scale": 640
+        }
+      },
+      "old_2_galaxya10": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 13.9,
+          "p95_ms": 16.2,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 3.8,
+          "p95_ms": 4.2,
+          "avg_scale": 640
+        }
+      },
+      "mid_galaxy_m31": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 8.4,
+          "p95_ms": 9.4,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 2.8,
+          "p95_ms": 3.1,
+          "avg_scale": 640
+        }
+      },
+      "modern_pixel8": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 4.7,
+          "p95_ms": 5.1,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 1.1,
+          "p95_ms": 1.3,
+          "avg_scale": 640
+        }
+      }
+    },
+    "proj_8m": {
+      "old_1_redmi6a": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 52.1,
+          "p95_ms": 58.2,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 8.9,
+          "p95_ms": 10.1,
+          "avg_scale": 640
+        }
+      },
+      "old_2_galaxya10": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 49.5,
+          "p95_ms": 55.8,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 8.5,
+          "p95_ms": 9.3,
+          "avg_scale": 640
+        }
+      },
+      "mid_galaxy_m31": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 28.0,
+          "p95_ms": 31.9,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 6.4,
+          "p95_ms": 6.9,
+          "avg_scale": 640
+        }
+      },
+      "modern_pixel8": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 15.5,
+          "p95_ms": 17.2,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 2.5,
+          "p95_ms": 2.7,
+          "avg_scale": 640
+        }
+      }
+    },
+    "proj_15m": {
+      "old_1_redmi6a": {
+        "jsqr": {
+          "success_rate": 10.0,
+          "p50_ms": 141.4,
+          "p95_ms": 310.1,
+          "avg_scale": 752
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 20.3,
+          "p95_ms": 31.4,
+          "avg_scale": 752
+        }
+      },
+      "old_2_galaxya10": {
+        "jsqr": {
+          "success_rate": 20.0,
+          "p50_ms": 127.8,
+          "p95_ms": 292.0,
+          "avg_scale": 752
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 19.0,
+          "p95_ms": 28.7,
+          "avg_scale": 752
+        }
+      },
+      "mid_galaxy_m31": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 68.8,
+          "p95_ms": 77.7,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 13.9,
+          "p95_ms": 15.0,
+          "avg_scale": 640
+        }
+      },
+      "modern_pixel8": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 37.3,
+          "p95_ms": 41.0,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 5.5,
+          "p95_ms": 5.9,
+          "avg_scale": 640
+        }
+      }
+    },
+    "phone_30cm": {
+      "old_1_redmi6a": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 15.1,
+          "p95_ms": 16.5,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 4.1,
+          "p95_ms": 4.5,
+          "avg_scale": 640
+        }
+      },
+      "old_2_galaxya10": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 15.2,
+          "p95_ms": 16.3,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 4.0,
+          "p95_ms": 4.2,
+          "avg_scale": 640
+        }
+      },
+      "mid_galaxy_m31": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 8.4,
+          "p95_ms": 9.2,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 2.8,
+          "p95_ms": 3.1,
+          "avg_scale": 640
+        }
+      },
+      "modern_pixel8": {
+        "jsqr": {
+          "success_rate": 100.0,
+          "p50_ms": 4.5,
+          "p95_ms": 5.1,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 100.0,
+          "p50_ms": 1.1,
+          "p95_ms": 1.2,
+          "avg_scale": 640
+        }
+      }
+    },
+    "phone_1m": {
+      "old_1_redmi6a": {
+        "jsqr": {
+          "success_rate": 0.0,
+          "p50_ms": 15.5,
+          "p95_ms": 17.4,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 80.0,
+          "p50_ms": 4.2,
+          "p95_ms": 4.5,
+          "avg_scale": 640
+        }
+      },
+      "old_2_galaxya10": {
+        "jsqr": {
+          "success_rate": 0.0,
+          "p50_ms": 14.6,
+          "p95_ms": 16.5,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 80.0,
+          "p50_ms": 3.8,
+          "p95_ms": 4.2,
+          "avg_scale": 640
+        }
+      },
+      "mid_galaxy_m31": {
+        "jsqr": {
+          "success_rate": 0.0,
+          "p50_ms": 8.5,
+          "p95_ms": 9.4,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 90.0,
+          "p50_ms": 2.8,
+          "p95_ms": 3.1,
+          "avg_scale": 640
+        }
+      },
+      "modern_pixel8": {
+        "jsqr": {
+          "success_rate": 0.0,
+          "p50_ms": 4.8,
+          "p95_ms": 5.1,
+          "avg_scale": 640
+        },
+        "wasm": {
+          "success_rate": 0.0,
+          "p50_ms": 1.1,
+          "p95_ms": 1.3,
+          "avg_scale": 640
+        }
+      }
+    }
+  }
+}

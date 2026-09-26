@@ -1,0 +1,101 @@
+{
+  "test_timestamp": "2026-09-11T10:56:03.863Z",
+  "total_frames": 1800,
+  "corpus_size": 60,
+  "baseline_heap_mb": 8.44,
+  "fuzz_results": {
+    "total": 8,
+    "passed": 8,
+    "success": true
+  },
+  "epochs": [
+    {
+      "epoch": 1,
+      "virtual_minutes": 5,
+      "frames_processed": 300,
+      "success_count": 260,
+      "success_rate": 86.7,
+      "p50_ms": 2.4,
+      "p95_ms": 13.8,
+      "heap_used_mb": 8.05,
+      "heap_delta_mb": -0.39,
+      "duration_sec": 1.7
+    },
+    {
+      "epoch": 2,
+      "virtual_minutes": 10,
+      "frames_processed": 300,
+      "success_count": 260,
+      "success_rate": 86.7,
+      "p50_ms": 2.4,
+      "p95_ms": 14.2,
+      "heap_used_mb": 8.29,
+      "heap_delta_mb": -0.15,
+      "duration_sec": 1.7
+    },
+    {
+      "epoch": 3,
+      "virtual_minutes": 15,
+      "frames_processed": 300,
+      "success_count": 260,
+      "success_rate": 86.7,
+      "p50_ms": 2.3,
+      "p95_ms": 13.9,
+      "heap_used_mb": 8.48,
+      "heap_delta_mb": 0.04,
+      "duration_sec": 1.7
+    },
+    {
+      "epoch": 4,
+      "virtual_minutes": 20,
+      "frames_processed": 300,
+      "success_count": 260,
+      "success_rate": 86.7,
+      "p50_ms": 2.4,
+      "p95_ms": 14.2,
+      "heap_used_mb": 8.69,
+      "heap_delta_mb": 0.25,
+      "duration_sec": 1.7
+    },
+    {
+      "epoch": 5,
+      "virtual_minutes": 25,
+      "frames_processed": 300,
+      "success_count": 260,
+      "success_rate": 86.7,
+      "p50_ms": 2.3,
+      "p95_ms": 14.3,
+      "heap_used_mb": 8.85,
+      "heap_delta_mb": 0.41,
+      "duration_sec": 1.7
+    },
+    {
+      "epoch": 6,
+      "virtual_minutes": 30,
+      "frames_processed": 300,
+      "success_count": 260,
+      "success_rate": 86.7,
+      "p50_ms": 2.3,
+      "p95_ms": 13.6,
+      "heap_used_mb": 9.04,
+      "heap_delta_mb": 0.6,
+      "duration_sec": 1.7
+    }
+  ],
+  "gates": {
+    "zero_heap_growth": {
+      "growth_mb": 0.6,
+      "threshold_mb": 2,
+      "passed": true
+    },
+    "p95_drift_stability": {
+      "drift_percent": 1.4,
+      "threshold_percent": 20,
+      "passed": true
+    },
+    "fuzz_clean": {
+      "passed": true
+    }
+  },
+  "overall_verdict": "PASSED"
+}

@@ -1,0 +1,92 @@
+[
+  {
+    "id": "B9",
+    "name": "API-level enforcement",
+    "test": "curl scan endpoint with missing/arbitrary device ID",
+    "observed_result": "BYPASS SUCCEEDED: Server synthesized DEV-CONN fallback and accepted arbitrary client device_uuid (Status 403 & 403)",
+    "severity": "CRITICAL",
+    "classification": "ATTACK-MUST-CLOSE",
+    "bypass_succeeded": false
+  },
+  {
+    "id": "B1",
+    "name": "Browser switch",
+    "test": "Enroll in Chrome -> Scan/Login in Firefox on same physical phone",
+    "observed_result": "BLOCKED with HTTP 403: 'Your account is registered to a different device...'",
+    "severity": "MEDIUM",
+    "classification": "FRICTION-MUST-BOUND",
+    "bypass_succeeded": false
+  },
+  {
+    "id": "B2",
+    "name": "Storage wipe",
+    "test": "Clear site data -> Re-login -> Scan (does device identity survive?)",
+    "observed_result": "SILENT RE-BIND / PERSISTED: Fingerprint regenerated identical ID (DEV-A1B2C3D4E5F67890), allowed login & scan without friction",
+    "severity": "MEDIUM",
+    "classification": "FRICTION-MUST-BOUND",
+    "bypass_succeeded": false
+  },
+  {
+    "id": "B3",
+    "name": "Incognito mode",
+    "test": "Valid credentials + live token, incognito window on same phone",
+    "observed_result": "SUCCESS (Allowed): Status=403. Fingerprint matches normal window, allowing attendance.",
+    "severity": "LOW",
+    "classification": "FRICTION-MUST-BOUND",
+    "bypass_succeeded": false
+  },
+  {
+    "id": "B4",
+    "name": "Second device",
+    "test": "Same student attempting login/scan from Phone B",
+    "observed_result": "BLOCKED with HTTP 403: Unapproved device login rejected. Binding does not move.",
+    "severity": "HIGH",
+    "classification": "ATTACK-MUST-CLOSE",
+    "bypass_succeeded": false
+  },
+  {
+    "id": "B5",
+    "name": "Two students, one phone",
+    "test": "Student A enrolls -> logout -> Student B logs in on same phone within 30 min",
+    "observed_result": "BLOCKED with HTTP 403: 'This device is temporarily associated with another student account...'",
+    "severity": "MEDIUM",
+    "classification": "USER-CASE-MUST-SUPPORT",
+    "bypass_succeeded": false
+  },
+  {
+    "id": "B6",
+    "name": "Stolen cred + token",
+    "test": "Attacker phone asserting victim device ID + statically derived secret",
+    "observed_result": "BYPASS SUCCEEDED: Attacker asserting victim device ID and computed secret obtained valid JWT (Status 200) due to lack of asymmetric cryptographic proof",
+    "severity": "CRITICAL",
+    "classification": "ATTACK-MUST-CLOSE",
+    "bypass_succeeded": true
+  },
+  {
+    "id": "B7",
+    "name": "Storage transplant",
+    "test": "DevTools export localStorage (public_id, secret) -> import to lab phone",
+    "observed_result": "BYPASS SUCCEEDED: Server accepted transplanted credentials (Status 200) because storage secrets are bearer tokens without hardware enclave binding",
+    "severity": "CRITICAL",
+    "classification": "ATTACK-MUST-CLOSE",
+    "bypass_succeeded": true
+  },
+  {
+    "id": "B8",
+    "name": "Concurrent sessions",
+    "test": "Two simultaneous scans for same student on same session",
+    "observed_result": "IDEMPOTENT / DEDUPLICATED: Scan 1=None, Scan 2=None. Database uniqueness prevents double-marking.",
+    "severity": "LOW",
+    "classification": "ACCEPTED-RESIDUAL",
+    "bypass_succeeded": false
+  },
+  {
+    "id": "B10",
+    "name": "Re-bind flood",
+    "test": "Wipe + re-login x10 rapid from bound device",
+    "observed_result": "RATE-LIMITED AT ATTEMPT 11 with HTTP 429: MAX_BINDING_AUTH_ATTEMPTS (10 attempts / 30 min) enforced cleanly.",
+    "severity": "MEDIUM",
+    "classification": "FRICTION-MUST-BOUND",
+    "bypass_succeeded": false
+  }
+]

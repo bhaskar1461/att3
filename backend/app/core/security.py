@@ -247,20 +247,15 @@ def verify_magic_login_token(token: str) -> Optional[dict]:
 # --- AES / HMAC Security for Student QR Codes ---
 
 # --- Server-Authoritative IST Time Enforcement ---
+from app.core.clock import InstitutionalClock, institutional_clock
 
 def get_server_ist_datetime() -> datetime:
     """Returns server-authoritative current datetime in IST (Asia/Kolkata)."""
-    try:
-        import zoneinfo
-        tz = zoneinfo.ZoneInfo("Asia/Kolkata")
-        return datetime.now(tz)
-    except Exception:
-        utc_now = datetime.utcnow()
-        return utc_now + timedelta(hours=5, minutes=30)
+    return InstitutionalClock.now_ist()
 
 def get_server_ist_date() -> str:
     """Returns server-authoritative current date string in IST (YYYY-MM-DD)."""
-    return get_server_ist_datetime().strftime("%Y-%m-%d")
+    return InstitutionalClock.today_ist_date()
 
 def _int_to_base36(n: int) -> str:
     alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -702,5 +697,10 @@ def validate_projector_session_token(
         "epoch_delta": epoch_delta,
         "is_grace_window": (now_ts >= slot_end_ts)
     }
+
+
+# Export InstitutionalCryptoFacade
+from app.core.crypto_facade import InstitutionalCryptoFacade, crypto_facade
+
 
 

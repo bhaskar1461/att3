@@ -1,0 +1,125 @@
+name: Heroku Daylight Dyno Scheduler
+
+on:
+  schedule:
+    # --------------------------------------------------------------------------
+    # TIMEZONE CALCULATION:
+    # Local Timezone : IST (Asia/Kolkata, UTC+05:30)
+    # Target Days    : Monday – Friday (1-5)
+    #
+    # 1. Scale-UP at 08:50 AM IST:
+    #    08:50 IST - 05:30 UTC offset = 03:20 UTC
+    #    Cron Expression: '20 3 * * 1-5'
+    #
+    # 2. Scale-DOWN at 05:00 PM (17:00) IST:
+    #    17:00 IST - 05:30 UTC offset = 11:30 UTC
+    #    Cron Expression: '30 11 * * 1-5'
+    # --------------------------------------------------------------------------
+    - cron: '20 3 * * 1-5'   # 08:50 AM IST (Mon-Fri) -> Scale UP to 1 web dyno
+    - cron: '30 11 * * 1-5'  # 05:00 PM IST (Mon-Fri) -> Scale DOWN to 0 web dynos
+
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Manual Scale Action (up = 1 dyno, down = 0 dynos)'
+        required: true
+        type: choice
+        default: 'up'
+        options:
+          - up
+          - down
+
+jobs:
+  scale:
+    name: Scale Web Dyno & Pre-warm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Action & Quantity
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ACTION="${{ github.event.inputs.action }}"
+          else
+            # Derive action based on UTC hour: morning (~03:20 UTC) vs evening (~11:30 UTC)
+            UTC_HOUR=$(date -u +%H)
+            if [ "$UTC_HOUR" -lt 8 ]; then
+              ACTION="up"
+            else
+              ACTION="down"
+            fi
+          fi
+
+          if [ "$ACTION" = "up" ]; then
+            QTY=1
+          else
+            QTY=0
+          fi
+
+          echo "Action to execute: $ACTION (web dyno quantity: $QTY)"
+          echo "action=$ACTION" >> $GITHUB_OUTPUT
+          echo "quantity=$QTY" >> $GITHUB_OUTPUT
+
+      - name: Patch Heroku Formation
+        id: heroku_formation
+        run: |
+          ACTION="${{ steps.resolve.outputs.action }}"
+          QTY="${{ steps.resolve.outputs.quantity }}"
+
+          echo "Running Heroku Dyno Formation scale: $ACTION (target quantity=$QTY)"
+
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X PATCH \
+            "https://api.heroku.com/apps/${{ secrets.HEROKU_APP_NAME }}/formation" \
+            -H "Authorization: Bearer ${{ secrets.HEROKU_API_TOKEN }}" \
+            -H "Accept: application/vnd.heroku+json; version=3" \
+            -H "Content-Type: application/json" \
+            -d "{\"updates\":[{\"type\":\"web\",\"quantity\":$QTY}]}")
+
+          HTTP_CODE=$(echo "$RESPONSE" | grep "HTTP_STATUS" | cut -d':' -f2)
+          BODY=$(echo "$RESPONSE" | sed -e '/HTTP_STATUS/d')
+
+          echo "Action executed: $ACTION"
+          echo "Heroku API HTTP Status Code: $HTTP_CODE"
+          echo "Heroku API Response Body:"
+          echo "$BODY"
+
+          if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+            echo "::error::Heroku API scale operation failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+
+      - name: Pre-warm App & Model Verification
+        if: steps.resolve.outputs.action == 'up'
+        run: |
+          echo "Sleeping 45s to allow Heroku dyno boot and model loading..."
+          sleep 45
+
+          HEALTH_URL="${{ secrets.APP_URL }}/healthz"
+          echo "Pinging health endpoint for model warm verification: $HEALTH_URL"
+
+          MAX_RETRIES=3
+          RETRY_DELAY=20
+          SUCCESS=0
+
+          for attempt in $(seq 1 $MAX_RETRIES); do
+            echo "--- Warmup attempt $attempt of $MAX_RETRIES ---"
+            HTTP_STATUS=$(curl -s -o /tmp/healthz_response.json -w "%{http_code}" "$HEALTH_URL" || echo "000")
+            echo "HTTP Status Code: $HTTP_STATUS"
+
+            if [ -f /tmp/healthz_response.json ]; then
+              echo "Response payload: $(cat /tmp/healthz_response.json)"
+            fi
+
+            if [ "$HTTP_STATUS" = "200" ]; then
+              echo "Pre-warming succeeded! Application and models are verified warm."
+              SUCCESS=1
+              break
+            else
+              echo "Application not yet ready (HTTP $HTTP_STATUS). Retrying in ${RETRY_DELAY}s..."
+              sleep $RETRY_DELAY
+            fi
+          done
+
+          if [ "$SUCCESS" -ne 1 ]; then
+            echo "::error::Health check failed after $MAX_RETRIES retries."
+            exit 1
+          fi

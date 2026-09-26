@@ -597,3 +597,8 @@ def clear_security_lockouts(
         logger.info(f"IP login cooldown cleared for {clean_ip} by admin operation.")
 
     return (clean_roll, clean_ip)
+
+
+# Export DeviceSecurityService
+from app.core.device_security_service import DeviceSecurityService, device_security_service
+

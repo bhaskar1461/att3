@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { UserProfile } from '../types';
-import { scheduleTokenAutoRefresh, performAuthRedirect } from '../services/api';
+import { scheduleTokenAutoRefresh, cancelTokenAutoRefresh, performAuthRedirect } from '../services/api';
 import { emergencyWipeAuthState } from '../services/loopBreaker';
 
 export const AUTH_SCHEMA_VERSION = '2';
@@ -23,6 +23,7 @@ const AUTH_CHANNEL_NAME = 'snist_auth_channel';
  * and notifies the server to invalidate httpOnly refresh cookies.
  */
 export async function clearAllAuthArtifacts(): Promise<void> {
+  cancelTokenAutoRefresh();
   emergencyWipeAuthState();
   try {
     const channel = new BroadcastChannel(AUTH_CHANNEL_NAME);

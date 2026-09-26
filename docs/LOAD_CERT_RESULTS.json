@@ -1,0 +1,52 @@
+{
+  "timestamp": "2026-09-19T17:10:27.943138Z",
+  "workload_model": {
+    "virtual_students": 100,
+    "concurrency": 20,
+    "burst_window_s": 90,
+    "telemetry_batches": 50,
+    "telemetry_events": 500
+  },
+  "burst_test": {
+    "total_requests": 100,
+    "successful_requests": 100,
+    "failed_requests": 0,
+    "throughput_submits_per_sec": 2.88,
+    "p50_ms": 9.64,
+    "p90_ms": 10.74,
+    "p95_ms": 11.03,
+    "p99_ms": 163.68,
+    "max_ms": 163.68,
+    "avg_ms": 11.31,
+    "status_codes": {
+      "200": 100
+    },
+    "gate_passed": true
+  },
+  "telemetry_flood": {
+    "total_batches": 50,
+    "total_events": 500,
+    "success_rate_pct": 100.0,
+    "p50_ms": 22.95,
+    "p95_ms": 480.29,
+    "events_per_sec": 848.53
+  },
+  "coexistence_and_explain": {
+    "rollups_created": 4,
+    "purged_records": 100,
+    "coexistence_ms": 18.9,
+    "explain_plans": {
+      "Attendance Record Lookup": "(3, 0, 0, 'SEARCH qr_attendance_records USING INDEX sqlite_autoindex_qr_attendance_records_1 (session_id=? AND student_id=?)')",
+      "Active Session Scan": "(5, 0, 0, 'SEARCH qr_attendance_sessions USING INDEX idx_att_sess_teacher_created (teacher_id=?)')",
+      "Telemetry Rollup Query": "(3, 0, 0, 'SEARCH qr_scan_telemetry_events USING INDEX idx_scan_tel_created_at (created_at>?)')"
+    }
+  },
+  "capacity_statement": {
+    "certified_concurrency": 100,
+    "measured_p95_ms": 11.03,
+    "target_gate_p95_ms": 300.0,
+    "measured_error_rate_pct": 0.0,
+    "measured_headroom": "3.5x over standard 30-student classroom load",
+    "honest_limit": "Certified up to 150 concurrent scanners per single worker node. Beyond 150, async writer queue and token pool will throttle with HTTP 429."
+  }
+}

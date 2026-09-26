@@ -30,9 +30,10 @@ backend/.env
 # Ruflo local secrets and runtime data
 .env.local
 .env.*.local
-.claude-flow/data/
-.claude-flow/logs/
-.claude-flow/sessions/
+.claude-flow/
+.claude/
+.swarm/
+.mcp.json
 
 # Credentials & Secrets
 *client_secret*.json
@@ -44,3 +45,19 @@ token.pickle
 backend/token.pickle
 certs/
 *.tar.gz
+scratch/
+*.scip
+*.bin
+*.bak
+backend/*_routes.txt
+backend/all_endpoints.txt
+backend/openapi_paths.txt
+test_*.mjs
+scratch_prompt.txt
+
+# Graphify cache & local clone
+graphify-out/cache/
+graphify/
+
+# Test caches
+scripts/*_cache.json

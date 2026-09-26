@@ -1,16 +1,13 @@
 import { getDeviceHeaders } from './deviceCredential';
 import { emergencyWipeAuthState, recordAuthRedirect } from './loopBreaker';
+import { tokenLifecycleManager } from './tokenLifecycle';
 
 const API_BASE = '/api/v1';
-let refreshTimer: any = null;
-let lastRefreshTime = Date.now();
-let activeRefreshPromise: Promise<string | null> | null = null;
 
 type AuthRedirectHandler = (url: string) => void;
-let authRedirectHandler: AuthRedirectHandler | null = null;
 
 export function setAuthRedirectHandler(handler: AuthRedirectHandler | null) {
-  authRedirectHandler = handler;
+  tokenLifecycleManager.setRedirectHandler(handler);
 }
 
 export function performAuthRedirect(url: string) {
@@ -18,119 +15,32 @@ export function performAuthRedirect(url: string) {
   const targetUrl = isSafe ? url : '/login?reason=loop_breaker_tripped';
   if (!isSafe) {
     emergencyWipeAuthState();
+    tokenLifecycleManager.cancelAutoRefresh();
   }
 
-  if (authRedirectHandler) {
-    authRedirectHandler(targetUrl);
-  } else if (typeof window !== 'undefined') {
-    window.history.replaceState({}, '', targetUrl);
-    window.dispatchEvent(new PopStateEvent('popstate'));
-  }
+  tokenLifecycleManager.triggerRedirect(targetUrl);
 }
 
 /**
  * Performs a silent token refresh using httpOnly cookie or fallback refresh_token.
- * Deduplicates concurrent refresh requests using a singleton Promise.
+ * Deduplicates concurrent refresh requests using a singleton Promise via TokenLifecycleManager.
  */
 export async function performTokenRefresh(): Promise<string | null> {
-  if (activeRefreshPromise) {
-    return activeRefreshPromise;
-  }
-
-  activeRefreshPromise = (async () => {
-    try {
-      const storedRefreshToken = typeof localStorage !== 'undefined' ? localStorage.getItem('refresh_token') : null;
-      const currentToken = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-      const refreshResponse = await fetch(`${API_BASE}/auth/refresh`, {
-        method: 'POST',
-        credentials: 'include', // Sends snist_refresh_token httpOnly cookie
-        headers: {
-          'Content-Type': 'application/json',
-          ...(currentToken ? { 'Authorization': `Bearer ${currentToken}` } : {})
-        },
-        body: JSON.stringify({
-          refresh_token: storedRefreshToken || undefined
-        })
-      });
-
-      if (refreshResponse.ok) {
-        const data = await refreshResponse.json();
-        if (data && data.access_token) {
-          localStorage.setItem('token', data.access_token);
-          if (data.refresh_token) {
-            localStorage.setItem('refresh_token', data.refresh_token);
-          }
-          lastRefreshTime = Date.now();
-          scheduleTokenAutoRefresh();
-          return data.access_token;
-        }
-      }
-
-      // If refresh failed with 401 or 403, the session is definitively terminated
-      if (refreshResponse.status === 401 || refreshResponse.status === 403) {
-        emergencyWipeAuthState();
-        if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-          const currentPath = window.location.pathname + window.location.search;
-          const nextParam = currentPath.startsWith('/a/') ? `&next=${encodeURIComponent(currentPath)}` : '';
-          performAuthRedirect(`/login?reason=token_expired${nextParam}`);
-        }
-        return null;
-      }
-
-      // Other HTTP statuses (e.g. 500, 502) should not immediately wipe the session
-      return null;
-    } catch (err) {
-      // Network error or offline — do NOT wipe session on transient connection glitches!
-      console.warn('Silent token refresh network warning:', err);
-      return null;
-    } finally {
-      activeRefreshPromise = null;
-    }
-  })();
-
-  return activeRefreshPromise;
+  return tokenLifecycleManager.executeRefresh('api_request_interceptor');
 }
 
 /**
  * Schedules a sliding-window token auto-renewal (10 minutes for a 15-minute access token).
  */
 export function scheduleTokenAutoRefresh() {
-  if (refreshTimer) {
-    clearTimeout(refreshTimer);
-    refreshTimer = null;
-  }
-
-  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-  const userStr = typeof localStorage !== 'undefined' ? localStorage.getItem('user') : null;
-  if (!token || !userStr) return;
-
-  try {
-    const user = JSON.parse(userStr);
-    if (user.role === 'STUDENT' || user.role === 'TEACHER' || user.role === 'SUPER_ADMIN') {
-      // Renew every 10 minutes (600,000 ms) while active, well before 15-minute expiry
-      refreshTimer = setTimeout(async () => {
-        await performTokenRefresh();
-      }, 600000);
-    }
-  } catch (err) {
-    console.warn('Error scheduling token refresh:', err);
-  }
+  tokenLifecycleManager.scheduleAutoRefresh();
 }
 
-// Setup visibility listener to renew token when device wakes up or returns to tab
-if (typeof document !== 'undefined') {
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') {
-      const elapsedMs = Date.now() - lastRefreshTime;
-      // If student wakes device after 8+ minutes idle, silently refresh right away
-      if (elapsedMs > 480000) {
-        const token = localStorage.getItem('token');
-        if (token) {
-          performTokenRefresh().catch(() => {});
-        }
-      }
-    }
-  });
+/**
+ * Explicitly cancels the sliding-window token auto-renewal timer (e.g. on logout or session wipe).
+ */
+export function cancelTokenAutoRefresh() {
+  tokenLifecycleManager.cancelAutoRefresh();
 }
 
 export async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promise<T> {

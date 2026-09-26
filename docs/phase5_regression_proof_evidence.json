@@ -1,0 +1,72 @@
+{
+  "funnel": {
+    "old_tier": {
+      "count": 20,
+      "success": 20,
+      "p50": 18.4180500000366,
+      "p95": 90.4398200000287
+    },
+    "modern_tier": {
+      "count": 20,
+      "success": 20,
+      "p50": 20.653300000049057,
+      "p95": 32.16250999903423
+    },
+    "first_attempt_rate": 100.0
+  },
+  "bypass_matrix": {
+    "B1": {
+      "name": "Browser Switch",
+      "status": "CLOSED",
+      "pass": true,
+      "detail": "Device signature verification failed: signature_invalid"
+    },
+    "B2": {
+      "name": "Storage Wipe",
+      "status": "CLOSED",
+      "pass": true,
+      "detail": "BINDING_REQUIRED: Device binding proof is required. Please enroll your device first."
+    },
+    "B6": {
+      "name": "Stolen Credentials",
+      "status": "CLOSED",
+      "pass": true
+    },
+    "B7": {
+      "name": "Storage Transplant",
+      "status": "CLOSED",
+      "pass": true,
+      "note": "WebCrypto Non-extractable key invariant"
+    },
+    "B9": {
+      "name": "API-Level Direct Scan",
+      "status": "CLOSED",
+      "pass": true
+    },
+    "B10": {
+      "name": "Re-bind Churn Flood",
+      "status": "CLOSED",
+      "pass": true,
+      "codes": [
+        200,
+        200,
+        200,
+        200,
+        200
+      ]
+    }
+  },
+  "straggler_drill": {
+    "status": "PASS",
+    "duration_ms": 75.90049999998882,
+    "sla_target_ms": 3000.0
+  },
+  "load_burst": {
+    "total": 100,
+    "success": 100,
+    "errors_5xx": 0,
+    "p50_ms": 194.48575000023993,
+    "p95_ms": 283.0549050000627,
+    "peak_ms": 297.949099998732
+  }
+}

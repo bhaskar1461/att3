@@ -1,0 +1,782 @@
+{
+  "version": "1.1",
+  "description": "SNIST ERP Synthetic QR Benchmark Corpus (Week 7: 15m Hall Range Extension)",
+  "total_fixtures": 60,
+  "categories": {
+    "sharp": 10,
+    "blurry": 10,
+    "small": 10,
+    "occluded": 10,
+    "low_light": 6,
+    "glare": 4,
+    "hall_15m": 10
+  },
+  "fixtures": [
+    {
+      "id": "sharp_01",
+      "filename": "sharp_01.png",
+      "category": "sharp",
+      "payload": "?s=71HFE865&v=500001",
+      "params": {
+        "size": 512
+      },
+      "expected_valid": true,
+      "target_eval": "baseline_fast"
+    },
+    {
+      "id": "sharp_02",
+      "filename": "sharp_02.png",
+      "category": "sharp",
+      "payload": "?s=V215DE1C&v=500002",
+      "params": {
+        "size": 512
+      },
+      "expected_valid": true,
+      "target_eval": "baseline_fast"
+    },
+    {
+      "id": "sharp_03",
+      "filename": "sharp_03.png",
+      "category": "sharp",
+      "payload": "?s=TEWH0AVN&v=500003",
+      "params": {
+        "size": 512
+      },
+      "expected_valid": true,
+      "target_eval": "baseline_fast"
+    },
+    {
+      "id": "sharp_04",
+      "filename": "sharp_04.png",
+      "category": "sharp",
+      "payload": "?s=H9DN65R6&v=500004",
+      "params": {
+        "size": 512
+      },
+      "expected_valid": true,
+      "target_eval": "baseline_fast"
+    },
+    {
+      "id": "sharp_05",
+      "filename": "sharp_05.png",
+      "category": "sharp",
+      "payload": "?s=PPG2X7R5&v=500005",
+      "params": {
+        "size": 512
+      },
+      "expected_valid": true,
+      "target_eval": "baseline_fast"
+    },
+    {
+      "id": "sharp_06",
+      "filename": "sharp_06.png",
+      "category": "sharp",
+      "payload": "?s=JQC42EJ5&v=500006",
+      "params": {
+        "size": 512
+      },
+      "expected_valid": true,
+      "target_eval": "baseline_fast"
+    },
+    {
+      "id": "sharp_07",
+      "filename": "sharp_07.png",
+      "category": "sharp",
+      "payload": "?s=E6RHXQAQ&v=500007",
+      "params": {
+        "size": 512
+      },
+      "expected_valid": true,
+      "target_eval": "baseline_fast"
+    },
+    {
+      "id": "sharp_08",
+      "filename": "sharp_08.png",
+      "category": "sharp",
+      "payload": "?s=PDH4AFAX&v=500008",
+      "params": {
+        "size": 512
+      },
+      "expected_valid": true,
+      "target_eval": "baseline_fast"
+    },
+    {
+      "id": "sharp_09",
+      "filename": "sharp_09.png",
+      "category": "sharp",
+      "payload": "?s=RHEM3E2M&v=500009",
+      "params": {
+        "size": 512
+      },
+      "expected_valid": true,
+      "target_eval": "baseline_fast"
+    },
+    {
+      "id": "sharp_10",
+      "filename": "sharp_10.png",
+      "category": "sharp",
+      "payload": "?s=SH4DMDZS&v=500010",
+      "params": {
+        "size": 512
+      },
+      "expected_valid": true,
+      "target_eval": "baseline_fast"
+    },
+    {
+      "id": "blurry_01",
+      "filename": "blurry_01.png",
+      "category": "blurry",
+      "payload": "?s=X9G8FGVS&v=500011",
+      "params": {
+        "sigma": 1.5,
+        "size": 220
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_advantage_heavy"
+    },
+    {
+      "id": "blurry_02",
+      "filename": "blurry_02.png",
+      "category": "blurry",
+      "payload": "?s=QE8Z5379&v=500012",
+      "params": {
+        "sigma": 1.7,
+        "size": 220
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_advantage_heavy"
+    },
+    {
+      "id": "blurry_03",
+      "filename": "blurry_03.png",
+      "category": "blurry",
+      "payload": "?s=AV4RRXG0&v=500013",
+      "params": {
+        "sigma": 1.9,
+        "size": 220
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_advantage_heavy"
+    },
+    {
+      "id": "blurry_04",
+      "filename": "blurry_04.png",
+      "category": "blurry",
+      "payload": "?s=7HN7JVAX&v=500014",
+      "params": {
+        "sigma": 2.1,
+        "size": 220
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_advantage_heavy"
+    },
+    {
+      "id": "blurry_05",
+      "filename": "blurry_05.png",
+      "category": "blurry",
+      "payload": "?s=0GB6KC9Q&v=500015",
+      "params": {
+        "sigma": 2.3,
+        "size": 220
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_advantage_heavy"
+    },
+    {
+      "id": "blurry_06",
+      "filename": "blurry_06.png",
+      "category": "blurry",
+      "payload": "?s=A0MZ17QK&v=500016",
+      "params": {
+        "sigma": 2.5,
+        "size": 220
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_advantage_heavy"
+    },
+    {
+      "id": "blurry_07",
+      "filename": "blurry_07.png",
+      "category": "blurry",
+      "payload": "?s=F3F55Z48&v=500017",
+      "params": {
+        "sigma": 2.7,
+        "size": 220
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_advantage_heavy"
+    },
+    {
+      "id": "blurry_08",
+      "filename": "blurry_08.png",
+      "category": "blurry",
+      "payload": "?s=8YAGVDCK&v=500018",
+      "params": {
+        "sigma": 2.9,
+        "size": 220
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_advantage_heavy"
+    },
+    {
+      "id": "blurry_09",
+      "filename": "blurry_09.png",
+      "category": "blurry",
+      "payload": "?s=SQWW7FE4&v=500019",
+      "params": {
+        "sigma": 3.2,
+        "size": 220
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_advantage_heavy"
+    },
+    {
+      "id": "blurry_10",
+      "filename": "blurry_10.png",
+      "category": "blurry",
+      "payload": "?s=N1EE043E&v=500020",
+      "params": {
+        "sigma": 3.5,
+        "size": 220
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_advantage_heavy"
+    },
+    {
+      "id": "small_01",
+      "filename": "small_01.png",
+      "category": "small",
+      "payload": "?s=42N4FHZD&v=500021",
+      "params": {
+        "effective_qr_px": 320,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_distance_gate"
+    },
+    {
+      "id": "small_02",
+      "filename": "small_02.png",
+      "category": "small",
+      "payload": "?s=8YFYTC66&v=500022",
+      "params": {
+        "effective_qr_px": 300,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_distance_gate"
+    },
+    {
+      "id": "small_03",
+      "filename": "small_03.png",
+      "category": "small",
+      "payload": "?s=VPVTX363&v=500023",
+      "params": {
+        "effective_qr_px": 280,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_distance_gate"
+    },
+    {
+      "id": "small_04",
+      "filename": "small_04.png",
+      "category": "small",
+      "payload": "?s=SN6FCCW8&v=500024",
+      "params": {
+        "effective_qr_px": 260,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_distance_gate"
+    },
+    {
+      "id": "small_05",
+      "filename": "small_05.png",
+      "category": "small",
+      "payload": "?s=VBHXF4W6&v=500025",
+      "params": {
+        "effective_qr_px": 240,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_distance_gate"
+    },
+    {
+      "id": "small_06",
+      "filename": "small_06.png",
+      "category": "small",
+      "payload": "?s=305FATZY&v=500026",
+      "params": {
+        "effective_qr_px": 220,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_distance_gate"
+    },
+    {
+      "id": "small_07",
+      "filename": "small_07.png",
+      "category": "small",
+      "payload": "?s=DS3AR0RG&v=500027",
+      "params": {
+        "effective_qr_px": 200,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_distance_gate"
+    },
+    {
+      "id": "small_08",
+      "filename": "small_08.png",
+      "category": "small",
+      "payload": "?s=XJVZ9CJD&v=500028",
+      "params": {
+        "effective_qr_px": 190,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_distance_gate"
+    },
+    {
+      "id": "small_09",
+      "filename": "small_09.png",
+      "category": "small",
+      "payload": "?s=33M33YA3&v=500029",
+      "params": {
+        "effective_qr_px": 185,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_distance_gate"
+    },
+    {
+      "id": "small_10",
+      "filename": "small_10.png",
+      "category": "small",
+      "payload": "?s=5B44FS7F&v=500030",
+      "params": {
+        "effective_qr_px": 180,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "wasm_distance_gate"
+    },
+    {
+      "id": "occluded_01",
+      "filename": "occluded_01.png",
+      "category": "occluded",
+      "payload": "?s=25TMGDMF&v=500031",
+      "params": {
+        "masked_pct": 0.1,
+        "pattern": "center",
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "reed_solomon_robustness"
+    },
+    {
+      "id": "occluded_02",
+      "filename": "occluded_02.png",
+      "category": "occluded",
+      "payload": "?s=GS8KXM40&v=500032",
+      "params": {
+        "masked_pct": 0.12,
+        "pattern": "center",
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "reed_solomon_robustness"
+    },
+    {
+      "id": "occluded_03",
+      "filename": "occluded_03.png",
+      "category": "occluded",
+      "payload": "?s=X64DG8P4&v=500033",
+      "params": {
+        "masked_pct": 0.15,
+        "pattern": "center",
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "reed_solomon_robustness"
+    },
+    {
+      "id": "occluded_04",
+      "filename": "occluded_04.png",
+      "category": "occluded",
+      "payload": "?s=FQJAWK0K&v=500034",
+      "params": {
+        "masked_pct": 0.18,
+        "pattern": "center",
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "reed_solomon_robustness"
+    },
+    {
+      "id": "occluded_05",
+      "filename": "occluded_05.png",
+      "category": "occluded",
+      "payload": "?s=68G769HJ&v=500035",
+      "params": {
+        "masked_pct": 0.22,
+        "pattern": "center",
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "reed_solomon_robustness"
+    },
+    {
+      "id": "occluded_06",
+      "filename": "occluded_06.png",
+      "category": "occluded",
+      "payload": "?s=DNDGZG35&v=500036",
+      "params": {
+        "masked_pct": 0.1,
+        "pattern": "corner",
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "reed_solomon_robustness"
+    },
+    {
+      "id": "occluded_07",
+      "filename": "occluded_07.png",
+      "category": "occluded",
+      "payload": "?s=VH20N8GA&v=500037",
+      "params": {
+        "masked_pct": 0.15,
+        "pattern": "corner",
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "reed_solomon_robustness"
+    },
+    {
+      "id": "occluded_08",
+      "filename": "occluded_08.png",
+      "category": "occluded",
+      "payload": "?s=WV07492Q&v=500038",
+      "params": {
+        "masked_pct": 0.2,
+        "pattern": "corner",
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "reed_solomon_robustness"
+    },
+    {
+      "id": "occluded_09",
+      "filename": "occluded_09.png",
+      "category": "occluded",
+      "payload": "?s=9V82KQ2P&v=500039",
+      "params": {
+        "masked_pct": 0.25,
+        "pattern": "corner",
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "reed_solomon_robustness"
+    },
+    {
+      "id": "occluded_10",
+      "filename": "occluded_10.png",
+      "category": "occluded",
+      "payload": "?s=DF6PT9FA&v=500040",
+      "params": {
+        "masked_pct": 0.15,
+        "pattern": "cross",
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "reed_solomon_robustness"
+    },
+    {
+      "id": "low_light_01",
+      "filename": "low_light_01.png",
+      "category": "low_light",
+      "payload": "?s=BT1BNTFH&v=500041",
+      "params": {
+        "brightness": 0.45,
+        "noise_sigma": 12.0
+      },
+      "expected_valid": true,
+      "target_eval": "binarizer_contrast_recovery"
+    },
+    {
+      "id": "low_light_02",
+      "filename": "low_light_02.png",
+      "category": "low_light",
+      "payload": "?s=A6R2YECX&v=500042",
+      "params": {
+        "brightness": 0.4,
+        "noise_sigma": 15.0
+      },
+      "expected_valid": true,
+      "target_eval": "binarizer_contrast_recovery"
+    },
+    {
+      "id": "low_light_03",
+      "filename": "low_light_03.png",
+      "category": "low_light",
+      "payload": "?s=PKEE1CSN&v=500043",
+      "params": {
+        "brightness": 0.35,
+        "noise_sigma": 18.0
+      },
+      "expected_valid": true,
+      "target_eval": "binarizer_contrast_recovery"
+    },
+    {
+      "id": "low_light_04",
+      "filename": "low_light_04.png",
+      "category": "low_light",
+      "payload": "?s=H4HPSN17&v=500044",
+      "params": {
+        "brightness": 0.3,
+        "noise_sigma": 22.0
+      },
+      "expected_valid": true,
+      "target_eval": "binarizer_contrast_recovery"
+    },
+    {
+      "id": "low_light_05",
+      "filename": "low_light_05.png",
+      "category": "low_light",
+      "payload": "?s=GBG26VPM&v=500045",
+      "params": {
+        "brightness": 0.25,
+        "noise_sigma": 25.0
+      },
+      "expected_valid": true,
+      "target_eval": "binarizer_contrast_recovery"
+    },
+    {
+      "id": "low_light_06",
+      "filename": "low_light_06.png",
+      "category": "low_light",
+      "payload": "?s=V7RCG2V0&v=500046",
+      "params": {
+        "brightness": 0.2,
+        "noise_sigma": 30.0
+      },
+      "expected_valid": true,
+      "target_eval": "binarizer_contrast_recovery"
+    },
+    {
+      "id": "glare_01",
+      "filename": "glare_01.png",
+      "category": "glare",
+      "payload": "?s=CQV4NM7K&v=500047",
+      "params": {
+        "center": [
+          0.4,
+          0.4
+        ],
+        "radius": 90,
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "specular_bloom_recovery"
+    },
+    {
+      "id": "glare_02",
+      "filename": "glare_02.png",
+      "category": "glare",
+      "payload": "?s=KTMSJ8CT&v=500047",
+      "params": {
+        "center": [
+          0.5,
+          0.5
+        ],
+        "radius": 110,
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "specular_bloom_recovery"
+    },
+    {
+      "id": "glare_03",
+      "filename": "glare_03.png",
+      "category": "glare",
+      "payload": "?s=RBKS0KJD&v=500047",
+      "params": {
+        "center": [
+          0.6,
+          0.4
+        ],
+        "radius": 120,
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "specular_bloom_recovery"
+    },
+    {
+      "id": "glare_04",
+      "filename": "glare_04.png",
+      "category": "glare",
+      "payload": "?s=VMXWWDYA&v=500047",
+      "params": {
+        "center": [
+          0.45,
+          0.55
+        ],
+        "radius": 130,
+        "ec_level": "H"
+      },
+      "expected_valid": true,
+      "target_eval": "specular_bloom_recovery"
+    },
+    {
+      "id": "hall_15m_01",
+      "filename": "hall_15m_01.png",
+      "category": "hall_15m",
+      "payload": "?s=5JN5FKEC&v=500047",
+      "params": {
+        "distance_m": 10.0,
+        "projected_qr_cm": 100,
+        "effective_px_in_1080p": 150,
+        "blur_sigma": 0.4,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "long_range_optical_limit"
+    },
+    {
+      "id": "hall_15m_02",
+      "filename": "hall_15m_02.png",
+      "category": "hall_15m",
+      "payload": "?s=912FY4XT&v=500048",
+      "params": {
+        "distance_m": 10.0,
+        "projected_qr_cm": 80,
+        "effective_px_in_1080p": 120,
+        "blur_sigma": 0.5,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "long_range_optical_limit"
+    },
+    {
+      "id": "hall_15m_03",
+      "filename": "hall_15m_03.png",
+      "category": "hall_15m",
+      "payload": "?s=CRZSF906&v=500049",
+      "params": {
+        "distance_m": 12.0,
+        "projected_qr_cm": 100,
+        "effective_px_in_1080p": 125,
+        "blur_sigma": 0.6,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "long_range_optical_limit"
+    },
+    {
+      "id": "hall_15m_04",
+      "filename": "hall_15m_04.png",
+      "category": "hall_15m",
+      "payload": "?s=VEBX3F7X&v=500050",
+      "params": {
+        "distance_m": 12.0,
+        "projected_qr_cm": 80,
+        "effective_px_in_1080p": 100,
+        "blur_sigma": 0.7,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "long_range_optical_limit"
+    },
+    {
+      "id": "hall_15m_05",
+      "filename": "hall_15m_05.png",
+      "category": "hall_15m",
+      "payload": "?s=8XMWVWAY&v=500051",
+      "params": {
+        "distance_m": 14.0,
+        "projected_qr_cm": 120,
+        "effective_px_in_1080p": 130,
+        "blur_sigma": 0.7,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "long_range_optical_limit"
+    },
+    {
+      "id": "hall_15m_06",
+      "filename": "hall_15m_06.png",
+      "category": "hall_15m",
+      "payload": "?s=WGFHZFHW&v=500052",
+      "params": {
+        "distance_m": 14.0,
+        "projected_qr_cm": 100,
+        "effective_px_in_1080p": 108,
+        "blur_sigma": 0.8,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "long_range_optical_limit"
+    },
+    {
+      "id": "hall_15m_07",
+      "filename": "hall_15m_07.png",
+      "category": "hall_15m",
+      "payload": "?s=4JFHNM58&v=500053",
+      "params": {
+        "distance_m": 15.0,
+        "projected_qr_cm": 120,
+        "effective_px_in_1080p": 120,
+        "blur_sigma": 0.8,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "long_range_optical_limit"
+    },
+    {
+      "id": "hall_15m_08",
+      "filename": "hall_15m_08.png",
+      "category": "hall_15m",
+      "payload": "?s=9ER9D4TT&v=500054",
+      "params": {
+        "distance_m": 15.0,
+        "projected_qr_cm": 100,
+        "effective_px_in_1080p": 100,
+        "blur_sigma": 0.9,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "long_range_optical_limit"
+    },
+    {
+      "id": "hall_15m_09",
+      "filename": "hall_15m_09.png",
+      "category": "hall_15m",
+      "payload": "?s=NXT3DTR1&v=500055",
+      "params": {
+        "distance_m": 15.0,
+        "projected_qr_cm": 80,
+        "effective_px_in_1080p": 80,
+        "blur_sigma": 1.0,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "long_range_optical_limit"
+    },
+    {
+      "id": "hall_15m_10",
+      "filename": "hall_15m_10.png",
+      "category": "hall_15m",
+      "payload": "?s=RY0PKRTE&v=500056",
+      "params": {
+        "distance_m": 15.0,
+        "projected_qr_cm": 60,
+        "effective_px_in_1080p": 60,
+        "blur_sigma": 1.1,
+        "frame": "1920x1080"
+      },
+      "expected_valid": true,
+      "target_eval": "long_range_optical_limit"
+    }
+  ]
+}

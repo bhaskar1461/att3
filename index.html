@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Proposal v1.0 — AI-Based Secure Face Attendance System | SNIST</title>
+<style>
+@page{size:A4;margin:15mm}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',-apple-system,Arial,sans-serif;color:#1f2937;line-height:1.65;background:#f8fafc;font-size:12.5px}
+.topbar{background:linear-gradient(135deg,#1e3a8a,#1e40af);color:#fff;padding:12px 18px;display:flex;justify-content:space-between;align-items:center}
+.topbar button{background:#059669;color:#fff;border:none;padding:10px 16px;border-radius:6px;cursor:pointer;font-weight:600}
+.container{max-width:900px;margin:0 auto;background:#fff;box-shadow:0 0 20px rgba(0,0,0,.05)}
+.cover{min-height:265mm;display:flex;flex-direction:column;justify-content:space-between;background:linear-gradient(135deg,#0f172a 0%,#1e3a8a 55%,#1e40af 100%);color:#fff;page-break-after:always;padding:40px;position:relative;overflow:hidden}
+.cover::before{content:'';position:absolute;top:-40%;right:-15%;width:600px;height:600px;background:radial-gradient(circle,rgba(59,130,246,.3),transparent 70%);border-radius:50%}
+.cover::after{content:'';position:absolute;bottom:-30%;left:-10%;width:500px;height:500px;background:radial-gradient(circle,rgba(16,185,129,.2),transparent 70%);border-radius:50%}
+.cover-content,.cover-footer{position:relative;z-index:2}
+.cover-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:50px}
+.inst-logo{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.2);padding:12px 20px;border-radius:8px}
+.inst-logo strong{font-size:14px;letter-spacing:.5px}.inst-logo small{display:block;font-size:10px;opacity:.8}
+.badge{background:rgba(16,185,129,.2);border:1px solid rgba(16,185,129,.4);padding:8px 16px;border-radius:20px;font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase}
+.cover h1{font-size:36px;line-height:1.2;font-weight:700;margin-bottom:14px}
+.cover h2{font-size:17px;font-weight:400;color:#93c5fd;margin-bottom:34px}
+.cover-meta{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:34px;padding-top:26px;border-top:1px solid rgba(255,255,255,.15)}
+.meta-block{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);padding:18px;border-radius:10px}
+.meta-label{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;opacity:.7;margin-bottom:6px}
+.meta-body{font-size:13px;line-height:1.6}.meta-body strong{display:block;font-size:14px;margin-bottom:3px}
+.amount-display{background:rgba(16,185,129,.15);border:1px solid rgba(16,185,129,.3);border-radius:12px;padding:18px 22px;display:flex;justify-content:space-between;align-items:center}
+.amount-display .value{font-size:26px;font-weight:700;color:#10b981}
+.amount-display .label{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;opacity:.8}
+.page{padding:28px 40px}
+.section-title{font-size:21px;color:#1e3a8a;margin-bottom:18px;padding-bottom:10px;border-bottom:3px solid #1e40af;page-break-after:avoid;display:flex;align-items:center;gap:12px}
+.section-title .num{background:#1e40af;color:#fff;min-width:34px;height:34px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:15px;font-weight:700}
+h3{font-size:14.5px;color:#1e40af;margin:20px 0 8px;page-break-after:avoid;display:flex;align-items:center;gap:8px}
+h3::before{content:'';width:4px;height:16px;background:#1e40af;border-radius:2px}
+p{margin:9px 0;text-align:justify}
+ul,ol{margin:9px 0 9px 22px}li{margin-bottom:5px}
+table{width:100%;border-collapse:collapse;margin:12px 0 18px;font-size:11.5px;page-break-inside:auto}
+th,td{border:1px solid #e5e7eb;padding:8px 10px;vertical-align:top;text-align:left}
+th{background:#eff6ff;color:#1e3a8a;font-weight:700;text-transform:uppercase;letter-spacing:.4px;font-size:11px}
+.total-row{font-weight:700;background:#eff6ff!important}.total-row td{color:#1e3a8a;font-size:12.5px}
+.box{border-radius:8px;padding:14px 18px;margin:14px 0;page-break-inside:avoid}
+.box-blue{background:linear-gradient(135deg,#eff6ff,#dbeafe);border-left:4px solid #1e40af}
+.box-warn{background:linear-gradient(135deg,#fef3c7,#fde68a);border-left:4px solid #d97706;color:#78350f}
+.box-danger{background:linear-gradient(135deg,#fee2e2,#fecaca);border-left:4px solid #dc2626;color:#7f1d1d}
+.box-ok{background:linear-gradient(135deg,#d1fae5,#a7f3d0);border-left:4px solid #059669;color:#064e3b}
+.scope-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:16px 0;page-break-inside:avoid}
+.scope-col{border-radius:12px;padding:16px}
+.scope-in{background:linear-gradient(135deg,#d1fae5,#ecfdf5);border:2px solid #10b981}
+.scope-out{background:linear-gradient(135deg,#fee2e2,#fef2f2);border:2px solid #ef4444}
+.scope-head{display:flex;align-items:center;gap:10px;margin-bottom:10px;padding-bottom:10px;border-bottom:2px solid rgba(0,0,0,.1);font-weight:700;font-size:14px}
+.scope-in .scope-head{color:#065f46}.scope-out .scope-head{color:#7f1d1d}
+.scope-ico{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700}
+.scope-in .scope-ico{background:#10b981}.scope-out .scope-ico{background:#ef4444}
+.scope-list{list-style:none;margin:0;padding:0}
+.scope-list li{padding:6px 0 6px 26px;position:relative;font-size:11.5px;border-bottom:1px dashed rgba(0,0,0,.08)}
+.scope-list li::before{position:absolute;left:0;top:7px;width:16px;height:16px;border-radius:50%;color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center}
+.scope-in .scope-list li::before{content:'✓';background:#10b981}
+.scope-out .scope-list li::before{content:'✕';background:#ef4444}
+.feat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
+.feat{background:#f8fafc;border:1px solid #e5e7eb;border-radius:8px;padding:10px 12px;display:flex;gap:9px;page-break-inside:avoid}
+.feat .ck{flex-shrink:0;width:18px;height:18px;border-radius:50%;background:#10b981;color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;margin-top:2px}
+.feat b{display:block;color:#1e3a8a;font-size:12px;margin-bottom:2px}
+.feat span{font-size:11px;color:#4b5563}
+.timeline{position:relative;margin:16px 0;padding-left:38px}
+.timeline::before{content:'';position:absolute;left:14px;top:8px;bottom:8px;width:3px;background:linear-gradient(#1e40af,#10b981);border-radius:2px}
+.tl-item{position:relative;padding:10px 0 10px 26px;page-break-inside:avoid}
+.tl-item::before{content:'';position:absolute;left:-27px;top:14px;width:14px;height:14px;border-radius:50%;background:#fff;border:3px solid #1e40af}
+.tl-week{display:inline-block;background:#1e40af;color:#fff;padding:2px 9px;border-radius:4px;font-size:10px;font-weight:700;margin-bottom:4px}
+.tl-title{font-weight:600;color:#1e3a8a;font-size:12.5px}
+.tl-desc{font-size:11px;color:#4b5563}
+.comp-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:14px 0}
+.comp{background:#fff;border:2px solid #e5e7eb;border-radius:10px;padding:12px 8px;text-align:center;page-break-inside:avoid}
+.comp-ico{width:36px;height:36px;margin:0 auto 6px;background:linear-gradient(135deg,#1e40af,#3b82f6);border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:16px;font-weight:700}
+.comp b{font-size:10.5px;color:#1e3a8a;display:block}.comp span{font-size:9.5px;color:#64748b}
+.clause{border:1px solid #e5e7eb;border-left:4px solid #1e40af;border-radius:8px;padding:12px 16px;margin:10px 0;page-break-inside:avoid;background:#fcfdff}
+.clause.new{border-left-color:#059669;background:#f7fdfb}
+.cl-head{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}
+.cl-num{background:#1e3a8a;color:#fff;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;white-space:nowrap}
+.clause.new .cl-num{background:#059669}
+.cl-title{font-weight:700;color:#1e3a8a;font-size:12.5px}
+.clause p,.clause ul{font-size:11.5px;margin:4px 0}
+.clause ul{margin-left:18px}
+.newtag{background:#d1fae5;color:#065f46;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;text-transform:uppercase;letter-spacing:.5px}
+.annex{border:2px solid #1e40af;border-radius:12px;padding:18px;margin:18px 0;page-break-inside:avoid;background:#f8fafc}
+.annex-head{display:flex;align-items:center;gap:12px;margin-bottom:10px;padding-bottom:8px;border-bottom:2px solid #1e40af}
+.annex-letter{width:38px;height:38px;background:#1e40af;color:#fff;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700}
+.annex-title{font-size:14px;font-weight:700;color:#1e3a8a}
+.sig-grid{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin-top:40px;page-break-inside:avoid}
+.sig-box{border:2px solid #e5e7eb;border-radius:10px;padding:18px;background:#f8fafc}
+.sig-head{font-weight:700;color:#1e3a8a;font-size:12.5px;margin-bottom:30px;padding-bottom:6px;border-bottom:2px solid #1e40af}
+.sig-line{border-top:2px solid #374151;margin-top:40px;padding-top:8px;font-size:11.5px}
+.muted{color:#64748b;font-size:11px}.small{font-size:11px}.text-right{text-align:right}
+.page-break{page-break-before:always}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.stat{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:12px;page-break-inside:avoid}
+.stat .lbl{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#6b7280}
+.stat .val{font-size:17px;font-weight:700;color:#1e3a8a}
+.toc{background:#f8fafc;border-radius:12px;padding:20px}
+.toc ul{list-style:none;margin:0;columns:2;column-gap:30px}
+.toc li{padding:5px 0;border-bottom:1px dashed #e5e7eb;font-size:11.5px;break-inside:avoid}
+.toc .n{color:#1e40af;font-weight:700;margin-right:6px}
+@media print{.no-print{display:none!important}body{background:#fff}.container{box-shadow:none}.page{padding:10px 20px}}
+</style>
+</head>
+<body>
+<div class="topbar no-print"><div>Open in browser → <strong>Print → Save as PDF</strong> (A4, margins default).</div><button onclick="window.print()">Print / Save PDF</button></div>
+<div class="container">
+
+<!-- COVER -->
+<div class="cover">
+ <div class="cover-content">
+  <div class="cover-header">
+   <div class="inst-logo"><strong>SNIST</strong><small>Sreenidhi Institute of Science &amp; Technology</small></div>
+  <div class="badge">Proposal v1</div>
+  </div>
+  <h1>AI-Based Secure Face Attendance &amp; Liveness Verification System</h1>
+  <h2>Technical &amp; Commercial Proposal with Executable Contract Terms: Liability, Intellectual Property, Privacy, Acceptance Mechanics, and Annexed Schedules</h2>
+  <div class="cover-meta">
+   <div class="meta-block"><div class="meta-label">Submitted To</div><div class="meta-body"><strong>Sreenidhi Institute of Science &amp; Technology</strong>Yamnampet, Ghatkesar,<br/>Hyderabad — 501301, Telangana, India</div></div>
+   <div class="meta-block"><div class="meta-label">Submitted By</div><div class="meta-body"><strong>Bhaskar Sharma</strong>Project Lead &amp; Developer<br/>B.Tech CSE-E, 4th Year · Roll No. 23311A05Y6</div></div>
+   <div class="meta-block"><div class="meta-label">Document Control</div><div class="meta-body"><strong>Ref: SNIST/CSE-E/FA-2026/001</strong>Version 3.0 · Issue date: <span class="js-date"></span><br/>Validity: 30 days · Classification: Confidential</div></div>
+   <div class="meta-block"><div class="meta-label">Contract Status</div><div class="meta-body"><strong>Draft for Execution</strong>Binding only upon signed agreement per Section 21 and Annexes A–G</div></div>
+  </div>
+ </div>
+ <div class="cover-footer">
+  <div class="amount-display">
+   <div><div class="label">Total Project Value</div><div class="value">₹ 6,60,000</div><div class="small">Six Lakh Sixty Thousand Rupees Only · GST &amp; TDS as per law</div></div>
+   <div style="text-align:right" class="small">12–14 weeks · 3 months support<br/>Annexes A–G included</div>
+  </div>
+ </div>
+</div>
+
+<!-- CONTROL + TOC -->
+<div class="page">
+ <h2 class="section-title"><span class="num">0</span> Document Control, Change Log &amp; Contents</h2>
+ <table>
+  <thead><tr><th style="width:10%">Version</th><th style="width:18%">Date</th><th>Changes</th></tr></thead>
+  <tbody>
+   <tr><td>1.0</td><td>Initial issue</td><td>Original technical &amp; commercial proposal.</td></tr>
+   <tr><td>2.0</td><td>26 Sep 2026</td><td>Liability, IP &amp; privacy overhaul; Section 20 creator-protection clauses; execution warning.</td></tr>
+   <tr><td>3.0</td><td><span class="js-date"></span></td><td>Acceptance window &amp; deemed acceptance; limited warranty; termination, force majeure, notices, boilerplate; completed arbitration clause; minors' consent &amp; data-transfer basis; OSS/model-weight licence allocation &amp; fine-tuned-weights handling; portfolio rights; advisory-output &amp; fallback-attendance clauses; payment protections (TDS, interest, suspension); measurable UAT targets; Annexes A–G; reference/date alignment and table clean-up.</td></tr>
+  </tbody>
+ </table>
+ <div class="toc"><ul>
+  <li><span class="n">1</span>Executive Summary</li><li><span class="n">2</span>Background &amp; Problem</li>
+  <li><span class="n">3</span>Solution Overview</li><li><span class="n">4</span>System Architecture</li>
+  <li><span class="n">5</span>Scope of Work</li><li><span class="n">6</span>Scope Clarity Matrix</li>
+  <li><span class="n">7</span>Feature Checklist</li><li><span class="n">8</span>Technical Approach</li>
+  <li><span class="n">9</span>Compliance Framework</li><li><span class="n">10</span>Timeline</li>
+  <li><span class="n">11</span>Deliverables</li><li><span class="n">12</span>Commercial Proposal</li>
+  <li><span class="n">13</span>Payment Terms</li><li><span class="n">14</span>Support &amp; Maintenance</li>
+  <li><span class="n">15</span>Assumptions &amp; Exclusions</li><li><span class="n">16</span>Risks &amp; Mitigation</li>
+  <li><span class="n">17</span>Data Privacy &amp; Security</li><li><span class="n">18</span>Acceptance &amp; Testing (Measurable)</li>
+  <li><span class="n">19</span>Why This Solution</li><li><span class="n">20</span>Master Contract Terms (20.1–20.36)</li>
+  <li><span class="n">21</span>Signatures &amp; Contract Formation</li><li><span class="n">A–G</span>Annexes (IP, UAT, DPA, SLA, Licences, Acceptance, Attribution)</li>
+ </ul></div>
+ <div class="box box-warn small"><strong>Drafting note:</strong> This document allocates responsibilities and reduces ambiguity; it cannot guarantee absolute immunity from every claim, statutory duty, or court order. Final execution should follow review by an advocate qualified in Indian contract and intellectual-property law.</div>
+</div>
+
+<!-- 1 EXEC -->
+<div class="page">
+ <h2 class="section-title"><span class="num">1</span> Executive Summary</h2>
+ <p>We submit this proposal for the design, development and deployment of an <strong>AI-Based Secure Face Attendance &amp; Liveness Verification System</strong> for <strong>Sreenidhi Institute of Science &amp; Technology (SNIST)</strong>, addressing proxy attendance, photo/video replay, poor lighting, pose variation, appearance drift and absent audit trails — in alignment with the <strong>DPDP Act, 2023</strong>.</p>
+ <div class="box box-blue"><strong>Project Value:</strong> ₹6,60,000 (+GST) · <strong>Delivery:</strong> phased development → pilot → UAT → deployment → handover · <strong>Support:</strong> 3 months · <strong>Contract:</strong> Section 20 terms + Annexes A–G upon execution.</div>
+ <div class="feat-grid">
+  <div class="feat"><div class="ck">✓</div><div><b>Multi-layer liveness</b><span>Passive + active anti-spoofing against photo, screen and replay attacks.</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>DPDP-aligned privacy</b><span>Consent, minimization, erasure, minors' parental-consent workflow.</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>Appearance-drift handling</b><span>Multi-template galleries with gated rolling updates.</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>Contract-grade clarity</b><span>Acceptance clocks, warranty, IP schedule, licence audit, annexed UAT metrics.</span></div></div>
+ </div>
+</div>
+
+<!-- 2 PROBLEM -->
+<div class="page">
+ <h2 class="section-title"><span class="num">2</span> Background &amp; Problem Statement</h2>
+ <div class="two-col">
+  <div class="stat" style="border-left:4px solid #dc2626"><div class="lbl">Security gap</div><div class="val">Proxy &amp; spoof attendance</div><div class="small">Photos, phone screens, recorded video used to defeat naive systems.</div></div>
+  <div class="stat" style="border-left:4px solid #d97706"><div class="lbl">Quality issues</div><div class="val">Environment sensitivity</div><div class="small">Low light, backlight, blur and angle cause false rejections.</div></div>
+  <div class="stat" style="border-left:4px solid #1e40af"><div class="lbl">Drift problem</div><div class="val">Appearance change</div><div class="small">Beard, hairstyle, glasses, weight changes degrade single-template matching.</div></div>
+  <div class="stat" style="border-left:4px solid #059669"><div class="lbl">Operational gap</div><div class="val">No audit trail</div><div class="small">Weak quality gates and no verifiable decision history.</div></div>
+ </div>
+ <p>The proposed solution reduces these risks through layered verification rather than a single match score.</p>
+</div>
+
+<!-- 3 SOLUTION -->
+<div class="page">
+ <h2 class="section-title"><span class="num">3</span> Proposed Solution Overview</h2>
+ <table><thead><tr><th style="width:26%">Component</th><th>Description</th></tr></thead><tbody>
+  <tr><td><strong>Student Enrollment</strong></td><td>Consent-captured enrollment; multiple verified templates per student.</td></tr>
+  <tr><td><strong>Attendance Capture</strong></td><td>Webcam / laptop / kiosk / mobile capture with QR session tokens.</td></tr>
+  <tr><td><strong>Face Recognition</strong></td><td>ArcFace-based 512-D embeddings; cosine-similarity matching vs template gallery.</td></tr>
+  <tr><td><strong>Liveness Verification</strong></td><td>Passive texture/frequency analysis + active blink/pose/color-flash challenges.</td></tr>
+  <tr><td><strong>Quality &amp; Pose Validation</strong></td><td>Blur, brightness, face size, head angle, backlight, occlusion checks.</td></tr>
+  <tr><td><strong>Admin Dashboard</strong></td><td>Dark-themed, role-based dashboard: students, sessions, logs, exceptions, reports.</td></tr>
+  <tr><td><strong>Audit Logs</strong></td><td>Tamper-evident logging of attempts, scores, decisions and exceptions.</td></tr>
+  <tr><td><strong>Integration</strong></td><td>ERP/LMS/student-DB integration subject to provided APIs (one system in scope).</td></tr>
+ </tbody></table>
+</div>
+
+<!-- 4 ARCH -->
+<div class="page">
+ <h2 class="section-title"><span class="num">4</span> System Architecture</h2>
+ <div class="box box-blue" style="padding:18px">
+  <svg viewBox="0 0 800 400" style="width:100%;display:block" xmlns="http://www.w3.org/2000/svg">
+   <defs><marker id="a" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#64748b"/></marker></defs>
+   <rect x="10" y="10" width="780" height="80" rx="10" fill="#dbeafe" stroke="#3b82f6" stroke-width="2"/>
+   <text x="400" y="30" text-anchor="middle" font-size="12" font-weight="700" fill="#1e3a8a">CLIENT LAYER — React + TypeScript</text>
+   <g font-size="10" fill="#1e40af"><rect x="30" y="40" width="140" height="38" rx="6" fill="#fff" stroke="#3b82f6"/><text x="100" y="63" text-anchor="middle" font-weight="700">Student / Teacher / Admin portals</text><rect x="185" y="40" width="140" height="38" rx="6" fill="#fff" stroke="#3b82f6"/><text x="255" y="63" text-anchor="middle" font-weight="700">Capture &amp; guidance UI</text><rect x="340" y="40" width="140" height="38" rx="6" fill="#fff" stroke="#3b82f6"/><text x="410" y="63" text-anchor="middle" font-weight="700">QR broadcast / projector</text><rect x="495" y="40" width="140" height="38" rx="6" fill="#fff" stroke="#3b82f6"/><text x="565" y="63" text-anchor="middle" font-weight="700">Reports &amp; dashboards</text><rect x="650" y="40" width="120" height="38" rx="6" fill="#fff" stroke="#3b82f6"/><text x="710" y="63" text-anchor="middle" font-weight="700">Kiosk / PWA</text></g>
+   <path d="M400 90 L400 110" stroke="#64748b" stroke-width="2" marker-end="url(#a)"/>
+   <rect x="10" y="115" width="780" height="80" rx="10" fill="#d1fae5" stroke="#059669" stroke-width="2"/>
+   <text x="400" y="135" text-anchor="middle" font-size="12" font-weight="700" fill="#065f46">API LAYER — FastAPI / Python</text>
+   <g font-size="10" fill="#065f46"><rect x="30" y="145" width="115" height="38" rx="6" fill="#fff" stroke="#059669"/><text x="87" y="168" text-anchor="middle" font-weight="700">auth · onboarding</text><rect x="160" y="145" width="115" height="38" rx="6" fill="#fff" stroke="#059669"/><text x="217" y="168" text-anchor="middle" font-weight="700">attendance · launch</text><rect x="290" y="145" width="115" height="38" rx="6" fill="#fff" stroke="#059669"/><text x="347" y="168" text-anchor="middle" font-weight="700">reports · devices</text><rect x="420" y="145" width="115" height="38" rx="6" fill="#fff" stroke="#059669"/><text x="477" y="168" text-anchor="middle" font-weight="700">alerts · compliance</text><rect x="550" y="145" width="115" height="38" rx="6" fill="#fff" stroke="#059669"/><text x="607" y="168" text-anchor="middle" font-weight="700">email · sheets sync</text><rect x="680" y="145" width="90" height="38" rx="6" fill="#fff" stroke="#059669"/><text x="725" y="168" text-anchor="middle" font-weight="700">audit log</text></g>
+   <path d="M400 195 L400 215" stroke="#64748b" stroke-width="2" marker-end="url(#a)"/>
+   <rect x="10" y="220" width="780" height="80" rx="10" fill="#fef3c7" stroke="#d97706" stroke-width="2"/>
+   <text x="400" y="240" text-anchor="middle" font-size="12" font-weight="700" fill="#78350f">AI / ML LAYER — ONNX Runtime</text>
+   <g font-size="10" fill="#78350f"><rect x="30" y="250" width="145" height="38" rx="6" fill="#fff" stroke="#d97706"/><text x="102" y="273" text-anchor="middle" font-weight="700">ArcFace embeddings</text><rect x="190" y="250" width="145" height="38" rx="6" fill="#fff" stroke="#d97706"/><text x="262" y="273" text-anchor="middle" font-weight="700">Liveness / PAD model</text><rect x="350" y="250" width="145" height="38" rx="6" fill="#fff" stroke="#d97706"/><text x="422" y="273" text-anchor="middle" font-weight="700">Quality &amp; pose engine</text><rect x="510" y="250" width="130" height="38" rx="6" fill="#fff" stroke="#d97706"/><text x="575" y="273" text-anchor="middle" font-weight="700">Detector + landmarks</text><rect x="655" y="250" width="115" height="38" rx="6" fill="#fff" stroke="#d97706"/><text x="712" y="273" text-anchor="middle" font-weight="700">Decision engine</text></g>
+   <path d="M400 300 L400 320" stroke="#64748b" stroke-width="2" marker-end="url(#a)"/>
+   <rect x="10" y="325" width="780" height="65" rx="10" fill="#e0e7ff" stroke="#4f46e5" stroke-width="2"/>
+   <text x="400" y="345" text-anchor="middle" font-size="12" font-weight="700" fill="#3730a3">DATA &amp; INFRASTRUCTURE</text>
+   <g font-size="10" fill="#3730a3"><rect x="30" y="352" width="175" height="30" rx="6" fill="#fff" stroke="#4f46e5"/><text x="117" y="371" text-anchor="middle" font-weight="700">PostgreSQL + pgvector</text><rect x="220" y="352" width="175" height="30" rx="6" fill="#fff" stroke="#4f46e5"/><text x="307" y="371" text-anchor="middle" font-weight="700">Object storage (S3/MinIO)</text><rect x="410" y="352" width="175" height="30" rx="6" fill="#fff" stroke="#4f46e5"/><text x="497" y="371" text-anchor="middle" font-weight="700">Redis cache · queues</text><rect x="600" y="352" width="170" height="30" rx="6" fill="#fff" stroke="#4f46e5"/><text x="685" y="371" text-anchor="middle" font-weight="700">SMTP · ERP/LMS · Sheets</text></g>
+  </svg>
+ </div>
+ <p class="small"><strong>Principles:</strong> horizontal scalability; separation of concerns; AI layer deployable on GPU instances while API/client run on standard compute.</p>
+</div>
+
+<!-- 5 SCOPE -->
+<div class="page">
+ <h2 class="section-title"><span class="num">5</span> Detailed Scope of Work</h2>
+ <h3>5.1 Requirements &amp; Design</h3><ul><li>Stakeholder workshops to finalize workflows; roles: Student, Faculty, Administrator, Super Admin.</li><li>Sessions, courses, batches, time windows, verification rules; architecture &amp; deployment plan.</li></ul>
+ <h3>5.2 Enrollment</h3><ul><li>DPDP-compliant consent capture (incl. parental consent workflow for minors per Annex C).</li><li>Guided face capture; embeddings/templates stored (raw images deleted post-extraction unless opted); multi-template; admin approval workflow.</li></ul>
+ <h3>5.3 Attendance Verification</h3><ul><li>QR/session-token capture; 2–3 s video; best-frame selection; cosine matching; Accept / Reject / Step-up decision engine.</li></ul>
+ <h3>5.4 Liveness &amp; Anti-Spoofing</h3><ul><li>Passive texture/frequency checks; temporal multi-frame checks; blink, head-motion, color-flash challenges; per-session randomness; suspicious-attempt flagging.</li></ul>
+ <div class="box box-warn small"><strong>Note:</strong> The system significantly reduces common spoofing (prints, simple replays, screen replay). No system guarantees absolute protection against advanced attacks, deepfakes, high-end masks or injection without specialized hardware or certified services.</div>
+ <h3>5.5 Quality, Pose &amp; Occlusion</h3><ul><li>106-point landmarks; yaw/pitch/roll; Laplacian blur; brightness; face size; backlight; occlusion (mask/hand/scarf/glasses); live guidance messages.</li></ul>
+ <h3>5.6 Appearance Drift</h3><ul><li>Multi-template gallery; rolling updates gated by quality+liveness; grey-zone step-up; re-enrollment recommendations; unsafe-update protection.</li></ul>
+ <h3>5.7 Dashboard &amp; Reports</h3><ul><li>Dark-themed role-based dashboard; live monitoring; verification logs with reason codes; exception review; reports by date/course/batch/student/session; CSV/Excel/PDF export.</li></ul>
+</div>
+
+<!-- 6 MATRIX -->
+<div class="page">
+ <h2 class="section-title"><span class="num">6</span> Scope Clarity Matrix</h2>
+ <div class="scope-grid">
+  <div class="scope-col scope-in"><div class="scope-head"><div class="scope-ico">✓</div>INCLUDED IN THIS PROJECT</div>
+   <ul class="scope-list">
+    <li>Full face-recognition pipeline (ArcFace embeddings + matching)</li>
+    <li>Passive + active liveness module with session randomness</li>
+    <li>Quality/pose/occlusion validation with live guidance</li>
+    <li>Multi-template enrollment with gated rolling updates</li>
+    <li>Full-stack app: React + FastAPI + PostgreSQL/pgvector</li>
+    <li>Role-based admin dashboard with live monitoring</li>
+    <li>QR session broadcast and capture flow</li>
+    <li>Reports with CSV/Excel/PDF export</li>
+    <li>Tamper-evident audit trail</li>
+    <li>Integration with ONE institutional ERP/LMS (if APIs provided)</li>
+    <li>DPDP compliance kit: privacy notice, consent schema, grievance workflow (Annex C)</li>
+    <li>OSS &amp; model-weight licence audit at handover (Annex E)</li>
+    <li>Documentation, training (2 sessions), 3-month support</li>
+    <li>Source-code handover with IP per Section 20.7 &amp; Annex A</li>
+   </ul></div>
+  <div class="scope-col scope-out"><div class="scope-head"><div class="scope-ico">✕</div>NOT INCLUDED (Institution responsibility)</div>
+   <ul class="scope-list">
+    <li>Hardware: cameras, kiosks, servers, laptops, networking</li>
+    <li>Cloud/hosting charges, domains, SSL, DNS</li>
+    <li>Paid third-party APIs (SMS, email, commercial FR services)</li>
+    <li>iBeta / ISO 30107-3 / certification testing</li>
+    <li>ERP/LMS customization beyond agreed endpoints</li>
+    <li>Legacy data entry/cleanup; physical network setup</li>
+    <li>Guaranteed detection of deepfakes/masks/injection attacks</li>
+    <li>Native iOS/Android apps (PWA only)</li>
+    <li>AMC beyond 3-month support; post-handover retraining</li>
+    <li>Production pen-testing, DR drills, backups operation</li>
+    <li>Real-world production testing &amp; rollout (Section 20.3, 20.5)</li>
+    <li>Legal liability for resale/third-party deployment (Section 20.6)</li>
+    <li>New features post-handover (change requests, Annex D)</li>
+   </ul></div>
+ </div>
+ <div class="box box-blue small">Anything not in "INCLUDED" is out of scope unless agreed via written change request (Annex D).</div>
+</div>
+
+<!-- 7 FEATURES -->
+<div class="page">
+ <h2 class="section-title"><span class="num">7</span> Feature Breakdown Checklist</h2>
+ <div class="feat-grid">
+  <div class="feat"><div class="ck">✓</div><div><b>ArcFace embeddings</b><span>512-D vectors, cosine matching, configurable thresholds</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>RetinaFace detection</b><span>Multi-scale detection + 106-point alignment</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>pgvector gallery</b><span>Nearest-neighbour template search, multi-template</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>Passive PAD</b><span>Texture/frequency print &amp; screen-replay detection</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>Active challenges</b><span>Blink, head-pose, color-flash; per-session randomness</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>Quality gates</b><span>Blur, brightness, size, pose, occlusion + guidance UI</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>QR sessions</b><span>Rotating tokens with expiry; projector broadcast</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>Device binding</b><span>Cryptographic enrollment + recovery workflow</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>Magic-link onboarding</b><span>Email-verified enrollment with consent capture</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>Reports &amp; exports</b><span>Registers, compliance bands, CSV/Excel/PDF</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>Audit trail</b><span>Scores, decisions, exceptions, admin actions logged</span></div></div>
+  <div class="feat"><div class="ck">✓</div><div><b>Role-based access</b><span>Student / Teacher / Admin / Super Admin matrices</span></div></div>
+ </div>
+</div>
+
+<!-- 8 TECH -->
+<div class="page">
+ <h2 class="section-title"><span class="num">8</span> Technical Approach</h2>
+ <h3>8.1 Capture pipeline</h3><ol><li>Secure QR/session-token entry.</li><li>2–3 s video capture.</li><li>Per-frame quality/pose/liveness analysis.</li><li>Best-frame selection.</li><li>Embedding generation and gallery match.</li></ol>
+ <h3>8.2 Decision logic</h3>
+ <table><thead><tr><th style="width:26%">Condition</th><th style="width:30%">Action</th><th>Purpose</th></tr></thead><tbody>
+  <tr><td>Low quality frame</td><td>Request retake</td><td>Prevent mismatch from blur/light/pose.</td></tr>
+  <tr><td>Low liveness score</td><td>Reject or step-up challenge</td><td>Defeat photo/video spoofing.</td></tr>
+  <tr><td>Match &gt; 0.75</td><td>Accept</td><td>Normal verification.</td></tr>
+  <tr><td>Match 0.55–0.75</td><td>Step-up / manual review</td><td>Handle drift safely.</td></tr>
+  <tr><td>Match &lt; 0.55</td><td>Reject</td><td>Prevent proxy attendance.</td></tr>
+ </tbody></table>
+ <p class="small">Thresholds are initial values; final operating points tuned during pilot against Annex B targets.</p>
+ <h3>8.3 Stack</h3>
+ <div class="two-col">
+  <div class="stat"><div class="lbl">Frontend</div><div class="small">React 18 · TypeScript · Vite · Tailwind + shadcn/ui · Recharts · React Query</div></div>
+  <div class="stat"><div class="lbl">Backend</div><div class="small">Python 3.11 · FastAPI · Pydantic v2 · SQLAlchemy · ONNX Runtime</div></div>
+  <div class="stat"><div class="lbl">Data</div><div class="small">PostgreSQL 15 + pgvector · Redis · MinIO/S3 · Alembic</div></div>
+  <div class="stat"><div class="lbl">Infra</div><div class="small">Docker Compose · Nginx · GitHub Actions CI/CD · region per Annex C</div></div>
+ </div>
+</div>
+
+<!-- 9 COMPLIANCE -->
+<div class="page">
+ <h2 class="section-title"><span class="num">9</span> Compliance &amp; Legal Framework</h2>
+ <div class="comp-grid">
+  <div class="comp"><div class="comp-ico">🛡</div><b>DPDP Act 2023</b><span>Consent, minimization, erasure, minors' rules</span></div>
+  <div class="comp"><div class="comp-ico">🔒</div><b>ISO 27001-aligned</b><span>Security control design baseline</span></div>
+  <div class="comp"><div class="comp-ico">👁</div><b>ISO 30107-aligned</b><span>PAD methodology (not certified)</span></div>
+  <div class="comp"><div class="comp-ico">⚖</div><b>IT Act 2000</b><span>s.43A reasonable security practices</span></div>
+ </div>
+ <h3>9.1 DPDP measures</h3>
+ <ul>
+  <li><strong>Explicit consent</strong> with purpose statement; <strong>verifiable parental consent for minors</strong> (ss.9–10) before enrollment (Section 20.16).</li>
+  <li><strong>Minimization:</strong> templates only; raw images deleted post-extraction unless opted.</li>
+  <li><strong>Purpose limitation, storage limitation, right to erasure</strong> with automated deletion workflow.</li>
+  <li><strong>Data Fiduciary = Institution;</strong> Developer acts only as processor during development/support (Annex C).</li>
+  <li><strong>Grievance process:</strong> institution-owned; Developer supplies grievance-workflow template in documentation.</li>
+  <li><strong>Localization:</strong> India-default storage; any foreign hosting elected by Institution documented per Section 20.17.</li>
+ </ul>
+ <h3>9.2 Security controls</h3>
+ <ul><li>AES-256 at rest; TLS 1.3 in transit; RBAC least privilege; tamper-evident audit logs; short-lived JWTs; Pydantic schema validation on all endpoints.</li></ul>
+ <div class="box box-warn small"><strong>Certification note:</strong> formal third-party certification (iBeta, ISO audits) is NOT in scope; pursuable separately.</div>
+</div>
+
+<!-- 10 TIMELINE -->
+<div class="page">
+ <h2 class="section-title"><span class="num">10</span> Indicative Timeline (12–14 weeks)</h2>
+ <div class="timeline">
+  <div class="tl-item"><div class="tl-week">W1</div><div class="tl-title">Requirements &amp; kickoff</div><div class="tl-desc">Workflows, roles, infra, data requirements; Annexes A–E drafted.</div></div>
+  <div class="tl-item"><div class="tl-week">W2–3</div><div class="tl-title">Enrollment module</div><div class="tl-desc">Consent capture, guided capture, template storage, approvals.</div></div>
+  <div class="tl-item"><div class="tl-week">W4–6</div><div class="tl-title">Recognition pipeline</div><div class="tl-desc">Embeddings, matching, best-frame, quality/pose validation.</div></div>
+  <div class="tl-item"><div class="tl-week">W7–8</div><div class="tl-title">Liveness &amp; anti-spoofing</div><div class="tl-desc">Passive PAD, active challenges, session randomness, anti-replay.</div></div>
+  <div class="tl-item"><div class="tl-week">W9</div><div class="tl-title">Dashboard &amp; reports</div><div class="tl-desc">Role-based dashboard, logs, exceptions, exports.</div></div>
+  <div class="tl-item"><div class="tl-week">W10</div><div class="tl-title">Integration</div><div class="tl-desc">ERP/LMS/student-DB per provided APIs.</div></div>
+  <div class="tl-item"><div class="tl-week">W11</div><div class="tl-title">Pilot &amp; tuning</div><div class="tl-desc">Sample-student pilot; thresholds tuned to Annex B targets.</div></div>
+  <div class="tl-item"><div class="tl-week">W12</div><div class="tl-title">UAT &amp; training</div><div class="tl-desc">Annex B test catalogue execution; training; documentation.</div></div>
+  <div class="tl-item"><div class="tl-week">W13–14</div><div class="tl-title">Go-live &amp; handover</div><div class="tl-desc">Written go-live approval; handover; Annex F acceptance certificate.</div></div>
+ </div>
+ <p class="muted">Timeline extends day-for-day for Institution-caused delays (Section 20.26).</p>
+</div>
+
+<!-- 11 DELIVERABLES -->
+<div class="page">
+ <h2 class="section-title"><span class="num">11</span> Deliverables</h2>
+ <table><thead><tr><th style="width:5%">#</th><th style="width:30%">Deliverable</th><th>Description</th></tr></thead><tbody>
+  <tr><td>1</td><td>Architecture document</td><td>Components, deployment, stack rationale.</td></tr>
+  <tr><td>2</td><td>Enrollment module</td><td>Consent-captured template creation.</td></tr>
+  <tr><td>3</td><td>Verification module</td><td>Capture, liveness, matching, decision engine.</td></tr>
+  <tr><td>4</td><td>Admin dashboard</td><td>Students, sessions, logs, exceptions, reports.</td></tr>
+  <tr><td>5</td><td>Reports module</td><td>CSV/Excel/PDF exports.</td></tr>
+  <tr><td>6</td><td>Integration layer</td><td>One ERP/LMS per agreed endpoints.</td></tr>
+  <tr><td>7</td><td>Source code package</td><td>Ownership per Section 20.7 + Annex A.</td></tr>
+  <tr><td>8</td><td>Deployment package</td><td>Docker Compose, configs, scripts, region settings.</td></tr>
+  <tr><td>9</td><td>Documentation + DPDP kit</td><td>Manuals, API docs, privacy-notice &amp; consent-record templates, grievance workflow, retraining-cadence guidance.</td></tr>
+  <tr><td>10</td><td>Licence audit (Annex E)</td><td>OSS components + model weights with licences at handover.</td></tr>
+  <tr><td>11</td><td>Training</td><td>2 sessions + recordings/decks.</td></tr>
+  <tr><td>12</td><td>Support</td><td>3 months bug-fixing per Annex D SLA.</td></tr>
+ </tbody></table>
+</div>
+
+<!-- 12-13 COMMERCIAL -->
+<div class="page">
+ <h2 class="section-title"><span class="num">12</span> Commercial Proposal</h2>
+ <table><thead><tr><th style="width:5%">#</th><th>Component</th><th style="width:18%">Amount (INR)</th></tr></thead><tbody>
+  <tr><td>1</td><td>Requirement analysis, design, setup</td><td class="text-right">₹60,000</td></tr>
+  <tr><td>2</td><td>Enrollment &amp; template management</td><td class="text-right">₹1,50,000</td></tr>
+  <tr><td>3</td><td>Recognition &amp; verification engine</td><td class="text-right">₹1,60,000</td></tr>
+  <tr><td>4</td><td>Liveness, quality, anti-spoofing</td><td class="text-right">₹1,60,000</td></tr>
+  <tr><td>5</td><td>Dashboard, reports, audit, exceptions</td><td class="text-right">₹90,000</td></tr>
+  <tr><td>6</td><td>Integration, pilot, tuning, deployment</td><td class="text-right">₹70,000</td></tr>
+  <tr><td>7</td><td>Training, docs, 3-month support</td><td class="text-right">₹50,000</td></tr>
+  <tr class="total-row"><td colspan="2">Total Project Cost</td><td class="text-right">₹6,60,000</td></tr>
+ </tbody></table>
+ <div class="box box-ok"><strong>Total: ₹6,60,000</strong> (Six Lakh Sixty Thousand Rupees Only). GST extra as applicable. Amounts are <strong>before TDS</strong>; Institution shall issue TDS certificates (Form 16A) within statutory time. Third-party/cloud/hardware costs excluded unless stated.</div>
+ <h2 class="section-title"><span class="num">13</span> Payment Terms</h2>
+ <table><thead><tr><th style="width:8%">Milestone</th><th>Description</th><th style="width:12%">%</th><th style="width:16%">Amount</th></tr></thead><tbody>
+  <tr><td>M1</td><td>Advance with PO / kickoff</td><td>30%</td><td class="text-right">₹1,98,000</td></tr>
+  <tr><td>M2</td><td>Core modules complete + internal demo</td><td>30%</td><td class="text-right">₹1,98,000</td></tr>
+  <tr><td>M3</td><td>Pilot / UAT readiness (acceptance per 20.4)</td><td>30%</td><td class="text-right">₹1,98,000</td></tr>
+  <tr><td>M4</td><td>Go-live + final handover (Annex F certificate)</td><td>10%</td><td class="text-right">₹66,000</td></tr>
+  <tr class="total-row"><td colspan="2">Total</td><td>100%</td><td class="text-right">₹6,60,000</td></tr>
+ </tbody></table>
+ <p class="small">M3/M4 fall due on acceptance or deemed acceptance per Section 20.4. Late payment &gt;15 days: interest 1.5%/month + suspension right (20.26).</p>
+</div>
+
+<!-- 14 SUPPORT -->
+<div class="page">
+ <h2 class="section-title"><span class="num">14</span> Support &amp; Maintenance</h2>
+ <ul>
+  <li><strong>Free support:</strong> 3 months from go-live; scope = defects in delivered scope only.</li>
+  <li><strong>Definitions:</strong> <em>Critical</em> = core workflow blocked / data loss / security breach; <em>Major</em> = significant feature impairment with workaround; <em>Minor</em> = cosmetic. <em>Business hours</em> = Mon–Sat 10:00–19:00 IST.</li>
+  <li><strong>SLA:</strong> Critical response 24 h; Major 48 h; Minor 1 week (Annex D).</li>
+  <li><strong>Excluded from SLA:</strong> institution-caused incidents, third-party service failures, infrastructure issues, change requests.</li>
+  <li><strong>AMC:</strong> optional post-support at 15–20% p.a. or as agreed.</li>
+ </ul>
+ <h2 class="section-title"><span class="num">15</span> Assumptions &amp; Exclusions</h2>
+ <h3>15.1 Assumptions</h3>
+ <ul><li>Single point of contact; structured student master data or API/DB access.</li><li>Server/network/firewall/cloud permissions provided; pilot users &amp; data available.</li><li>Cameras ≥720p; integration limited to provided endpoints; feedback delays impact timeline (day-for-day extension).</li><li>Not a certified biometric security system unless separately certified.</li></ul>
+ <h3>15.2 Exclusions</h3>
+ <ul><li>Hardware; hosting/domains/SSL/SMS/email subscriptions; paid third-party APIs; ERP/LMS customization beyond endpoints; certification testing; guaranteed deepfake/mask/injection detection; legacy data cleanup; native mobile apps; post-handover retraining.</li></ul>
+</div>
+
+<!-- 16-17 -->
+<div class="page">
+ <h2 class="section-title"><span class="num">16</span> Risks &amp; Mitigation</h2>
+ <table><thead><tr><th style="width:24%">Risk</th><th style="width:28%">Impact</th><th>Mitigation</th></tr></thead><tbody>
+  <tr><td>Poor lighting/backlight</td><td>Lower accuracy / failed capture</td><td>Quality gates, guidance, retake, best-frame.</td></tr>
+  <tr><td>Extreme angles</td><td>Unsuitable frame</td><td>Pose validation + frontal-face guidance.</td></tr>
+  <tr><td>Appearance drift</td><td>Score drop</td><td>Multi-template, rolling updates, grey-zone step-up.</td></tr>
+  <tr><td>Advanced spoofing</td><td>Bypass risk</td><td>Active challenges, randomness, audit, review.</td></tr>
+  <tr><td>Integration delays</td><td>Schedule slip</td><td>Early API docs; mock integration; day-for-day extension.</td></tr>
+  <tr><td>Device/browser limits</td><td>Uneven liveness</td><td>Fallbacks, guided capture, supported-device list.</td></tr>
+  <tr><td>Privacy/regulatory</td><td>Legal/reputational risk</td><td>DPDP kit, consent records, Annex C DPA.</td></tr>
+  <tr><td>Peak-load performance</td><td>Slow response</td><td>Scaling architecture, caching, pilot load test.</td></tr>
+ </tbody></table>
+ <h2 class="section-title"><span class="num">17</span> Data Privacy &amp; Security</h2>
+ <ul><li>Consent (incl. parental for minors); minimization; purpose limitation; RBAC; AES-256 + TLS 1.3; tamper-evident logs; retention per institution policy with automated deletion; erasure on graduation/request; India-default localization; no unrelated profiling.</li></ul>
+ <div class="box box-ok small"><strong>DPDP alignment:</strong> implements the seven core principles — lawfulness, purpose limitation, minimization, accuracy, storage limitation, integrity &amp; confidentiality, accountability.</div>
+</div>
+
+<!-- 18 ACCEPTANCE -->
+<div class="page">
+ <h2 class="section-title"><span class="num">18</span> Acceptance &amp; Testing (Measurable)</h2>
+ <h3>18.1 UAT metric targets (Annex B — pilot tuning targets on agreed test sets, not absolute warranties)</h3>
+ <div class="feat-grid">
+  <div class="feat"><div class="ck">🎯</div><div><b>FAR ≤ 0.1%</b><span>false-accept rate at operating threshold</span></div></div>
+  <div class="feat"><div class="ck">🎯</div><div><b>FNR ≤ 2%</b><span>false-non-match on pilot population</span></div></div>
+  <div class="feat"><div class="ck">🎯</div><div><b>APCER ≤ 5% @ BPCER ≤ 5%</b><span>on agreed spoof set (print/screen/replay)</span></div></div>
+  <div class="feat"><div class="ck">🎯</div><div><b>Capture success ≥ 95%</b><span>pilot lighting conditions</span></div></div>
+  <div class="feat"><div class="ck">🎯</div><div><b>p95 verification ≤ 3 s</b><span>on agreed hardware</span></div></div>
+  <div class="feat"><div class="ck">🎯</div><div><b>Export integrity 100%</b><span>register headers/rows match legacy format</span></div></div>
+ </div>
+ <h3>18.2 Acceptance mechanics</h3>
+ <ul>
+  <li>Acceptance window &amp; deemed acceptance per <strong>Section 20.4</strong> (15 business days; severity-classified defect list; minor defects don't block).</li>
+  <li>Institution may conduct one security penetration test during UAT with notice; critical findings fixed in scope; post-handover findings = change request.</li>
+  <li>UAT process: deploy to UAT env → execute Annex B catalogue → defect list → fixes → go-live approval → Annex F certificate.</li>
+ </ul>
+</div>
+
+<!-- 19 WHY -->
+<div class="page">
+ <h2 class="section-title"><span class="num">19</span> Why This Solution</h2>
+ <div class="feat-grid">
+  <div class="feat"><div class="ck">🎯</div><div><b>Practical, not theoretical</b><span>Institution-realistic attendance security.</span></div></div>
+  <div class="feat"><div class="ck">🔐</div><div><b>Layered security</b><span>Recognition + liveness + quality + session + exceptions.</span></div></div>
+  <div class="feat"><div class="ck">📈</div><div><b>Scalable</b><span>Horizontal scaling for campuses and peak hours.</span></div></div>
+  <div class="feat"><div class="ck">⚖</div><div><b>Contract-grade clarity</b><span>Acceptance clocks, IP schedule, licence audit, annexes.</span></div></div>
+  <div class="feat"><div class="ck">💾</div><div><b>No vendor lock-in</b><span>Full source handover with clean IP allocation.</span></div></div>
+  <div class="feat"><div class="ck">🛡</div><div><b>Privacy by design</b><span>DPDP kit, minors' consent, erasure workflows.</span></div></div>
+ </div>
+</div>
+
+<!-- 20 MASTER TERMS -->
+<div class="page">
+ <h2 class="section-title"><span class="num">20</span> Master Contract Terms</h2>
+ <p class="small">Green-numbered clauses are new in v3.0. This section supersedes all earlier development/deployment/licensing wording.</p>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.1</span><span class="cl-title">Definitions</span></div><p>"Institution" = SNIST acting through an authorised signatory. "Developer" = Bhaskar Sharma in individual capacity. "Software" = deliverables in agreed scope. "Production Environment" = any live system used by students/faculty/staff/third parties. "Handover" = written acceptance after the defined acceptance process. <strong>New:</strong> "Defect/Critical/Major/Minor" per Section 14; "Business Hours" Mon–Sat 10:00–19:00 IST; "Acceptance Period" = 15 business days; "Annexes" = Schedules A–G.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.2</span><span class="cl-title">No personal assumption of institutional operational duties</span></div><p>Developer does not become operator, administrator, Data Fiduciary/Controller, security/compliance officer, infrastructure owner, attendance authority or institutional decision-maker by designing, developing, demonstrating, deploying or handing over the Software. Institution remains responsible for enrolment policy, attendance policy, access permissions, production infrastructure, network security, account administration, backups, retention/deletion settings, incident response, lawful basis/consents, and acts of its personnel.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.3</span><span class="cl-title">Production acceptance and handover</span></div><p>No production deployment is accepted solely because the Software was demonstrated in development or UAT. Institution shall conduct or commission production-readiness testing and issue written go-live approval. After written go-live/acceptance, Institution assumes production operation except defects covered by the support scope. Continued production use after acceptance is evidence of operational acceptance to the extent permitted by law.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.4</span><span class="cl-title">Acceptance window &amp; deemed acceptance</span><span class="newtag">new</span></div><p>Within the Acceptance Period after UAT-completion notice, Institution shall issue (a) written acceptance, or (b) a defect list with repro steps and severity per Section 14. Acceptance shall not be withheld for Minor defects. If neither is issued within the Acceptance Period, acceptance is deemed issued on expiry. Each milestone payment falls due on acceptance or deemed acceptance of the corresponding deliverable.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.5</span><span class="cl-title">Institution responsibility for negligence, misconfiguration, misuse</span></div><p>To the maximum extent permitted by law, Developer is not responsible for loss, damage, claims, penalties, interruption, data exposure or attendance outcomes caused by Institution or its personnel through negligence, unauthorised modification, insecure configuration, failure to patch/maintain, compromised credentials, unsupported hardware, network failure, incorrect data import, incorrect administrative decisions, bypassing documented controls, failure to follow deployment instructions, or out-of-scope use.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.6</span><span class="cl-title">Third-party deployment / resale</span></div><p>If Institution deploys, sublicenses, commercialises, resells or provides the Software to any third party, Institution is responsible for commercial terms, legal compliance, privacy/data-processing arrangements, customer communications, support, infrastructure, security, incident handling and representations to that party. Institution shall flow down equivalent disclaimers and indemnities. No third party acquires a direct claim against Developer merely because Institution supplied the Software, except where such exclusion is unlawful. No third-party beneficiaries.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.7</span><span class="cl-title">Intellectual property — precise allocation</span></div><p>Parties shall execute the IP schedule (Annex A) identifying (a) Developer pre-existing materials; (b) third-party/OSS components under their own licences; (c) project deliverables. Any copyright assignment or exclusive licence is effective only per a signed instrument stating work, rights, duration, territory and consideration. Possession of source code or payment of an invoice does not by itself transfer every IP right.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.8</span><span class="cl-title">Third-party &amp; open-source licences; model weights</span><span class="newtag">new</span></div><p>Developer passes through third-party/OSS licence terms (including pretrained model weights) without warranty of commercial-use suitability. Institution bears licence compliance for its use and exclusively for resale/third-party deployment, including any non-commercial restrictions attaching to model weights or datasets. Annex E lists all components and licences at handover and is updated on each delivery.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.9</span><span class="cl-title">Fine-tuned weights &amp; biometric-derived artefacts</span><span class="newtag">new</span></div><p>Model weights, templates or artefacts fine-tuned or derived from Institution biometric data embed personal data; they are Institution property or shall be securely destroyed with a destruction certificate at Institution's election. They are not Developer background IP and shall not be reused outside this engagement except in anonymised, non-re-identifiable aggregate form permitted by law.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.10</span><span class="cl-title">Developer background IP</span></div><p>Unless expressly assigned in a signed instrument, Developer retains pre-existing code, generic libraries, utilities, methods, templates, know-how, algorithms, architectural patterns, tooling and independently developed improvements not uniquely created for Institution. Institution receives rights necessary to operate and maintain the delivered Software, subject to third-party/OSS licences.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.11</span><span class="cl-title">Limited co-ownership; no accidental partnership</span></div><p>Shared commercial ownership or revenue rights arise only under a signed IP &amp; Commercialisation Schedule (Annex A extension). Nothing herein creates an unregistered partnership, employment, agency, fiduciary relationship or joint venture. Any intended partnership requires a separate registered instrument.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.12</span><span class="cl-title">Liability cap &amp; exclusion of consequential loss</span></div><p>Developer's aggregate contractual liability shall not exceed amounts actually received under the signed agreement. No liability for indirect, incidental, special, exemplary or consequential losses (revenue, goodwill, savings, opportunity, interruption), except where prohibition is unlawful.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.13</span><span class="cl-title">Indemnity in favour of Developer</span></div><p>Institution shall defend, indemnify and hold harmless Developer from third-party claims, losses, penalties, costs and reasonable legal expenses arising from Institution's production operation, policies, data-processing decisions, unauthorised modifications, third-party deployments, negligence, wilful misconduct of its personnel, or breach of its own legal obligations. This indemnity does not apply to the extent a final determination attributes the claim to Developer's fraud or wilful misconduct.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.14</span><span class="cl-title">No guarantee of absolute biometric security</span></div><p>The Software is a security control, not a guarantee against fraud, spoofing, deepfakes, injection, sensor/infrastructure compromise, model error or future attacks. Institution shall not represent it as guaranteeing perfect accuracy or fraud prevention.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.15</span><span class="cl-title">Data protection &amp; biometric information</span></div><p>Institution determines and documents lawful basis, purpose, notice/consent, retention, deletion, access controls and grievance process for its role. Developer processes institutional data only as authorised for development/support/maintenance and does not independently determine purposes. Annex C (data-processing/confidentiality schedule) shall be executed where required.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.16</span><span class="cl-title">Minors &amp; sensitive data</span><span class="newtag">new</span></div><p>Where data principals include persons under 18, Institution shall obtain verifiable parental consent per DPDP Act ss.9–10 before enrolment and maintain consent records. Developer supplies consent-record schema and privacy-notice templates within documentation. Developer's enrolment workflow shall record consent metadata but Institution owns the consent relationship.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.17</span><span class="cl-title">Data localization &amp; transfer basis</span><span class="newtag">new</span></div><p>Default deployment stores data within India. If Institution elects foreign-hosted infrastructure (e.g., managed PaaS regions), Institution documents the transfer basis per DPDP s.17 and applicable rules, and instructs region configuration in writing; Developer implements as instructed and is not responsible for Institution's transfer-basis decisions.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.18</span><span class="cl-title">Security credentials &amp; infrastructure</span></div><p>Production credentials, cloud accounts, domains, DB administration, encryption/signing keys, backup credentials and admin accounts are controlled by Institution or its provider after handover. Developer is not responsible for security events caused by credentials/infrastructure it does not control.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.19</span><span class="cl-title">Confidentiality &amp; creator privacy</span></div><p>Institution keeps confidential Developer's non-public personal information (phone, address, private email, government IDs, secrets, private repos/correspondence). Public documentation uses agreed professional attribution unless Developer consents in writing. No disclosure of private personal information for publicity, employment, disciplinary or unrelated purposes without lawful basis and prior written notice.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.20</span><span class="cl-title">Attribution &amp; academic recognition</span></div><p>Unless waived in writing, Institution preserves reasonable professional attribution identifying Bhaskar Sharma as original project lead/developer/creator, and shall not represent the capstone work as independently created by another. Attribution in academic submissions, records and public materials follows the signed IP schedule.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.21</span><span class="cl-title">Portfolio &amp; academic display rights</span><span class="newtag">new</span></div><p>Subject to confidentiality, Developer may present, demonstrate and reference the project in academic submissions, thesis, viva, competitions and professional portfolio, using Institution's name and non-confidential screenshots, provided student personal data and security-sensitive configuration are redacted (Annex G).</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.22</span><span class="cl-title">Advisory outputs; no disciplinary party</span><span class="newtag">new</span></div><p>Match scores, liveness decisions and attendance records are advisory inputs. Final attendance, disciplinary and academic determinations rest with Institution after human review. Developer is not a necessary party to Institution–student attendance or disciplinary disputes.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.23</span><span class="cl-title">Fallback attendance method</span><span class="newtag">new</span></div><p>Institution shall maintain a non-biometric fallback attendance method for consent withdrawal, enrolment failure or outage. Developer bears no liability for attendance gaps where the fallback was unavailable or unused.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.24</span><span class="cl-title">Support period &amp; change requests</span></div><p>Included support is limited to the stated period/scope. New features, architectural changes, integrations, production migrations, hardening beyond scope, infrastructure management and third-party-caused changes require written change requests (Annex D).</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.25</span><span class="cl-title">Limited warranty &amp; disclaimers</span><span class="newtag">new</span></div><p>Developer warrants (a) services performed with reasonable skill and care; (b) for 90 days post-acceptance, the Software substantially conforms to its documentation. Exclusive remedy: correction/re-performance or refund of fees for the non-conforming portion. Except as stated, the Software is provided "as is" and all implied warranties (merchantability, fitness for a particular purpose, non-infringement of third-party OSS) are disclaimed to the maximum extent permitted by law.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.26</span><span class="cl-title">Payment protections; TDS; late payment</span><span class="newtag">new</span></div><p>Milestones fall due per 20.4. Amounts are pre-GST and pre-TDS; Institution issues Form 16A within statutory time. Payment &gt;15 days late without a valid defect list: milestone deemed achieved, interest 1.5%/month accrues, and Developer may suspend work on written notice; timeline extends day-for-day for Institution-caused delay. Payments are not subject to set-off except per final determination.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.27</span><span class="cl-title">Material breach; suspension</span></div><p>On Institution material breach (out-of-rights use, risky alteration attributed to Developer, non-payment, confidentiality breach), Developer may give written cure notice; uncured breach permits suspension of discretionary support and contractual remedies.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.28</span><span class="cl-title">Termination</span><span class="newtag">new</span></div><p>Either party may terminate for material breach uncured within 30 days of written notice. On termination, Institution pays for work performed to termination date; Developer delivers work-in-progress in its then-current state against such payment; survival clauses persist.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.29</span><span class="cl-title">Force majeure</span><span class="newtag">new</span></div><p>Neither party liable for events beyond reasonable control (natural disasters, epidemics, war, state action, internet/infrastructure failures not caused by the party). Affected party notifies promptly; obligations suspend and timeline extends; if force majeure exceeds 60 days, either party may terminate with payment for work done.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.30</span><span class="cl-title">Notices</span><span class="newtag">new</span></div><p>Notices in writing to addresses/emails in the signature block or Annex A: email deemed received on next business day; registered post deemed received 3 days after posting.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.31</span><span class="cl-title">Severability, waiver, counterparts, e-signatures</span><span class="newtag">new</span></div><p>Invalid provisions sever without affecting remainder; no waiver by silence or delay; agreement may be executed in counterparts, including electronic execution valid under the IT Act 2000.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.32</span><span class="cl-title">Assignment</span><span class="newtag">new</span></div><p>Neither party assigns without the other's written consent, except Institution may assign to a legal successor on notice; assignment does not enlarge Developer's obligations.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.33</span><span class="cl-title">Survival</span></div><p>IP, confidentiality, creator privacy, payment, limitation of liability, indemnity, attribution and dispute-resolution clauses survive completion, handover or termination.</p></div>
+
+ <div class="clause new"><div class="cl-head"><span class="cl-num">20.34</span><span class="cl-title">Governing law &amp; dispute resolution</span><span class="newtag">completed</span></div><p>Laws of India. Disputes: good-faith negotiation (15 days) → mediation → arbitration by a sole arbitrator under the Arbitration &amp; Conciliation Act 1996; seat and venue Hyderabad, Telangana; language English. Hyderabad courts retain jurisdiction for injunctive relief in IP/confidentiality matters. Nothing restricts approach to statutory authorities under mandatory law.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.35</span><span class="cl-title">Entire agreement &amp; amendments</span></div><p>The signed agreement, schedules, approved scope, acceptance record, IP schedule, DPA and change orders form the operative record. Amendments, waivers, ownership transfers, liability expansions or responsibility changes require written signature by authorised representatives.</p></div>
+
+ <div class="clause"><div class="cl-head"><span class="cl-num">20.36</span><span class="cl-title">Order of precedence</span></div><p>Later signed master agreement controls over this proposal; specific signed schedules control over general proposal statements.</p></div>
+
+ <div class="box box-danger"><strong>EXECUTION WARNING — DO NOT RELY ON THE PROPOSAL ALONE.</strong> These protections bind only through a properly executed written agreement. IP assignment, shared commercial ownership, indemnity, liability limits and partnership/commercialisation rights must be stated in dedicated signed schedules (Annexes A–G).</div>
+</div>
+
+<!-- 21 SIGNATURES -->
+<div class="page">
+ <h2 class="section-title"><span class="num">21</span> Acceptance, Signatures &amp; Contract Formation</h2>
+ <p class="small">Signature records acceptance only when signed by persons duly authorised to bind the respective party. Institution shall attach authorisation evidence (board/GC authorisation letter) with the executed copy.</p>
+ <div class="sig-grid">
+  <div class="sig-box"><div class="sig-head">FOR SREENIDHI INSTITUTE OF SCIENCE &amp; TECHNOLOGY</div>
+   <div class="sig-line">Signature<br/>Name: ______________________<br/>Designation: ______________________<br/>Department: ______________________<br/>Date: ______________________<br/>Institution Seal:<br/>Authorisation ref: ______________________</div></div>
+  <div class="sig-box"><div class="sig-head">FOR THE DEVELOPER / PROJECT LEAD</div>
+   <div class="sig-line">Signature<br/>Name: Bhaskar Sharma<br/>Role: Project Lead &amp; Developer<br/>Programme: B.Tech CSE-E · Roll No. 23311A05Y6<br/>Date: ______________________<br/>Notice email: ______________________</div></div>
+ </div>
+ <h3>Recommended legal review / witness</h3>
+ <table><thead><tr><th>Name / Firm</th><th>Signature</th><th>Date</th></tr></thead><tbody><tr><td></td><td></td><td></td></tr><tr><td></td><td></td><td></td></tr></tbody></table>
+ <p class="muted">Document control: Version 3.0 · Ref SNIST/CSE-E/FA-2026/001 · Confidential. Executable only after final commercial, IP, data-protection and dispute-resolution terms are confirmed.</p>
+</div>
+
+<!-- ANNEXES -->
+<div class="page">
+ <h2 class="section-title"><span class="num">A–G</span> Annexes (Schedules)</h2>
+
+ <div class="annex"><div class="annex-head"><div class="annex-letter">A</div><div class="annex-title">Intellectual Property &amp; Commercialisation Schedule</div></div>
+  <table><thead><tr><th>Item</th><th>Category</th><th>Owner</th><th>Rights to Institution</th><th>Remarks</th></tr></thead><tbody>
+   <tr><td>Generic dashboard/UI component library</td><td>Background IP</td><td>Developer</td><td>Non-exclusive licence to operate/maintain</td><td>Reusable across projects</td></tr>
+   <tr><td>Project-specific modules (enrollment, verification, dashboard config)</td><td>Deliverable</td><td>Institution on M4 payment</td><td>Full ownership per signed instrument</td><td>Source + docs</td></tr>
+   <tr><td>OSS components &amp; model weights</td><td>Third-party</td><td>Respective licensors</td><td>Per respective licences</td><td>See Annex E</td></tr>
+   <tr><td>Shared commercialisation rights (if any)</td><td>To be agreed</td><td>—</td><td>—</td><td>Only via signed extension</td></tr>
+  </tbody></table></div>
+
+ <div class="annex"><div class="annex-head"><div class="annex-letter">B</div><div class="annex-title">UAT Test Catalogue &amp; Metric Targets</div></div>
+  <table><thead><tr><th>ID</th><th>Scenario</th><th>Target</th><th>Method</th></tr></thead><tbody>
+   <tr><td>UT-01</td><td>Enrollment success</td><td>≥98% first-attempt with guidance</td><td>Pilot cohort</td></tr>
+   <tr><td>UT-02</td><td>False accept rate</td><td>≤0.1% at operating threshold</td><td>Agreed impostor set</td></tr>
+   <tr><td>UT-03</td><td>False non-match rate</td><td>≤2%</td><td>Pilot population</td></tr>
+   <tr><td>UT-04</td><td>Liveness PAD</td><td>APCER ≤5% @ BPCER ≤5%</td><td>Agreed spoof set (print/screen/replay)</td></tr>
+   <tr><td>UT-05</td><td>Capture success</td><td>≥95%</td><td>Pilot lighting conditions</td></tr>
+   <tr><td>UT-06</td><td>Verification latency</td><td>p95 ≤3 s</td><td>Agreed hardware</td></tr>
+   <tr><td>UT-07</td><td>Export integrity</td><td>100% header/row match</td><td>Legacy format comparison</td></tr>
+   <tr><td>UT-08</td><td>Role gating</td><td>100% matrix pass</td><td>Permission matrix walk</td></tr>
+  </tbody></table>
+  <p class="small">Targets are pilot tuning targets measured on agreed test sets; not absolute warranties (see 20.25).</p></div>
+
+ <div class="annex"><div class="annex-head"><div class="annex-letter">C</div><div class="annex-title">Data-Processing &amp; Confidentiality Schedule</div></div>
+  <ul class="small">
+   <li>Roles: Institution = Data Fiduciary; Developer = processor limited to development/support/maintenance.</li>
+   <li>Data categories: identity fields, biometric templates, capture metadata, audit logs. Purposes: attendance verification only.</li>
+   <li>Retention: per institution policy; automated deletion; erasure on graduation/request; deletion of Developer-held copies at end of support with certificate.</li>
+   <li>Sub-processors: none without written approval; hosting region per 20.17.</li>
+   <li>Breach intimation: prompt notice per DPDP rules; cooperation with institution-led response.</li>
+   <li>Security measures: AES-256, TLS 1.3, RBAC, audit logging, least privilege.</li>
+   <li>Minors: parental-consent records maintained by Institution (20.16).</li>
+  </ul></div>
+
+ <div class="annex"><div class="annex-head"><div class="annex-letter">D</div><div class="annex-title">Support SLA &amp; Change-Request Form</div></div>
+  <table><thead><tr><th>Severity</th><th>Definition</th><th>Response</th><th>Resolution target</th></tr></thead><tbody>
+   <tr><td>Critical</td><td>Core workflow blocked / data loss / breach</td><td>24 h</td><td>72 h workaround</td></tr>
+   <tr><td>Major</td><td>Significant impairment with workaround</td><td>48 h</td><td>Next release</td></tr>
+   <tr><td>Minor</td><td>Cosmetic</td><td>1 week</td><td>Scheduled</td></tr>
+  </tbody></table>
+  <p class="small">CR form fields: requester, description, business need, impact, effort estimate, cost, timeline impact, approval signatures.</p></div>
+
+ <div class="annex"><div class="annex-head"><div class="annex-letter">E</div><div class="annex-title">OSS &amp; Model-Weight Licence Audit (at handover)</div></div>
+  <table><thead><tr><th>Component</th><th>Licence</th><th>Use</th><th>Commercial-use note</th></tr></thead><tbody>
+   <tr><td>React / Vite / Tailwind / Recharts</td><td>MIT</td><td>Frontend</td><td>Permissive</td></tr>
+   <tr><td>FastAPI / Pydantic / SQLAlchemy</td><td>MIT</td><td>Backend</td><td>Permissive</td></tr>
+   <tr><td>PostgreSQL / pgvector</td><td>PostgreSQL Licence</td><td>Data</td><td>Permissive</td></tr>
+   <tr><td>ONNX Runtime</td><td>MIT</td><td>Inference</td><td>Permissive</td></tr>
+   <tr><td>InsightFace toolbox</td><td>Verify at handover</td><td>Recognition</td><td><strong>Some pretrained weights non-commercial — verify before resale</strong></td></tr>
+   <tr><td>DeepFace / MiniFASNet weights</td><td>Verify at handover</td><td>PAD</td><td><strong>Check dataset/weight restrictions</strong></td></tr>
+  </tbody></table>
+  <p class="small">Table completed and re-verified at each delivery; Institution responsible for compliance per 20.8.</p></div>
+
+ <div class="annex"><div class="annex-head"><div class="annex-letter">F</div><div class="annex-title">Acceptance Certificate Template</div></div>
+  <p class="small">Project / milestone reference · UAT catalogue results summary (Annex B) · open defect list with severities · acceptance statement ("accepted / deemed accepted on [date] per 20.4") · signatures of both parties · date. Attached to M3/M4 invoice.</p></div>
+
+ <div class="annex"><div class="annex-head"><div class="annex-letter">G</div><div class="annex-title">Attribution &amp; Portfolio Rights</div></div>
+  <p class="small">Agreed attribution text: "Original project lead &amp; developer: Bhaskar Sharma (B.Tech CSE-E, Roll No. 23311A05Y6), SNIST." Permitted developer uses: thesis, viva, competitions, portfolio demos with student personal data and security-sensitive configuration redacted. Institution uses: internal, public materials with agreed attribution. Additional personal information of Developer only per 20.19.</p></div>
+</div>
+
+</div>
+<script>
+const d=new Date().toLocaleDateString('en-IN',{day:'2-digit',month:'long',year:'numeric'});
+document.querySelectorAll('.js-date').forEach(e=>e.textContent=d);
+</script>
+</body>
+</html>
