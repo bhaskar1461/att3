@@ -155,3 +155,25 @@ export const useRecords = (params: UseRecordsParams = {}, opts?: PollingOptions)
   });
 };
 
+export interface UseTodayRecordsOptions {
+  scope?: 'mine' | 'all';
+  pollMs?: number;
+}
+
+/**
+ * useTodayRecords: Queries today's attendance records with shared query key keys.overview.stats('today', scope)
+ * and visibility hygiene (pauses background tab polling).
+ */
+export const useTodayRecords = (opts?: UseTodayRecordsOptions) => {
+  const scope = opts?.scope || 'all';
+  return useQuery({
+    queryKey: keys.overview.stats('today', scope),
+    queryFn: () => attendanceEndpoints.getAttendanceRecords({ range: 'today', scope }),
+    refetchInterval: () =>
+      typeof document !== 'undefined' && document.visibilityState === 'visible'
+        ? (opts?.pollMs ?? 60_000)
+        : false,
+  });
+};
+
+

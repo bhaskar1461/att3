@@ -420,20 +420,28 @@ def start_attendance_session(req: StartSessionRequest, db: Session = Depends(get
         "message": f"Started new attendance session for {p_count} period{'s' if p_count > 1 else ''}"
     }
 
+def require_teacher_or_admin(current_user: User = Depends(get_current_user)) -> User:
+    role_str = str(current_user.role.value if hasattr(current_user.role, 'value') else current_user.role).upper()
+    if role_str not in ("TEACHER", "SUPER_ADMIN", "ADMIN"):
+        raise HTTPException(status_code=403, detail="Teacher or Admin permission required")
+    return current_user
+
 @router.get("/historical-sessions")
 def get_historical_sessions(
     date: Optional[str] = None,
     limit: int = 100,
     offset: int = 0,
     db: Session = Depends(get_db),
-    current_teacher: Teacher = Depends(require_teacher)
+    current_user: User = Depends(require_teacher_or_admin)
 ):
     try:
         # Week 9 Part D: Bounded pagination to prevent slow load with 100+ sessions
         safe_limit = max(1, min(500, limit))
         safe_offset = max(0, offset)
 
-        query = db.query(AttendanceSession).filter(AttendanceSession.teacher_id == current_teacher.id)
+        query = db.query(AttendanceSession)
+        if current_user.role == UserRole.TEACHER and current_user.teacher_profile:
+            query = query.filter(AttendanceSession.teacher_id == current_user.teacher_profile.id)
         if date and date.strip():
             clean_date = date.strip()
             query = query.filter(func.trim(AttendanceSession.session_date) == clean_date)
@@ -514,7 +522,7 @@ def get_historical_sessions(
             })
         return res
     except Exception as e:
-        logger.error(f"[HISTORICAL_SESSIONS_ERROR] Failed fetching historical sessions for teacher {current_teacher.id}: {str(e)}", exc_info=True)
+        logger.error(f"[HISTORICAL_SESSIONS_ERROR] Failed fetching historical sessions for user {current_user.id}: {str(e)}", exc_info=True)
         return []
 
 @router.get("/sessions/{session_id}")

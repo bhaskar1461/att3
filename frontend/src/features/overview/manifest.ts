@@ -6,6 +6,8 @@ import { LiveSessionsCard } from './widgets/LiveSessionsCard';
 import { AttendanceHeroCard } from './widgets/AttendanceHeroCard';
 import { AttendanceTrendCard } from './widgets/AttendanceTrendCard';
 import { ScanHeatmapCard } from './widgets/ScanHeatmapCard';
+import { RecentRegistersCard } from './widgets/RecentRegistersCard';
+import { FlaggedEventsCard } from './widgets/FlaggedEventsCard';
 
 export const manifest: FeatureManifest = {
   name: 'overview',
@@ -68,6 +70,22 @@ export const manifest: FeatureManifest = {
       roles: ['admin', 'teacher'],
       grid: { cols: 12, rows: 1 },
       component: ScanHeatmapCard,
+    },
+    {
+      id: 'overview.recent_registers',
+      zone: 'main',
+      order: 30,
+      roles: ['admin', 'teacher'],
+      grid: { cols: 6, rows: 1 },
+      component: RecentRegistersCard,
+    },
+    {
+      id: 'overview.flagged_events',
+      zone: 'main',
+      order: 40,
+      roles: ['admin', 'teacher'],
+      grid: { cols: 6, rows: 1 },
+      component: FlaggedEventsCard,
     },
     {
       id: 'overview.hero',

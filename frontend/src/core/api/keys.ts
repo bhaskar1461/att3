@@ -45,6 +45,7 @@ export const keys = {
   },
   security: {
     all: () => ['security'] as const,
+    alerts: (status?: string) => ['security', 'alerts', status ?? 'open'] as const,
     auditLogs: (limit?: number) => ['security', 'audit-logs', limit] as const,
     scannerHealth: (timeframeDays?: number) => ['security', 'scanner-health', timeframeDays] as const,
     telemetrySummary: () => ['security', 'telemetry-summary'] as const,

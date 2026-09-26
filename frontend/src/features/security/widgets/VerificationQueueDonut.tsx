@@ -9,16 +9,16 @@ import {
   QueueType,
 } from '../selectors';
 import { useOnboardingStatusQuery, useOnboardingRebindRequestsQuery } from '../../onboarding/hooks';
-import { useSecurityAuditLogsQuery } from '../hooks';
+import { useSecurityAuditLogsQuery, useAlerts } from '../hooks';
 import { setBadge } from '../../../core/badges';
 
 export const VerificationQueueDonut: React.FC<WidgetProps> = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedQueue = searchParams.get('queue') as QueueType | null;
 
-  // Real Queries (Phase 3)
+  // Real Queries (Phase 3 & Phase 9 shared query)
   const approvalsQuery = useOnboardingStatusQuery(1, 100);
-  const spoofQuery = useSecurityAuditLogsQuery(100);
+  const spoofQuery = useAlerts({ status: 'open', pollMs: 60_000 });
   const recoveriesQuery = useOnboardingRebindRequestsQuery();
 
   const isLoading =

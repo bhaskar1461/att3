@@ -79,6 +79,9 @@ export const StudentsPage: React.FC = () => {
   const secQuery = useRosterSectionsQuery();
   const yrQuery = useRosterYearsQuery();
 
+  const openId = searchParams.get('open');
+  const hasAutoOpenedRef = React.useRef(false);
+
   // 250ms debounce on search
   useEffect(() => {
     const handler = setTimeout(() => {
@@ -93,8 +96,9 @@ export const StudentsPage: React.FC = () => {
     const nextParams: Record<string, string> = {};
     if (debouncedQ) nextParams.q = debouncedQ;
     if (page > 1) nextParams.page = String(page);
+    if (openId) nextParams.open = openId;
     setSearchParams(nextParams, { replace: true });
-  }, [debouncedQ, page, setSearchParams]);
+  }, [debouncedQ, page, openId, setSearchParams]);
 
   const query = useRosterStudentsQuery({
     page,
@@ -107,6 +111,19 @@ export const StudentsPage: React.FC = () => {
   const students: Student[] = Array.isArray(query.data) ? query.data : query.data?.items || [];
   const total = Array.isArray(query.data) ? query.data.length : query.data?.total || students.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+  // Auto-open matching student edit dialog if ?open=<id> is present
+  useEffect(() => {
+    if (openId && !hasAutoOpenedRef.current && students.length > 0) {
+      const match = students.find(
+        (s) => String(s.id) === openId || s.roll_number.toLowerCase() === openId.toLowerCase()
+      );
+      if (match) {
+        hasAutoOpenedRef.current = true;
+        handleOpenEdit(match);
+      }
+    }
+  }, [openId, students]);
 
   const departments = Array.isArray(deptQuery.data) ? deptQuery.data : [];
   const sections = Array.isArray(secQuery.data) ? secQuery.data : [];
@@ -302,11 +319,18 @@ export const StudentsPage: React.FC = () => {
                     const isActive = student.is_active !== false;
                     const studentId = student.id || student.roll_number;
                     const isKebabOpen = activeKebabId === studentId;
+                    const isMatch = Boolean(
+                      openId &&
+                        (String(student.id) === openId ||
+                          student.roll_number.toLowerCase() === openId.toLowerCase())
+                    );
 
                     return (
                       <tr
                         key={studentId}
-                        className="hover:bg-[#2a2b31]/30 transition-colors"
+                        className={`hover:bg-[#2a2b31]/30 transition-all ${
+                          isMatch ? 'bg-indigo-500/20 ring-1 ring-indigo-500/50 animate-pulse' : ''
+                        }`}
                       >
                         <td className="py-2.5 px-3 font-mono font-medium text-indigo-400">
                           {student.roll_number}

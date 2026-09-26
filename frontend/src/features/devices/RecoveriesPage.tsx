@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Search,
   RefreshCw,
@@ -18,6 +19,8 @@ import { normalizeQueueItem, NormalizedQueueItem } from '../security/selectors';
 import { setBadge } from '../../core/badges';
 
 export const RecoveriesPage: React.FC = () => {
+  const [searchParams] = useSearchParams();
+  const openId = searchParams.get('open');
   const [statusTab, setStatusTab] = useState<'pending' | 'approved' | 'rejected'>('pending');
   const [search, setSearch] = useState<string>('');
   const [page, setPage] = useState<number>(1);
@@ -185,10 +188,21 @@ export const RecoveriesPage: React.FC = () => {
                     const reqId = r.id || r.request_id || idx;
                     const status = (r.status || 'pending').toUpperCase();
 
+                    const isMatch = Boolean(
+                      openId &&
+                        (String(reqId) === openId ||
+                          String(r.id) === openId ||
+                          String(normItem.id) === openId ||
+                          String(normItem.rawId) === openId ||
+                          r.roll_number?.toLowerCase() === openId.toLowerCase())
+                    );
+
                     return (
                       <tr
                         key={reqId}
-                        className="hover:bg-[#2a2b31]/30 transition-colors group"
+                        className={`hover:bg-[#2a2b31]/30 transition-all group ${
+                          isMatch ? 'bg-indigo-500/20 ring-1 ring-indigo-500/50 animate-pulse' : ''
+                        }`}
                       >
                         <td className="py-2.5 px-3 font-medium text-white">
                           <div className="font-semibold">{r.student_name || normItem.title}</div>

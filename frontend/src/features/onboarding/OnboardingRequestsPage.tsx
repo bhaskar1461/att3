@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   UserPlus,
   Search,
@@ -26,6 +27,8 @@ import {
 import { OnboardingStudent } from '../../core/api/schemas/onboarding';
 
 export const OnboardingRequestsPage: React.FC = () => {
+  const [searchParams] = useSearchParams();
+  const openId = searchParams.get('open');
   const [page, setPage] = useState<number>(1);
   const [search, setSearch] = useState<string>('');
   const pageSize = 15;
@@ -175,11 +178,18 @@ export const OnboardingRequestsPage: React.FC = () => {
                   filteredStudents.map((s) => {
                     const isActivated = s.onboarding_state === 'ACTIVATED' || Boolean(s.activated_at);
                     const isDispatched = Boolean(s.magic_link_sent_at);
+                    const isMatch = Boolean(
+                      openId &&
+                        (String(s.student_id) === openId ||
+                          s.roll_number.toLowerCase() === openId.toLowerCase())
+                    );
 
                     return (
                       <tr
                         key={s.student_id || s.roll_number}
-                        className="hover:bg-[#2a2b31]/30 transition-colors group"
+                        className={`hover:bg-[#2a2b31]/30 transition-all group ${
+                          isMatch ? 'bg-indigo-500/20 ring-1 ring-indigo-500/50 animate-pulse' : ''
+                        }`}
                       >
                         <td className="py-2.5 px-3 font-medium text-white">
                           <div className="font-semibold">{s.name}</div>

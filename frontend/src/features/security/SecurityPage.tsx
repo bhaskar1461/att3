@@ -54,7 +54,16 @@ export const SecurityPage: React.FC = () => {
   };
 
   const filteredItems = useMemo(() => {
+    const openId = searchParams.get('open');
+
     return rawLogs.filter((item: any) => {
+      const isDirectMatch = Boolean(
+        openId &&
+          (String(item.id) === openId ||
+            item.roll_number?.toLowerCase() === openId.toLowerCase())
+      );
+      if (isDirectMatch) return true;
+
       const eventType = (item.event_type || item.action || '').toLowerCase();
       const details = (item.details || '').toLowerCase();
       const isSpoof =
@@ -237,11 +246,21 @@ export const SecurityPage: React.FC = () => {
                       normItem.severity === 'high' ||
                       (log.event_type || '').includes('SPOOF') ||
                       (log.event_type || '').includes('PROXY');
+                    const openId = searchParams.get('open');
+                    const isMatch = Boolean(
+                      openId &&
+                        (String(log.id) === openId ||
+                          String(normItem.rawId) === openId ||
+                          String(normItem.id) === openId ||
+                          log.roll_number?.toLowerCase() === openId.toLowerCase())
+                    );
 
                     return (
                       <tr
                         key={log.id}
-                        className="hover:bg-[#2a2b31]/30 transition-colors group"
+                        className={`hover:bg-[#2a2b31]/30 transition-all group ${
+                          isMatch ? 'bg-indigo-500/20 ring-1 ring-indigo-500/50 animate-pulse' : ''
+                        }`}
                       >
                         <td className="py-3 px-3 font-semibold text-white">
                           <div className="flex items-center gap-2">

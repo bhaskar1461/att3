@@ -16,7 +16,8 @@ def fetch_filtered_records(
     end_date: Optional[str] = None,
     department_id: Optional[int] = None,
     section_id: Optional[int] = None,
-    subject_id: Optional[int] = None
+    subject_id: Optional[int] = None,
+    session_id: Optional[int] = None
 ):
     from sqlalchemy.orm import joinedload
     # Eagerly load relationships to eliminate N+1 WAN round-trips to remote MySQL
@@ -26,9 +27,11 @@ def fetch_filtered_records(
         joinedload(AttendanceRecord.session).joinedload(AttendanceSession.subject)
     )
 
-    if start_date:
+    if session_id:
+        query = query.filter(AttendanceRecord.session_id == session_id)
+    if start_date and not session_id:
         query = query.filter(AttendanceRecord.session_date >= start_date)
-    if end_date:
+    if end_date and not session_id:
         query = query.filter(AttendanceRecord.session_date <= end_date)
     if department_id:
         query = query.join(Student).filter(Student.department_id == department_id)
@@ -348,4 +351,148 @@ def get_session_attendance_report(
         "total_records": len(res),
         "attendance_records": res
     }
+
+
+import uuid
+import time
+import threading
+from pydantic import BaseModel
+from typing import Dict, Any
+
+class ReportRequestPayload(BaseModel):
+    type: str = "register"
+    range: str = "week"
+    format: str = "xlsx"
+    session_id: Optional[int] = None
+
+_report_jobs: Dict[str, Dict[str, Any]] = {}
+_report_jobs_lock = threading.Lock()
+
+@router.post("/request")
+def request_report_job(
+    payload: ReportRequestPayload,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_report_user)
+):
+    from datetime import timedelta
+    from app.core.security import get_server_ist_datetime
+
+    report_id = f"rep_{uuid.uuid4().hex[:12]}"
+    now_ist = get_server_ist_datetime()
+    today_str = now_ist.strftime("%Y-%m-%d")
+
+    if payload.range == "today":
+        start_date = today_str
+    elif payload.range == "month":
+        start_date = (now_ist - timedelta(days=30)).strftime("%Y-%m-%d")
+    else:  # default week
+        start_date = (now_ist - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    end_date = today_str
+
+    with _report_jobs_lock:
+        _report_jobs[report_id] = {
+            "id": report_id,
+            "status": "building",
+            "type": payload.type,
+            "range": payload.range,
+            "format": payload.format,
+            "session_id": payload.session_id,
+            "created_at": time.time(),
+            "download_url": None,
+            "file_bytes": None,
+            "filename": None,
+            "error": None,
+        }
+
+    def _worker(rep_id: str, s_date: str, e_date: str, fmt: str, s_id: Optional[int]):
+        from app.core.database import SessionLocal
+        worker_db = SessionLocal()
+        try:
+            # Slight delay to ensure frontend observes building state on poll
+            time.sleep(0.4)
+            records = fetch_filtered_records(worker_db, start_date=s_date, end_date=e_date, session_id=s_id)
+
+            # Traversing real backend chain: reports.py -> report_service.py -> excel_service.py
+            title = f"Attendance Register - Session #{s_id}" if s_id else "Weekly Attendance Register"
+            if fmt.lower() in ["xlsx", "excel"]:
+                excel_bytes = ReportService.generate_weekly_register(records, title=title)
+                filename = f"Attendance_Register_Session_{s_id}_{today_str}.xlsx" if s_id else f"Attendance_Register_Weekly_{today_str}.xlsx"
+            elif fmt.lower() == "csv":
+                csv_str = ReportService.generate_csv_report(records)
+                excel_bytes = csv_str.encode("utf-8")
+                filename = f"Attendance_Register_Session_{s_id}_{today_str}.csv" if s_id else f"Attendance_Register_Weekly_{today_str}.csv"
+            else:
+                excel_bytes = ReportService.generate_weekly_register(records, title=title)
+                filename = f"Attendance_Register_Session_{s_id}_{today_str}.xlsx" if s_id else f"Attendance_Register_Weekly_{today_str}.xlsx"
+
+            with _report_jobs_lock:
+                if rep_id in _report_jobs:
+                    _report_jobs[rep_id].update({
+                        "status": "ready",
+                        "download_url": f"/api/v1/reports/download/{rep_id}",
+                        "file_bytes": excel_bytes,
+                        "filename": filename,
+                    })
+        except Exception as e:
+            with _report_jobs_lock:
+                if rep_id in _report_jobs:
+                    _report_jobs[rep_id].update({
+                        "status": "failed",
+                        "error": str(e),
+                    })
+        finally:
+            worker_db.close()
+
+    t = threading.Thread(target=_worker, args=(report_id, start_date, end_date, payload.format, payload.session_id), daemon=True)
+    t.start()
+
+    return {
+        "id": report_id,
+        "status": "building",
+        "created_at": now_ist.isoformat(),
+    }
+
+@router.get("/download/{report_id}")
+def download_report_file(
+    report_id: str,
+    token: Optional[str] = Query(None),
+    current_user: User = Depends(get_report_user)
+):
+    with _report_jobs_lock:
+        job = _report_jobs.get(report_id)
+    if not job or job.get("status") != "ready" or not job.get("file_bytes"):
+        raise HTTPException(status_code=404, detail="Report not ready or expired")
+
+    filename = job.get("filename", f"Attendance_Register_{report_id}.xlsx")
+    media_type = (
+        "text/csv"
+        if filename.endswith(".csv")
+        else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    return Response(
+        content=job["file_bytes"],
+        media_type=media_type,
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+@router.get("/{report_id}")
+def get_report_job_status(
+    report_id: str,
+    token: Optional[str] = Query(None),
+    current_user: User = Depends(get_report_user)
+):
+    with _report_jobs_lock:
+        job = _report_jobs.get(report_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Report request not found")
+
+    return {
+        "id": job["id"],
+        "status": job["status"],
+        "download_url": job.get("download_url"),
+        "error": job.get("error"),
+    }
+
 

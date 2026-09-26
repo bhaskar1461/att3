@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   Search,
@@ -44,6 +45,8 @@ export interface ClassAssignment {
 }
 
 export const ClassesPage: React.FC = () => {
+  const [searchParams] = useSearchParams();
+  const openId = searchParams.get('open');
   const queryClient = useQueryClient();
   const [search, setSearch] = useState<string>('');
   const [isDialogOpen, setIsDialogOpen] = useState<boolean>(false);
@@ -227,11 +230,21 @@ export const ClassesPage: React.FC = () => {
                     </td>
                   </tr>
                 ) : (
-                  filteredAssignments.map((a) => (
-                    <tr
-                      key={a.id}
-                      className="hover:bg-[#2a2b31]/30 transition-colors group"
-                    >
+                  filteredAssignments.map((a) => {
+                    const isMatch = Boolean(
+                      openId &&
+                        (String(a.id) === openId ||
+                          String(a.subject_id) === openId ||
+                          a.subject_code?.toLowerCase() === openId.toLowerCase())
+                    );
+
+                    return (
+                      <tr
+                        key={a.id}
+                        className={`hover:bg-[#2a2b31]/30 transition-all group ${
+                          isMatch ? 'bg-indigo-500/20 ring-1 ring-indigo-500/50 animate-pulse' : ''
+                        }`}
+                      >
                       <td className="py-2.5 px-3 font-medium text-white">
                         <div className="flex items-center gap-2">
                           <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
@@ -276,8 +289,9 @@ export const ClassesPage: React.FC = () => {
                         </Button>
                       </td>
                     </tr>
-                  ))
-                )}
+                  );
+                })
+              )}
               </tbody>
             </table>
           </div>
