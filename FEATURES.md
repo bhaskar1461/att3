@@ -3,23 +3,23 @@
 | Feature | Old Location | Endpoint (Annotated with live OpenAPI path) | Role | New Location | Status | Data Layer |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Authentication & Session** | `/login` (`Login.tsx`) | `/api/v1/auth/login`, `/api/v1/auth/me` | `student`, `teacher`, `admin` | `/features/auth` (`/login`) | VERIFIED | READY |
-| **System Dashboard Analytics** | `/admin` (`AdminDashboard.tsx`) | `/api/v1/admin/dashboard-stats` *(OpenAPI prefix `/api/v1`)* | `admin` | `/overview` (Registry Dashboard Shell) | MIGRATED | READY |
+| **System Dashboard Analytics** | `/admin` (`AdminDashboard.tsx`) | `/api/v1/admin/dashboard-stats` *(OpenAPI prefix `/api/v1`)* | `admin` | `/overview` (Registry Dashboard Shell) | VERIFIED | READY |
 | **System Audit Logs & Pagination** | `/admin` (`AdminDashboard.tsx`) | `/api/v1/admin/audit-logs` *(OpenAPI prefix `/api/v1`)* | `admin` | `/security` & Bell Dropdown | VERIFIED | READY |
 | **Scanner Health & Telemetry** | `/admin?tab=scanner_health` | `/api/v1/telemetry/scanner-health` *(OpenAPI router moved from admin to telemetry)* | `admin` | `/security` (`?tab=alerts`) | VERIFIED | READY |
-| **JNTUH R25 Compliance Rules** | `/admin?tab=compliance` | `/api/v1/admin/defaulters`, `/api/v1/compliance/condonations` | `admin` | `/features/compliance` (`/compliance`) | MIGRATED | READY |
-| **Student Directory & Management** | `/admin/management` | `/api/v1/admin/students` *(OpenAPI prefix `/api/v1`)* | `admin` | `/features/roster` (`/roster/students`) | MIGRATED | READY |
-| **Faculty Roster Setup** | `/admin/management` | `/api/v1/admin/teachers` *(OpenAPI prefix `/api/v1`)* | `admin` | `/features/roster` (`/roster/teachers`) | MIGRATED | READY |
-| **Class Register (Master Excel)** | `/admin` (`ClassExcelRegisterModal.tsx`) | `/api/v1/admin/assignments` *(OpenAPI prefix `/api/v1`)* | `admin` | `/attendance/day` (`LegacyClassExcelAdapter.tsx`) | MIGRATED-LEGACY | READY |
-| **Department Hierarchy Drilldown** | `/admin` (`DepartmentEnrollmentModal.tsx`) | `/api/v1/admin/departments`, `/api/v1/admin/sections`, `/api/v1/admin/subjects` | `admin` | `/roster/classes` (`LegacyDepartmentAdapter.tsx`) | MIGRATED-LEGACY | READY |
-| **Student Magic-Link Onboarding** | `/admin?tab=onboarding` | `/api/v1/admin/onboard/dispatch-links`, `/api/v1/admin/onboard/status` | `admin` | `/features/onboarding` (`/onboarding`) | MIGRATED | READY |
+| **JNTUH R25 Compliance Rules** | `/admin?tab=compliance` | `/api/v1/admin/defaulters`, `/api/v1/compliance/condonations` | `admin` | `/features/compliance` (`/compliance`) | VERIFIED | READY |
+| **Student Directory & Management** | `/admin/management` | `/api/v1/admin/students` *(OpenAPI prefix `/api/v1`)* | `admin` | `/features/roster` (`/roster/students`) | VERIFIED | READY |
+| **Faculty Roster Setup** | `/admin/management` | `/api/v1/admin/teachers` *(OpenAPI prefix `/api/v1`)* | `admin` | `/features/roster` (`/roster/teachers`) | VERIFIED | READY |
+| **Class Register (Master Excel)** | `/admin` (`ClassExcelRegisterModal.tsx`) | `/api/v1/admin/assignments` *(OpenAPI prefix `/api/v1`)* | `admin` | `/attendance/day` (Native Daily Period Grid) | VERIFIED | READY |
+| **Department Hierarchy Drilldown** | `/admin` (`DepartmentEnrollmentModal.tsx`) | `/api/v1/admin/departments`, `/api/v1/admin/sections`, `/api/v1/admin/subjects` | `admin` | `/roster/classes` (Native Drilldown Hierarchy) | VERIFIED | READY |
+| **Student Magic-Link Onboarding** | `/admin?tab=onboarding` | `/api/v1/admin/onboard/dispatch-links`, `/api/v1/admin/onboard/status` | `admin` | `/features/onboarding` (`/onboarding`) | VERIFIED | READY |
 | **Resend/Reject Magic-Link Onboarding** | `/admin?tab=onboarding` | `/api/v1/admin/onboard/resend/{roll}`, `/api/v1/admin/onboard/reject/{roll}` | `admin` | `/onboarding` & security queue table | VERIFIED | READY |
 | **Dismiss/Escalate Security Alert** | `/admin` (`AdminDashboard.tsx`) | `/api/v1/admin/security/alerts/{id}/dismiss`, `/api/v1/admin/security/alerts/{id}/escalate` | `admin` | `/security` & flagged events table | VERIFIED | READY |
 | **Approve/Reject Device Recovery** | `/admin?tab=devices` | `/api/v1/admin/onboard/rebind/{id}/approve`, `/api/v1/admin/onboard/rebind/{id}/deny` | `admin` | `/devices/recoveries` & security queue table | VERIFIED | READY |
-| **Credential Email Dispatch** | `/admin?tab=credentials` | `/api/v1/admin/credentials/dispatch` *(OpenAPI prefix `/api/v1`)* | `admin` | `/onboarding` (`/admin/settings`) | MIGRATED | READY |
-| **30-min Device Lockout Manager** | `/admin?tab=devices` | `/api/v1/devices/student-device-info`, `/api/v1/devices/bulk-reset`, `/api/v1/binding/status` | `admin`, `student` | `/devices/bindings` (`/devices/recoveries`) | MIGRATED | READY |
-| **Attendance Reports & Exports** | `/reports` (`Reports.tsx`) | `/api/v1/reports/low-attendance`, `/api/v1/reports/class-sheet-matrix`, `/api/v1/reports/export/{fmt}` | `admin`, `teacher` | `/features/reports` (`/reports`) | MIGRATED | READY |
-| **Teacher Active Classes & Scanners** | `/teacher` (`TeacherDashboard.tsx`) | `/api/v1/teacher/assigned-classes` *(OpenAPI path)* | `teacher` | `/roster/classes` & `/sessions/live` | MIGRATED | READY |
-| **Teacher QR Session Broadcast** | `/teacher` (`TeacherDashboard.tsx`) | `/api/v1/teacher/sessions/start`, `/api/v1/teacher/sessions/{id}/broadcast-token` | `teacher` | `/features/sessions` (`/sessions/live`) | MIGRATED | READY |
+| **Credential Email Dispatch** | `/admin?tab=credentials` | `/api/v1/admin/credentials/dispatch` *(OpenAPI prefix `/api/v1`)* | `admin` | `/onboarding` (`/admin/settings`) | VERIFIED | READY |
+| **30-min Device Lockout Manager** | `/admin?tab=devices` | `/api/v1/devices/student-device-info`, `/api/v1/devices/bulk-reset`, `/api/v1/binding/status` | `admin`, `student` | `/devices/bindings` (`/devices/recoveries`) | VERIFIED | READY |
+| **Attendance Reports & Exports** | `/reports` (`Reports.tsx`) | `/api/v1/reports/low-attendance`, `/api/v1/reports/class-sheet-matrix`, `/api/v1/reports/export/{fmt}` | `admin`, `teacher` | `/features/reports` (`/reports`) | VERIFIED | READY |
+| **Teacher Active Classes & Scanners** | `/teacher` (`TeacherDashboard.tsx`) | `/api/v1/teacher/assigned-classes` *(OpenAPI path)* | `teacher` | `/roster/classes` & `/sessions/live` | VERIFIED | READY |
+| **Teacher QR Session Broadcast** | `/teacher` (`TeacherDashboard.tsx`) | `/api/v1/teacher/sessions/start`, `/api/v1/teacher/sessions/{id}/broadcast-token` | `teacher` | `/features/sessions` (`/sessions/live`) | VERIFIED | READY |
 | **Student Profile & Dynamic QR** | `/student` (`StudentPortal.tsx`) | `/api/v1/student/profile`, `/api/v1/student/attendance-summary`, `/api/v1/student/qr-code` | `student` | `/student` (Student Portal Surface) | VERIFIED | READY |
 | **Public Projector QR Display** | `/qr` (`PublicQrDisplay.tsx`) | `/api/v1/qr-display-heartbeat` | `public` | `/qr` | VERIFIED | READY |
 | **Classroom QR Distance Calibrator** | `/qr-size-test` (`QrSizeTest.tsx`) | None (Local optical tool) | `public` | `/qr-size-test` | VERIFIED | READY |
