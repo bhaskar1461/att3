@@ -1,7 +1,7 @@
 import os
 import shutil
 import logging
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Request
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status, Request, Query
 from fastapi.responses import FileResponse
 
 logger = logging.getLogger("snist_erp.admin")
@@ -9,16 +9,17 @@ from sqlalchemy import or_, func, case, and_
 from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.core.database import get_db
 from app.api.auth import get_current_user, require_admin, require_teacher
-from app.core.security import get_password_hash
+from app.core.security import get_password_hash, get_server_ist_date, get_server_ist_datetime
 from app.core.config import settings
 from app.models.models import (
     User, UserRole, Department, AcademicYear, Section, Subject, 
     Teacher, Student, TeacherAssignment, SystemSettings, AuditLog, 
-    AttendanceRecord, AttendanceSession, AttendanceStatus, DeviceRegistration
+    AttendanceRecord, AttendanceSession, AttendanceStatus, DeviceRegistration,
+    BindingStatus, SessionStatus, DeviceAccountBinding
 )
 from app.services.excel_service import ExcelAttendanceService
 from app.services.qr_service import QRService
@@ -73,6 +74,33 @@ class AssignmentGSheetUpdate(BaseModel):
 class SettingsUpdate(BaseModel):
     settings: Dict[str, str]
 
+class OverviewStatsRollupResponse(BaseModel):
+    range: str
+    totalStudents: int
+    presentCount: int
+    absentCount: int
+    attendanceRate: float
+    rateDelta: float
+    liveSessions: int
+    flaggedDevices: int
+
+class HourlyHeatmapCellResponse(BaseModel):
+    day: str
+    hour: int
+    count: int
+    rate: float
+
+class CheckInSourceItemResponse(BaseModel):
+    source: str
+    count: int
+    percentage: float
+
+class AttendanceTrendItemResponse(BaseModel):
+    date: str
+    present: int
+    absent: int
+    percentage: float
+
 import time
 import threading
 
@@ -80,6 +108,32 @@ _DASHBOARD_STATS_CACHE: Optional[Dict[str, Any]] = None
 _DASHBOARD_STATS_CACHE_AT: float = 0.0
 _DASHBOARD_STATS_LOCK = threading.Lock()
 _DASHBOARD_STATS_TTL = 30.0  # 30-second TTL cache to eliminate redundant multi-query DB stalls
+
+_OVERVIEW_CACHE: Dict[str, Any] = {}
+_OVERVIEW_CACHE_LOCK = threading.Lock()
+_OVERVIEW_CACHE_TTL = 15.0  # 15-second TTL cache for overview aggregates
+
+def _parse_range_bounds(range_val: str, today_str: str):
+    try:
+        today = datetime.strptime(today_str, "%Y-%m-%d").date()
+    except Exception:
+        today = datetime.utcnow().date()
+        today_str = today.strftime("%Y-%m-%d")
+
+    if range_val == "week":
+        days = 7
+    elif range_val == "month":
+        days = 30
+    else:
+        days = 1
+
+    start_date = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    end_date = today_str
+
+    prev_end = (today - timedelta(days=days)).strftime("%Y-%m-%d")
+    prev_start = (today - timedelta(days=days * 2 - 1)).strftime("%Y-%m-%d")
+
+    return start_date, end_date, prev_start, prev_end
 
 # --- Dashboard & Stats ---
 @router.get("/dashboard-stats")
@@ -121,6 +175,353 @@ def get_dashboard_stats(db: Session = Depends(get_db), current_user: User = Depe
         _DASHBOARD_STATS_CACHE_AT = time.time()
 
     return stats
+
+# --- Modular Overview Aggregates ---
+@router.get("/overview/rollup", response_model=OverviewStatsRollupResponse)
+def get_overview_rollup(
+    range_val: str = Query("today", alias="range"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_teacher)
+):
+    """
+    Rollup KPI metrics: total students, present/absent counts, attendance rate %,
+    rate delta vs previous period, live open sessions, and flagged devices.
+    """
+    try:
+        norm_range = range_val if range_val in ["today", "week", "month"] else "today"
+        cache_key = f"rollup_{norm_range}"
+        now = time.time()
+        with _OVERVIEW_CACHE_LOCK:
+            if cache_key in _OVERVIEW_CACHE:
+                cached_data, cached_at = _OVERVIEW_CACHE[cache_key]
+                if now - cached_at < _OVERVIEW_CACHE_TTL:
+                    return cached_data
+
+        today_str = get_server_ist_date()
+        start_date, end_date, prev_start, prev_end = _parse_range_bounds(norm_range, today_str)
+
+        total_students = db.query(func.count(Student.id)).scalar() or 0
+
+        # Current period records
+        records = db.query(AttendanceRecord.status).filter(
+            AttendanceRecord.session_date >= start_date,
+            AttendanceRecord.session_date <= end_date
+        ).all()
+        total_rec = len(records)
+        present_count = sum(1 for (st,) in records if (st == AttendanceStatus.PRESENT or (hasattr(st, "value") and st.value in ["PRESENT", "4"])))
+        absent_count = total_rec - present_count
+
+        if total_rec > 0:
+            att_rate = round((present_count / total_rec) * 100.0, 1)
+        else:
+            att_rate = 100.0 if total_students > 0 else 0.0
+
+        # Previous period records for rateDelta
+        prev_records = db.query(AttendanceRecord.status).filter(
+            AttendanceRecord.session_date >= prev_start,
+            AttendanceRecord.session_date <= prev_end
+        ).all()
+        if prev_records:
+            prev_total = len(prev_records)
+            prev_present = sum(1 for (st,) in prev_records if (st == AttendanceStatus.PRESENT or (hasattr(st, "value") and st.value in ["PRESENT", "4"])))
+            prev_rate = (prev_present / prev_total) * 100.0 if prev_total > 0 else 100.0
+            rate_delta = round(att_rate - prev_rate, 1)
+        else:
+            rate_delta = 0.0
+
+        live_sessions = db.query(func.count(AttendanceSession.id)).filter(
+            AttendanceSession.status == SessionStatus.OPEN
+        ).scalar() or 0
+
+        flagged_bindings = db.query(func.count(DeviceAccountBinding.id)).filter(
+            DeviceAccountBinding.status == BindingStatus.LOCKED
+        ).scalar() or 0
+
+        flagged_audit = db.query(func.count(AuditLog.id)).filter(
+            AuditLog.event_type.in_(["ACCOUNT_SWITCH_ATTEMPT", "DEVICE_LOCKOUT", "PRIVESC_ATTEMPT"])
+        ).scalar() or 0
+
+        flagged_devices = max(flagged_bindings, flagged_audit)
+
+        result = {
+            "range": norm_range,
+            "totalStudents": total_students,
+            "presentCount": present_count,
+            "absentCount": absent_count,
+            "attendanceRate": att_rate,
+            "rateDelta": rate_delta,
+            "liveSessions": live_sessions,
+            "flaggedDevices": flagged_devices
+        }
+
+        with _OVERVIEW_CACHE_LOCK:
+            _OVERVIEW_CACHE[cache_key] = (result, time.time())
+
+        return result
+    except Exception as e:
+        logger.exception(f"Error in get_overview_rollup: {e}")
+        return {
+            "range": range_val if range_val in ["today", "week", "month"] else "today",
+            "totalStudents": 0,
+            "presentCount": 0,
+            "absentCount": 0,
+            "attendanceRate": 0.0,
+            "rateDelta": 0.0,
+            "liveSessions": 0,
+            "flaggedDevices": 0
+        }
+
+
+@router.get("/overview/heatmap", response_model=List[HourlyHeatmapCellResponse])
+def get_overview_heatmap(
+    range_val: str = Query("today", alias="range"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_teacher)
+):
+    """
+    Scan density and attendance rate distribution across days of week and hourly slots.
+    """
+    try:
+        norm_range = range_val if range_val in ["today", "week", "month"] else "today"
+        cache_key = f"heatmap_{norm_range}"
+        now = time.time()
+        with _OVERVIEW_CACHE_LOCK:
+            if cache_key in _OVERVIEW_CACHE:
+                cached_data, cached_at = _OVERVIEW_CACHE[cache_key]
+                if now - cached_at < _OVERVIEW_CACHE_TTL:
+                    return cached_data
+
+        today_str = get_server_ist_date()
+        start_date, end_date, _, _ = _parse_range_bounds(norm_range, today_str)
+
+        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        hours = [9, 10, 11, 12, 13, 14, 15, 16]
+        grid = { (d, h): {"count": 0, "present": 0} for d in days for h in hours }
+
+        records = db.query(
+            AttendanceRecord.session_date,
+            AttendanceRecord.scanned_at,
+            AttendanceRecord.status
+        ).filter(
+            AttendanceRecord.session_date >= start_date,
+            AttendanceRecord.session_date <= end_date
+        ).all()
+
+        for s_date, s_at, status_val in records:
+            day_name = None
+            hour_val = 9
+            if s_at:
+                day_name = s_at.strftime("%a")
+                hour_val = s_at.hour
+            elif s_date:
+                try:
+                    dt = datetime.strptime(s_date, "%Y-%m-%d")
+                    day_name = dt.strftime("%a")
+                except Exception:
+                    pass
+
+            if day_name in days and hour_val in hours:
+                grid[(day_name, hour_val)]["count"] += 1
+                if status_val == AttendanceStatus.PRESENT or (hasattr(status_val, "value") and status_val.value in ["PRESENT", "4"]):
+                    grid[(day_name, hour_val)]["present"] += 1
+
+        cells = []
+        for d in days:
+            for h in hours:
+                cnt = grid[(d, h)]["count"]
+                pres = grid[(d, h)]["present"]
+                rate = round((pres / cnt) * 100.0, 1) if cnt > 0 else 0.0
+                cells.append({
+                    "day": d,
+                    "hour": h,
+                    "count": cnt,
+                    "rate": rate
+                })
+
+        with _OVERVIEW_CACHE_LOCK:
+            _OVERVIEW_CACHE[cache_key] = (cells, time.time())
+
+        return cells
+    except Exception as e:
+        logger.exception(f"Error in get_overview_heatmap: {e}")
+        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        hours = [9, 10, 11, 12, 13, 14, 15, 16]
+        return [{"day": d, "hour": h, "count": 0, "rate": 0.0} for d in days for h in hours]
+
+
+@router.get("/overview/sources", response_model=List[CheckInSourceItemResponse])
+def get_overview_sources(
+    range_val: str = Query("today", alias="range"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_teacher)
+):
+    """
+    Breakdown of check-in methods (qr, face, manual, offline) with count and percentage.
+    """
+    try:
+        norm_range = range_val if range_val in ["today", "week", "month"] else "today"
+        cache_key = f"sources_{norm_range}"
+        now = time.time()
+        with _OVERVIEW_CACHE_LOCK:
+            if cache_key in _OVERVIEW_CACHE:
+                cached_data, cached_at = _OVERVIEW_CACHE[cache_key]
+                if now - cached_at < _OVERVIEW_CACHE_TTL:
+                    return cached_data
+
+        today_str = get_server_ist_date()
+        start_date, end_date, _, _ = _parse_range_bounds(norm_range, today_str)
+
+        records = db.query(
+            AttendanceRecord.scan_mode,
+            AttendanceRecord.entry_method,
+            AttendanceRecord.selfie_status,
+            AttendanceRecord.manual_marked_by_id,
+            AttendanceRecord.manual_reason
+        ).filter(
+            AttendanceRecord.session_date >= start_date,
+            AttendanceRecord.session_date <= end_date
+        ).all()
+
+        qr_count = 0
+        face_count = 0
+        manual_count = 0
+        offline_count = 0
+
+        for sm, em, selfie_st, manual_by, manual_rs in records:
+            sm_str = (sm or "").upper()
+            em_str = (em or "").upper()
+            selfie_str = (selfie_st or "").upper()
+
+            if selfie_str in ["ACCEPTED", "PASSED"] or sm_str == "FACE":
+                face_count += 1
+            elif manual_by is not None or manual_rs is not None or sm_str == "MANUAL":
+                manual_count += 1
+            elif "OFFLINE" in sm_str or "OFFLINE" in em_str:
+                offline_count += 1
+            else:
+                qr_count += 1
+
+        total = qr_count + face_count + manual_count + offline_count
+        if total > 0:
+            qr_pct = round((qr_count / total) * 100.0, 1)
+            face_pct = round((face_count / total) * 100.0, 1)
+            manual_pct = round((manual_count / total) * 100.0, 1)
+            offline_pct = round(100.0 - (qr_pct + face_pct + manual_pct), 1)
+        else:
+            qr_pct = face_pct = manual_pct = offline_pct = 0.0
+
+        items = [
+            {"source": "qr", "count": qr_count, "percentage": qr_pct},
+            {"source": "face", "count": face_count, "percentage": face_pct},
+            {"source": "manual", "count": manual_count, "percentage": manual_pct},
+            {"source": "offline", "count": offline_count, "percentage": offline_pct},
+        ]
+
+        with _OVERVIEW_CACHE_LOCK:
+            _OVERVIEW_CACHE[cache_key] = (items, time.time())
+
+        return items
+    except Exception as e:
+        logger.exception(f"Error in get_overview_sources: {e}")
+        return [
+            {"source": "qr", "count": 0, "percentage": 0.0},
+            {"source": "face", "count": 0, "percentage": 0.0},
+            {"source": "manual", "count": 0, "percentage": 0.0},
+            {"source": "offline", "count": 0, "percentage": 0.0},
+        ]
+
+
+@router.get("/overview/trends", response_model=List[AttendanceTrendItemResponse])
+def get_overview_trends(
+    range_val: str = Query("week", alias="range"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_teacher)
+):
+    """
+    Time-series trend of present vs absent attendance counts and percentage.
+    """
+    try:
+        norm_range = range_val if range_val in ["today", "week", "month"] else "week"
+        cache_key = f"trends_{norm_range}"
+        now = time.time()
+        with _OVERVIEW_CACHE_LOCK:
+            if cache_key in _OVERVIEW_CACHE:
+                cached_data, cached_at = _OVERVIEW_CACHE[cache_key]
+                if now - cached_at < _OVERVIEW_CACHE_TTL:
+                    return cached_data
+
+        today_str = get_server_ist_date()
+        try:
+            today = datetime.strptime(today_str, "%Y-%m-%d").date()
+        except Exception:
+            today = datetime.utcnow().date()
+            today_str = today.strftime("%Y-%m-%d")
+
+        items = []
+        if norm_range == "today":
+            hours = [9, 10, 11, 12, 13, 14, 15, 16]
+            hour_grid = {h: {"present": 0, "absent": 0} for h in hours}
+
+            records = db.query(AttendanceRecord.scanned_at, AttendanceRecord.status).filter(
+                AttendanceRecord.session_date == today_str
+            ).all()
+
+            for s_at, st in records:
+                h = s_at.hour if s_at else 9
+                if h in hour_grid:
+                    if st == AttendanceStatus.PRESENT or (hasattr(st, "value") and st.value in ["PRESENT", "4"]):
+                        hour_grid[h]["present"] += 1
+                    else:
+                        hour_grid[h]["absent"] += 1
+
+            for h in hours:
+                p = hour_grid[h]["present"]
+                a = hour_grid[h]["absent"]
+                tot = p + a
+                pct = round((p / tot) * 100.0, 1) if tot > 0 else 0.0
+                items.append({
+                    "date": f"{h:02d}:00",
+                    "present": p,
+                    "absent": a,
+                    "percentage": pct
+                })
+        else:
+            num_days = 7 if norm_range == "week" else 30
+            date_list = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(num_days - 1, -1, -1)]
+            date_grid = {d: {"present": 0, "absent": 0} for d in date_list}
+
+            start_d = date_list[0]
+            records = db.query(AttendanceRecord.session_date, AttendanceRecord.status).filter(
+                AttendanceRecord.session_date >= start_d,
+                AttendanceRecord.session_date <= today_str
+            ).all()
+
+            for s_date, st in records:
+                if s_date in date_grid:
+                    if st == AttendanceStatus.PRESENT or (hasattr(st, "value") and st.value in ["PRESENT", "4"]):
+                        date_grid[s_date]["present"] += 1
+                    else:
+                        date_grid[s_date]["absent"] += 1
+
+            for d in date_list:
+                p = date_grid[d]["present"]
+                a = date_grid[d]["absent"]
+                tot = p + a
+                pct = round((p / tot) * 100.0, 1) if tot > 0 else 0.0
+                items.append({
+                    "date": d,
+                    "present": p,
+                    "absent": a,
+                    "percentage": pct
+                })
+
+        with _OVERVIEW_CACHE_LOCK:
+            _OVERVIEW_CACHE[cache_key] = (items, time.time())
+
+        return items
+    except Exception as e:
+        logger.exception(f"Error in get_overview_trends: {e}")
+        return []
 
 # --- Enrollment Analytics & Mermaid Drill-Down ---
 @router.get("/analytics/enrollment")
