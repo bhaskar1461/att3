@@ -82,15 +82,29 @@ export const App: React.FC = () => {
                 <Routes>
                   <Route path="/login" element={<Login />} />
 
-                  {/* Phase 1 Dashboard Shell: Direct Standalone Route */}
-                  <Route path="/dashboard" element={<DashboardPage />} />
-                  <Route path="/overview" element={<DashboardPage />} />
+                  {/* Phase 1 Dashboard Shell: Direct Standalone Route (Super Admin Only) */}
+                  <Route
+                    path="/dashboard"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPER_ADMIN']}>
+                        <DashboardPage />
+                      </ProtectedRoute>
+                    }
+                  />
+                  <Route
+                    path="/overview"
+                    element={
+                      <ProtectedRoute allowedRoles={['SUPER_ADMIN']}>
+                        <DashboardPage />
+                      </ProtectedRoute>
+                    }
+                  />
 
                   {/* Super Admin Dashboard (Phase 1+ New Dark Admin Shell) */}
                   <Route
                     path="/admin"
                     element={
-                      <ProtectedRoute allowedRoles={['SUPER_ADMIN', 'TEACHER']}>
+                      <ProtectedRoute allowedRoles={['SUPER_ADMIN']}>
                         <DashboardPage />
                       </ProtectedRoute>
                     }

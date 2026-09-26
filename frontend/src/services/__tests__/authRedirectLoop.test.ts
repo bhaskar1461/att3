@@ -123,6 +123,8 @@ async function runTests() {
   assert(getSafeNextDestination('?next=/reports', 'SUPER_ADMIN') === '/reports', 'SUPER_ADMIN can be redirected to /reports');
 
   assert(getSafeNextDestination('?next=/admin', 'TEACHER') === null, 'TEACHER cannot be redirected to /admin');
+  assert(getSafeNextDestination('?next=/overview', 'TEACHER') === null, 'TEACHER cannot be redirected to /overview');
+  assert(getSafeNextDestination('?next=/dashboard', 'TEACHER') === null, 'TEACHER cannot be redirected to /dashboard');
   assert(getSafeNextDestination('?next=/teacher', 'TEACHER') === '/teacher', 'TEACHER can be redirected to /teacher');
   assert(getSafeNextDestination('?next=/reports', 'TEACHER') === '/reports', 'TEACHER can be redirected to /reports');
 

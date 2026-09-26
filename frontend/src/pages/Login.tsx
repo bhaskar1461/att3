@@ -34,10 +34,6 @@ export function isRouteAllowedForRole(path: string, role?: string): boolean {
       cleanPath.startsWith('/teacher') ||
       cleanPath.startsWith('/reports') ||
       cleanPath.startsWith('/qr-size-test') ||
-      cleanPath.startsWith('/overview') ||
-      cleanPath.startsWith('/dashboard') ||
-      cleanPath.startsWith('/roster') ||
-      cleanPath.startsWith('/sessions') ||
       cleanPath.startsWith('/attendance')
     );
   }
@@ -143,7 +139,7 @@ export const Login: React.FC = () => {
             } else if (userData.role === 'SUPER_ADMIN') {
               performAuthRedirect('/overview');
             } else if (userData.role === 'TEACHER') {
-              performAuthRedirect('/overview');
+              performAuthRedirect('/teacher');
             } else {
               performAuthRedirect('/student?scan=true');
             }

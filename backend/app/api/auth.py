@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status, BackgroundTasks
+from starlette.concurrency import run_in_threadpool
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session, joinedload
@@ -433,7 +434,7 @@ async def login_for_access_token(request: Request, background_tasks: BackgroundT
     # 2. Verify password (strict - no hardcoded student backdoor)
     is_valid_pw = False
     if user:
-        is_valid_pw = verify_password(password, user.password_hash)
+        is_valid_pw = await run_in_threadpool(verify_password, password, user.password_hash)
         # Convenience fallback for demo accounts: tolerate mobile keyboard case shifts
         if not is_valid_pw and is_demo_account(user.username):
             if user.role == UserRole.STUDENT and password.lower() == "demostudent@2026":
@@ -452,7 +453,7 @@ async def login_for_access_token(request: Request, background_tasks: BackgroundT
                     )
                 ).first()
                 if onboarding_rec and onboarding_rec.pin_hash:
-                    if verify_password(password, onboarding_rec.pin_hash):
+                    if await run_in_threadpool(verify_password, password, onboarding_rec.pin_hash):
                         is_valid_pw = True
                         user.password_hash = onboarding_rec.pin_hash
                         if onboarding_rec.state != OnboardingState.ACTIVATED:
@@ -473,7 +474,7 @@ async def login_for_access_token(request: Request, background_tasks: BackgroundT
                     )
                 ).order_by(CredentialItem.id.desc()).first()
                 if cred_item and cred_item.temp_password_hash:
-                    if verify_password(password, cred_item.temp_password_hash):
+                    if await run_in_threadpool(verify_password, password, cred_item.temp_password_hash):
                         is_valid_pw = True
                         user.password_hash = cred_item.temp_password_hash
                         db.commit()
