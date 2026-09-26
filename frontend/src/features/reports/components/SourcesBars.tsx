@@ -28,7 +28,8 @@ export const SourcesBars: React.FC<SourcesBarsProps> = ({ methodCounts, classNam
 
   return (
     <div
-      aria-hidden="true"
+      role="img"
+      aria-label={`Check-in method volume bars: QR ${qr}, Face ${face}, Kiosk ${kiosk}, Manual ${manual}.`}
       className={`h-16 flex items-end justify-center gap-2.5 py-1 ${className}`}
     >
       {barHeights.map((height, idx) => (

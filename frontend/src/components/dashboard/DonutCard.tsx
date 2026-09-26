@@ -58,9 +58,9 @@ export const DonutCard: React.FC<DonutCardProps> = ({
     <Card className={`rounded-[12px] bg-[#1e1f24] border border-[#2a2b31] p-5 flex flex-col justify-between ${className}`}>
       {/* Header */}
       <CardHeader className="p-0 pb-3 border-b border-[#2a2b31]/40 flex flex-row items-center justify-between">
-        <h3 className="text-[15px] font-semibold text-white tracking-tight">
+        <h2 className="text-[15px] font-semibold text-white tracking-tight">
           {title}
-        </h3>
+        </h2>
         {progress && (
           <span className="text-xs font-mono text-[#9ca3af]">
             {progress.done}/{progress.total}
@@ -86,7 +86,11 @@ export const DonutCard: React.FC<DonutCardProps> = ({
         )}
 
         {/* Recharts Pie Chart with Absolute-Centered Count */}
-        <div className="relative w-full h-44 flex items-center justify-center">
+        <div
+          role="img"
+          aria-label={`${title}: ${centerValue} total items. ${segments.map((s) => `${s.label}: ${s.value}`).join(', ')}.`}
+          className="relative w-full h-44 flex items-center justify-center"
+        >
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie

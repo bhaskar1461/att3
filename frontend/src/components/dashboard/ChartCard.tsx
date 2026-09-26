@@ -29,9 +29,9 @@ export const ChartCard: React.FC<ChartCardProps> = ({
       {/* Header Row: Title (15px semibold) + toolbar slot + kebab */}
       <CardHeader className="p-0 pb-4 flex flex-row items-center justify-between gap-3 border-b border-[#2a2b31]/40">
         <div>
-          <h3 className="text-[15px] font-semibold text-white tracking-tight leading-none">
+          <h2 className="text-[15px] font-semibold text-white tracking-tight leading-none">
             {title}
-          </h3>
+          </h2>
           {subtitle && (
             <p className="text-xs text-[#9ca3af] mt-1">{subtitle}</p>
           )}

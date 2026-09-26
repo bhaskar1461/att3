@@ -67,7 +67,34 @@ export const HeatmapGrid: React.FC<HeatmapGridProps> = ({
   const isAllZero = totalScans === 0;
 
   return (
-    <div className={`relative space-y-2 select-none ${className}`}>
+    <div
+      role="img"
+      aria-label={`Attendance scan intensity heatmap: ${totalScans} total scans across 7 days and 6 hour intervals.`}
+      className={`relative space-y-2 select-none ${className}`}
+    >
+      {/* Screen reader accessible table representation */}
+      <table className="sr-only">
+        <caption>Weekly attendance check-in scan distribution by hour and day</caption>
+        <thead>
+          <tr>
+            <th scope="col">Hour</th>
+            {HEATMAP_DAY_LABELS.map((day) => (
+              <th key={day} scope="col">{day}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {matrix.map((row, rowIdx) => (
+            <tr key={rowIdx}>
+              <th scope="row">{HEATMAP_HOUR_LABELS[rowIdx]}</th>
+              {row.map((cell, colIdx) => (
+                <td key={colIdx}>{cell.count} scans</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
       {/* Header Days Row: Mon..Sun */}
       <div className="flex items-center gap-2">
         <div className="w-10 shrink-0" />
