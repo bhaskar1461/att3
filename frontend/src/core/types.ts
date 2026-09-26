@@ -14,7 +14,13 @@ export type Permission =
   | 'devices.act'
   | 'onboarding.act'
   | 'sessions.broadcast'
-  | 'users.manage';
+  | 'users.manage'
+  | (string & {});
+
+export interface DeclaredPermission {
+  key: string;
+  roles: Role[];
+}
 
 export interface NavEntry {
   id: string;
@@ -53,5 +59,5 @@ export interface FeatureManifest {
   nav?: NavEntry[];
   routes?: RouteEntry[];
   widgets?: WidgetEntry[];
-  permissions?: Permission[];
+  permissions?: Array<DeclaredPermission | Permission>;
 }

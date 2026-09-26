@@ -1,5 +1,6 @@
 import { FeatureManifest } from './types';
 import { navRegistry, routeRegistry, widgetRegistry } from './registries';
+import { registerPermissions } from './roles';
 
 // Auto-discovery of all feature manifests located in src/features/*/manifest.ts
 const manifests = import.meta.glob<{ default?: FeatureManifest; manifest?: FeatureManifest } | FeatureManifest>(
@@ -16,6 +17,9 @@ export function initializeFeatures(): void {
       (raw as any)?.default ?? (raw as any)?.manifest ?? (raw as FeatureManifest);
 
     if (manifest && typeof manifest === 'object' && manifest.name) {
+      if (manifest.permissions && Array.isArray(manifest.permissions)) {
+        registerPermissions(manifest.permissions);
+      }
       if (manifest.nav && Array.isArray(manifest.nav)) {
         navRegistry.register(manifest.nav);
       }
