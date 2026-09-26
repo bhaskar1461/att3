@@ -1,6 +1,8 @@
 import React from 'react';
 
-export type Role = 'student' | 'teacher' | 'admin';
+export type CanonicalRole = 'SUPER_ADMIN' | 'TEACHER' | 'STUDENT';
+export type LegacyRole = 'admin' | 'teacher' | 'student';
+export type Role = LegacyRole | CanonicalRole;
 
 export type Permission =
   | 'roster.read'
@@ -56,6 +58,7 @@ export interface WidgetEntry {
 
 export interface FeatureManifest {
   name: string;
+  roles?: Role[];
   nav?: NavEntry[];
   routes?: RouteEntry[];
   widgets?: WidgetEntry[];

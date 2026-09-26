@@ -1,4 +1,4 @@
-import { Role, Permission, DeclaredPermission } from './types';
+import { Role, LegacyRole, Permission, DeclaredPermission } from './types';
 
 const ALL_PERMISSIONS: Permission[] = [
   'roster.read',
@@ -15,7 +15,14 @@ const ALL_PERMISSIONS: Permission[] = [
   'users.manage',
 ];
 
-const MATRIX: Record<Role, Permission[]> = {
+export const normalizeRole = (role: Role): LegacyRole => {
+  if (role === 'SUPER_ADMIN') return 'admin';
+  if (role === 'TEACHER') return 'teacher';
+  if (role === 'STUDENT') return 'student';
+  return role as LegacyRole;
+};
+
+const MATRIX: Record<LegacyRole, Permission[]> = {
   admin: [...ALL_PERMISSIONS],
   teacher: [
     'roster.read',
@@ -34,9 +41,10 @@ export const registerPermissions = (declared: Array<DeclaredPermission | Permiss
     } else if (item && typeof item === 'object') {
       const { key, roles } = item;
       for (const r of roles) {
-        if (!MATRIX[r]) MATRIX[r] = [];
-        if (!MATRIX[r].includes(key)) {
-          MATRIX[r].push(key);
+        const norm = normalizeRole(r);
+        if (!MATRIX[norm]) MATRIX[norm] = [];
+        if (!MATRIX[norm].includes(key)) {
+          MATRIX[norm].push(key);
         }
       }
     }
@@ -44,5 +52,6 @@ export const registerPermissions = (declared: Array<DeclaredPermission | Permiss
 };
 
 export const can = (role: Role, p: Permission): boolean => {
-  return MATRIX[role]?.includes(p) ?? false;
+  const norm = normalizeRole(role);
+  return MATRIX[norm]?.includes(p) ?? false;
 };
