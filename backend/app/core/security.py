@@ -3,10 +3,40 @@ import base64
 import hashlib
 import hmac
 import time
+import threading
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 from app.core.config import settings
+
+# In-memory LRU/TTL Password Verification Cache (Phase 2 Scalability)
+_PWD_VERIFY_CACHE: Dict[str, Tuple[bool, float]] = {}
+_PWD_VERIFY_CACHE_LOCK = threading.Lock()
+_PWD_VERIFY_CACHE_TTL = 300.0  # 5 minutes
+_PWD_VERIFY_CACHE_MAX_ENTRIES = 4096
+
+def _compute_pwd_cache_key(plain_password: str, hashed_password: str) -> str:
+    """
+    Computes an HMAC-SHA256 digest of plain password and hash pair using SECRET_KEY.
+    Prevents cache poisoning and cross-tenant derivability.
+    """
+    secret = getattr(settings, "SECRET_KEY", "attendance_salt_2026").encode("utf-8")
+    payload = f"{plain_password}\0{hashed_password}".encode("utf-8")
+    return hmac.new(secret, payload, hashlib.sha256).hexdigest()
+
+def clear_password_verify_cache() -> None:
+    """Clears all cached password verification entries."""
+    with _PWD_VERIFY_CACHE_LOCK:
+        _PWD_VERIFY_CACHE.clear()
+
+def get_password_verify_cache_stats() -> dict:
+    """Returns telemetry on the in-memory password verification cache."""
+    with _PWD_VERIFY_CACHE_LOCK:
+        return {
+            "size": len(_PWD_VERIFY_CACHE),
+            "max_size": _PWD_VERIFY_CACHE_MAX_ENTRIES,
+            "ttl_seconds": _PWD_VERIFY_CACHE_TTL
+        }
 
 # Password hashing & verification
 try:
@@ -19,17 +49,46 @@ try:
     def verify_password(plain_password: str, hashed_password: str) -> bool:
         if not plain_password or not hashed_password:
             return False
+
+        # 1. Fast-path: Check in-memory verification cache (< 0.002ms)
+        cache_key = _compute_pwd_cache_key(plain_password, hashed_password)
+        now = time.time()
+        with _PWD_VERIFY_CACHE_LOCK:
+            if cache_key in _PWD_VERIFY_CACHE:
+                is_valid, cached_at = _PWD_VERIFY_CACHE[cache_key]
+                if (now - cached_at) < _PWD_VERIFY_CACHE_TTL:
+                    return is_valid
+                else:
+                    _PWD_VERIFY_CACHE.pop(cache_key, None)
+
+        # 2. Slow-path: Cryptographic verification
+        is_valid = False
         if hashed_password.startswith("$2b$") or hashed_password.startswith("$2a$"):
             try:
                 if bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8')):
-                    return True
+                    is_valid = True
             except Exception:
                 pass
-        salt = "attendance_salt_2026"
-        sha_hash = hashlib.sha256(f"{plain_password}{salt}".encode()).hexdigest()
-        if sha_hash == hashed_password:
-            return True
-        return False
+
+        if not is_valid:
+            salt = "attendance_salt_2026"
+            sha_hash = hashlib.sha256(f"{plain_password}{salt}".encode()).hexdigest()
+            if sha_hash == hashed_password:
+                is_valid = True
+
+        # 3. Cache positive verifications only (evicting oldest if at capacity)
+        if is_valid:
+            with _PWD_VERIFY_CACHE_LOCK:
+                if len(_PWD_VERIFY_CACHE) >= _PWD_VERIFY_CACHE_MAX_ENTRIES:
+                    cutoff = now - (_PWD_VERIFY_CACHE_TTL / 2)
+                    keys_to_remove = [k for k, (_, ts) in _PWD_VERIFY_CACHE.items() if ts < cutoff]
+                    if not keys_to_remove:
+                        keys_to_remove = list(_PWD_VERIFY_CACHE.keys())[:int(_PWD_VERIFY_CACHE_MAX_ENTRIES * 0.2)]
+                    for k in keys_to_remove:
+                        _PWD_VERIFY_CACHE.pop(k, None)
+                _PWD_VERIFY_CACHE[cache_key] = (True, now)
+
+        return is_valid
 except ImportError:
     def get_password_hash(password: str) -> str:
         salt = "attendance_salt_2026"
@@ -38,11 +97,33 @@ except ImportError:
     def verify_password(plain_password: str, hashed_password: str) -> bool:
         if not plain_password or not hashed_password:
             return False
+
+        cache_key = _compute_pwd_cache_key(plain_password, hashed_password)
+        now = time.time()
+        with _PWD_VERIFY_CACHE_LOCK:
+            if cache_key in _PWD_VERIFY_CACHE:
+                is_valid, cached_at = _PWD_VERIFY_CACHE[cache_key]
+                if (now - cached_at) < _PWD_VERIFY_CACHE_TTL:
+                    return is_valid
+                else:
+                    _PWD_VERIFY_CACHE.pop(cache_key, None)
+
         salt = "attendance_salt_2026"
         sha_hash = hashlib.sha256(f"{plain_password}{salt}".encode()).hexdigest()
-        if sha_hash == hashed_password:
-            return True
-        return False
+        is_valid = (sha_hash == hashed_password)
+
+        if is_valid:
+            with _PWD_VERIFY_CACHE_LOCK:
+                if len(_PWD_VERIFY_CACHE) >= _PWD_VERIFY_CACHE_MAX_ENTRIES:
+                    cutoff = now - (_PWD_VERIFY_CACHE_TTL / 2)
+                    keys_to_remove = [k for k, (_, ts) in _PWD_VERIFY_CACHE.items() if ts < cutoff]
+                    if not keys_to_remove:
+                        keys_to_remove = list(_PWD_VERIFY_CACHE.keys())[:int(_PWD_VERIFY_CACHE_MAX_ENTRIES * 0.2)]
+                    for k in keys_to_remove:
+                        _PWD_VERIFY_CACHE.pop(k, None)
+                _PWD_VERIFY_CACHE[cache_key] = (True, now)
+
+        return is_valid
 
 # JWT Token implementation
 try:

@@ -412,31 +412,16 @@ class ShortTokenService:
             if now_ts is None:
                 now_ts = time.time()
 
-            from app.models.models import SessionStatus
-            sess = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
-            if not sess or sess.status == SessionStatus.LOCKED:
-                raise TokenValidationError(
-                    code="QR-SESSION-END",
-                    message="This class session has ended (locked). See your faculty if you believe this is wrong. (Code: QR-SESSION-END)",
-                    server_now=now_ts,
-                    epoch_delta=launch_data.get("epoch_delta", 0),
-                    session_status="LOCKED",
-                    session_id=session_id
-                )
-
-            # Check if token or session has been deactivated
+            # Fast-path: Check _SHORT_CODE_CACHE (< 0.05ms, ZERO DB queries)
             is_active = True
+            period_count = None
             with _CACHE_LOCK:
                 cached = _SHORT_CODE_CACHE.get(code)
-                if cached and not cached.get("is_active", True):
-                    is_active = False
-
-            if is_active:
-                reg = db.query(ShortTokenRegistry).filter(
-                    ShortTokenRegistry.short_code == code
-                ).first()
-                if reg and not reg.is_active:
-                    is_active = False
+                if cached is not None:
+                    if not cached.get("is_active", True):
+                        is_active = False
+                    else:
+                        period_count = cached.get("period_count", 1)
 
             if not is_active:
                 raise TokenValidationError(
@@ -448,8 +433,44 @@ class ShortTokenService:
                     session_id=session_id
                 )
 
-            from app.api.teacher import _extract_period_count
-            period_count = _extract_period_count(sess.period) if sess and sess.period else 1
+            # Slow-path: DB check on cache miss (e.g. server restart)
+            if period_count is None:
+                from app.models.models import SessionStatus
+                sess = db.query(AttendanceSession).filter(AttendanceSession.id == session_id).first()
+                if not sess or sess.status == SessionStatus.LOCKED:
+                    raise TokenValidationError(
+                        code="QR-SESSION-END",
+                        message="This class session has ended (locked). See your faculty if you believe this is wrong. (Code: QR-SESSION-END)",
+                        server_now=now_ts,
+                        epoch_delta=launch_data.get("epoch_delta", 0),
+                        session_status="LOCKED",
+                        session_id=session_id
+                    )
+
+                reg = db.query(ShortTokenRegistry).filter(
+                    ShortTokenRegistry.short_code == code
+                ).first()
+                if reg and not reg.is_active:
+                    raise TokenValidationError(
+                        code="QR-SESSION-END",
+                        message="This class session has ended (locked). See your faculty if you believe this is wrong. (Code: QR-SESSION-END)",
+                        server_now=now_ts,
+                        epoch_delta=launch_data.get("epoch_delta", 0),
+                        session_status="LOCKED",
+                        session_id=session_id
+                    )
+
+                from app.api.teacher import _extract_period_count
+                period_count = _extract_period_count(sess.period) if sess and sess.period else 1
+
+                with _CACHE_LOCK:
+                    _SHORT_CODE_CACHE[code] = {
+                        "session_id": session_id,
+                        "period_count": period_count,
+                        "issued_slot": slot_v,
+                        "expires_slot": slot_v + 100,
+                        "is_active": True
+                    }
 
             return {
                 "session_id": session_id,

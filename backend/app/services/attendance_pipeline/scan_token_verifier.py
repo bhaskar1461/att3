@@ -1,6 +1,8 @@
 import time
 import logging
-from typing import Dict, Any, Tuple
+import threading
+import hashlib
+from typing import Dict, Any, Tuple, Optional
 from fastapi import HTTPException, status, Request
 from sqlalchemy.orm import Session
 
@@ -10,6 +12,42 @@ from app.models.models import SecurityEventType
 from app.core.device_security import log_security_audit_event
 
 logger = logging.getLogger("snist_erp.scan_telemetry")
+
+# In-memory Pre-Filter Cache for recent invalid/expired tokens (sub-0.05ms fast rejection)
+_INVALID_TOKEN_PREFILTER_CACHE: Dict[str, Tuple[int, dict, float]] = {}
+_PREFILTER_LOCK = threading.Lock()
+_PREFILTER_TTL = 15.0  # 15 seconds
+_PREFILTER_MAX_ENTRIES = 2048
+
+
+def _compute_token_cache_key(req: Any) -> str:
+    """Computes a normalized digest for token pre-filter lookup."""
+    raw = (
+        getattr(req, "claim_token", None)
+        or getattr(req, "session_token", None)
+        or getattr(req, "short_code", None)
+        or ""
+    )
+    raw = str(raw).strip()
+    v_val = str(getattr(req, "v", "") or "")
+    combined = f"{raw}:{v_val}"
+    return hashlib.sha256(combined.encode("utf-8")).hexdigest()[:32]
+
+
+def clear_invalid_token_prefilter_cache() -> None:
+    """Clears all cached invalid token pre-filter entries."""
+    with _PREFILTER_LOCK:
+        _INVALID_TOKEN_PREFILTER_CACHE.clear()
+
+
+def get_invalid_token_prefilter_stats() -> dict:
+    """Returns telemetry stats on the in-memory token pre-filter cache."""
+    with _PREFILTER_LOCK:
+        return {
+            "size": len(_INVALID_TOKEN_PREFILTER_CACHE),
+            "max_size": _PREFILTER_MAX_ENTRIES,
+            "ttl_seconds": _PREFILTER_TTL
+        }
 
 
 def verify_and_resolve_scan_token(
@@ -24,14 +62,33 @@ def verify_and_resolve_scan_token(
     """
     Step 0c: Dual-Format verification (< 0.05ms memory cache, ZERO DB round-trips for hits).
     Validates either rotating claim token or HMAC short token.
+    Fast-rejects replayed/invalid tokens from in-memory prefilter in < 0.02ms.
     Returns:
         (token_data, claim_consumed_here, t_hmac_ms)
     """
     t_hmac_start = time.perf_counter()
     claim_consumed_here = False
+    now = now_ts or time.time()
+    cache_key = _compute_token_cache_key(req)
+
+    # 1. Fast-Path Pre-Filter: Sub-0.05ms rejection of replayed invalid/expired tokens (Zero DB hits)
+    if cache_key:
+        with _PREFILTER_LOCK:
+            cached = _INVALID_TOKEN_PREFILTER_CACHE.get(cache_key)
+            if cached is not None:
+                cached_status, cached_detail, cached_at = cached
+                if (now - cached_at) < _PREFILTER_TTL:
+                    failed_token_tracker.record_failure(tracker_key)
+                    t_hmac_ms = (time.perf_counter() - t_hmac_start) * 1000
+                    raise HTTPException(
+                        status_code=cached_status,
+                        detail=cached_detail
+                    )
+                else:
+                    _INVALID_TOKEN_PREFILTER_CACHE.pop(cache_key, None)
 
     try:
-        if req.claim_token:
+        if getattr(req, "claim_token", None):
             from app.services.launch_token import validate_and_consume_claim
             claim_data = validate_and_consume_claim(req.claim_token, now_ts=now_ts)
             claim_consumed_here = True
@@ -43,8 +100,8 @@ def verify_and_resolve_scan_token(
                 "period_count": 1
             }
         else:
-            raw_token = (req.session_token or "").strip()
-            code_input = raw_token or (req.short_code or "").strip()
+            raw_token = (getattr(req, "session_token", None) or "").strip()
+            code_input = raw_token or (getattr(req, "short_code", None) or "").strip()
             if not code_input:
                 raise TokenValidationError(
                     code="invalid",
@@ -65,18 +122,18 @@ def verify_and_resolve_scan_token(
             token_data = ShortTokenService.validate_attendance_token(
                 db=db,
                 payload_or_code=code_input,
-                v=req.v,
+                v=getattr(req, "v", None),
                 step_window=10,
                 max_grace_steps=1,
                 now_ts=now_ts,
-                is_offline_submission=bool(req.is_offline_submission)
+                is_offline_submission=bool(getattr(req, "is_offline_submission", False))
             )
         t_hmac_ms = (time.perf_counter() - t_hmac_start) * 1000
         return token_data, claim_consumed_here, t_hmac_ms
 
     except TokenValidationError as tve:
         failed_token_tracker.record_failure(tracker_key)
-        client_epoch_ms = request.headers.get("x-client-epoch-ms")
+        client_epoch_ms = request.headers.get("x-client-epoch-ms") if request else None
         skew_ms = None
         if client_epoch_ms:
             try:
@@ -102,18 +159,33 @@ def verify_and_resolve_scan_token(
             )
         except Exception:
             pass
+
+        detail_obj = {
+            "code": "expired",
+            "error_code": p7_code,
+            "phase7_code": p7_code,
+            "message": tve.message, 
+            "serverNow": tve.server_now,
+            "epoch_delta": tve.epoch_delta,
+            "session_status": tve.session_status,
+            "skew_ms": skew_ms
+        }
+
+        # Cache failed token in in-memory pre-filter
+        if cache_key:
+            with _PREFILTER_LOCK:
+                if len(_INVALID_TOKEN_PREFILTER_CACHE) >= _PREFILTER_MAX_ENTRIES:
+                    cutoff = now - (_PREFILTER_TTL / 2)
+                    to_del = [k for k, (_, _, ts) in _INVALID_TOKEN_PREFILTER_CACHE.items() if ts < cutoff]
+                    if not to_del:
+                        to_del = list(_INVALID_TOKEN_PREFILTER_CACHE.keys())[:int(_PREFILTER_MAX_ENTRIES * 0.2)]
+                    for k in to_del:
+                        _INVALID_TOKEN_PREFILTER_CACHE.pop(k, None)
+                _INVALID_TOKEN_PREFILTER_CACHE[cache_key] = (status.HTTP_400_BAD_REQUEST, detail_obj, now)
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "code": "expired",
-                "error_code": p7_code,
-                "phase7_code": p7_code,
-                "message": tve.message, 
-                "serverNow": tve.server_now,
-                "epoch_delta": tve.epoch_delta,
-                "session_status": tve.session_status,
-                "skew_ms": skew_ms
-            }
+            detail=detail_obj
         )
     except ValueError as val_err:
         failed_token_tracker.record_failure(tracker_key)
@@ -127,7 +199,22 @@ def verify_and_resolve_scan_token(
             )
         except Exception:
             pass
+
+        detail_obj = {"code": "invalid", "message": str(val_err), "serverNow": time.time()}
+
+        # Cache failed token in in-memory pre-filter
+        if cache_key:
+            with _PREFILTER_LOCK:
+                if len(_INVALID_TOKEN_PREFILTER_CACHE) >= _PREFILTER_MAX_ENTRIES:
+                    cutoff = now - (_PREFILTER_TTL / 2)
+                    to_del = [k for k, (_, _, ts) in _INVALID_TOKEN_PREFILTER_CACHE.items() if ts < cutoff]
+                    if not to_del:
+                        to_del = list(_INVALID_TOKEN_PREFILTER_CACHE.keys())[:int(_PREFILTER_MAX_ENTRIES * 0.2)]
+                    for k in to_del:
+                        _INVALID_TOKEN_PREFILTER_CACHE.pop(k, None)
+                _INVALID_TOKEN_PREFILTER_CACHE[cache_key] = (status.HTTP_400_BAD_REQUEST, detail_obj, now)
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"code": "invalid", "message": str(val_err), "serverNow": time.time()}
+            detail=detail_obj
         )
