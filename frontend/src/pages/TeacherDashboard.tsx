@@ -1018,8 +1018,9 @@ export const TeacherDashboard: React.FC = () => {
   };
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-5">
-      {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+    <div className="min-h-screen bg-gradient-to-b from-[#f7f9fe] to-[#ecf1fb] text-[#17233c] -m-0 pb-12">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-5">
+        {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
 
       {/* Clean Top Header Card */}
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
@@ -2488,6 +2489,7 @@ export const TeacherDashboard: React.FC = () => {
         </div>
       )}
 
+      </div>
     </div>
   );
 };
