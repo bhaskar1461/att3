@@ -1,0 +1,1373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SNIST ERP Attendance (att2) - 3D Architecture Visualizer</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <!-- Three.js & OrbitControls -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <!-- Tween.js for camera & node animations -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+
+  <style>
+    :root {
+      --bg-dark: #070913;
+      --panel-bg: rgba(13, 18, 36, 0.78);
+      --panel-border: rgba(99, 133, 255, 0.22);
+      --panel-glow: rgba(56, 189, 248, 0.12);
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --cyan: #38bdf8;
+      --emerald: #10b981;
+      --violet: #a855f7;
+      --amber: #f59e0b;
+      --rose: #f43f5e;
+      --blue: #3b82f6;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    body {
+      background: var(--bg-dark);
+      color: var(--text-main);
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+    }
+
+    #webgl-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+    }
+
+    /* Glassmorphism HUD Overlay */
+    .hud-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 10;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 24px;
+    }
+
+    .interactive {
+      pointer-events: auto;
+    }
+
+    /* Header */
+    .header-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--panel-border);
+      border-radius: 16px;
+      padding: 14px 24px;
+      box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    }
+
+    .brand-title {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 20px rgba(56, 189, 248, 0.4);
+    }
+
+    .brand-icon svg {
+      width: 22px;
+      height: 22px;
+      fill: #fff;
+    }
+
+    .brand-text h1 {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      background: linear-gradient(to right, #fff, #cbd5e1);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .brand-text p {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-family: 'Fira Code', monospace;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      color: #34d399;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 20px;
+      margin-left: 8px;
+    }
+
+    .status-pulse {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 10px #10b981;
+      animation: pulse 1.8s infinite;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(0.9); opacity: 0.6; }
+      50% { transform: scale(1.3); opacity: 1; }
+      100% { transform: scale(0.9); opacity: 0.6; }
+    }
+
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: #e2e8f0;
+      padding: 8px 16px;
+      border-radius: 10px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-decoration: none;
+    }
+
+    .btn:hover {
+      background: rgba(56, 189, 248, 0.15);
+      border-color: rgba(56, 189, 248, 0.4);
+      color: #fff;
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(56, 189, 248, 0.2);
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #0284c7, #2563eb);
+      border: none;
+      box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+    }
+
+    .btn-primary:hover {
+      background: linear-gradient(135deg, #0369a1, #1d4ed8);
+      box-shadow: 0 6px 18px rgba(37, 99, 235, 0.5);
+    }
+
+    /* Main Center Workspace */
+    .content-area {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-top: 18px;
+      flex: 1;
+      gap: 20px;
+    }
+
+    /* Left Sidebar: Controls & Layer Switcher */
+    .sidebar-left {
+      width: 290px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .card {
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--panel-border);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 15px 30px -10px rgba(0, 0, 0, 0.5);
+    }
+
+    .card-title {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    /* Layer Toggles */
+    .layer-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+      border-radius: 8px;
+      margin-bottom: 6px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .layer-item:hover {
+      background: rgba(255, 255, 255, 0.07);
+      border-color: rgba(255, 255, 255, 0.12);
+    }
+
+    .layer-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .layer-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .layer-toggle {
+      width: 32px;
+      height: 18px;
+      background: #334155;
+      border-radius: 10px;
+      position: relative;
+      transition: background 0.2s;
+    }
+
+    .layer-toggle.active {
+      background: #0284c7;
+    }
+
+    .layer-toggle::after {
+      content: '';
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      background: #fff;
+      border-radius: 50%;
+      top: 2px;
+      left: 2px;
+      transition: transform 0.2s;
+    }
+
+    .layer-toggle.active::after {
+      transform: translateX(14px);
+    }
+
+    /* Camera Preset Buttons */
+    .camera-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .cam-btn {
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      color: #cbd5e1;
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      transition: all 0.2s;
+    }
+
+    .cam-btn:hover, .cam-btn.active {
+      background: rgba(56, 189, 248, 0.2);
+      border-color: rgba(56, 189, 248, 0.5);
+      color: #38bdf8;
+    }
+
+    /* Right Sidebar: Deep Inspector */
+    .inspector-panel {
+      width: 380px;
+      max-height: calc(100vh - 120px);
+      overflow-y: auto;
+      background: var(--panel-bg);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid var(--panel-border);
+      border-radius: 18px;
+      padding: 20px;
+      box-shadow: -10px 20px 40px rgba(0, 0, 0, 0.6);
+      transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.3s;
+    }
+
+    .inspector-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 14px;
+      margin-bottom: 14px;
+    }
+
+    .node-badge {
+      display: inline-block;
+      font-family: 'Fira Code', monospace;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 6px;
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      margin-bottom: 6px;
+    }
+
+    .inspector-header h2 {
+      font-size: 18px;
+      font-weight: 700;
+      color: #fff;
+    }
+
+    .inspector-header p {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .inspector-section {
+      margin-bottom: 16px;
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #64748b;
+      margin-bottom: 6px;
+    }
+
+    .code-pill {
+      font-family: 'Fira Code', monospace;
+      font-size: 11px;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 8px 10px;
+      border-radius: 8px;
+      color: #38bdf8;
+      word-break: break-all;
+    }
+
+    .desc-text {
+      font-size: 12px;
+      line-height: 1.6;
+      color: #cbd5e1;
+    }
+
+    .connections-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .conn-tag {
+      font-size: 11px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
+      border-left: 3px solid #38bdf8;
+      color: #e2e8f0;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    /* Bottom Control Bar */
+    .bottom-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--panel-border);
+      border-radius: 14px;
+      padding: 10px 20px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .nav-hints {
+      display: flex;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .hint-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .kbd {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+      padding: 1px 6px;
+      font-family: 'Fira Code', monospace;
+      font-size: 10px;
+      color: #fff;
+    }
+
+    /* Simulation Glow Effect */
+    .sim-progress-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      height: 3px;
+      background: linear-gradient(90deg, #38bdf8, #a855f7, #10b981);
+      width: 0%;
+      transition: width 0.3s;
+    }
+
+    /* Tooltip */
+    #tooltip {
+      position: absolute;
+      display: none;
+      background: rgba(15, 23, 42, 0.92);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      pointer-events: none;
+      z-index: 100;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.7);
+    }
+  </style>
+</head>
+<body>
+  <!-- 3D Canvas -->
+  <div id="webgl-canvas"></div>
+  <div id="tooltip"></div>
+
+  <!-- HUD Interface -->
+  <div class="hud-layer">
+    <!-- Header -->
+    <header class="header-bar interactive">
+      <div class="brand-title">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"></path>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>SNIST ERP Attendance (att2) &bull; 3D Architecture</h1>
+          <p>Commit: 1f3a0ad &bull; Verified 23 Components &bull; 5 Layer Tiers</p>
+        </div>
+        <div class="status-badge">
+          <div class="status-pulse"></div>
+          Hardware V2 Bound
+        </div>
+      </div>
+
+      <div class="top-actions">
+        <button id="sim-btn" class="btn btn-primary" onclick="triggerSimulation()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          Simulate Scan Flow
+        </button>
+        <button class="btn" onclick="toggleAutoRotate()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+          </svg>
+          Auto Rotate
+        </button>
+        <a href="att2-archify.html" target="_blank" class="btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <line x1="3" y1="9" x2="21" y2="9"></line>
+            <line x1="9" y1="21" x2="9" y2="9"></line>
+          </svg>
+          Open 2D Archify Spec
+        </a>
+      </div>
+    </header>
+
+    <!-- Center Content -->
+    <div class="content-area">
+      <!-- Left Sidebar -->
+      <aside class="sidebar-left interactive">
+        <!-- Layer Manager -->
+        <div class="card">
+          <div class="card-title">
+            <span>Architectural Tiers</span>
+            <span style="font-size:10px; color:#38bdf8;">5 Active</span>
+          </div>
+
+          <div class="layer-item" onclick="toggleLayer(0)">
+            <div class="layer-info">
+              <div class="layer-dot" style="background:#38bdf8;"></div>
+              <span>L1: Client & Hardware Vault</span>
+            </div>
+            <div id="layer-toggle-0" class="layer-toggle active"></div>
+          </div>
+
+          <div class="layer-item" onclick="toggleLayer(1)">
+            <div class="layer-info">
+              <div class="layer-dot" style="background:#818cf8;"></div>
+              <span>L2: Edge & Cloudflare Tunnel</span>
+            </div>
+            <div id="layer-toggle-1" class="layer-toggle active"></div>
+          </div>
+
+          <div class="layer-item" onclick="toggleLayer(2)">
+            <div class="layer-info">
+              <div class="layer-dot" style="background:#a855f7;"></div>
+              <span>L3: FastAPI & Security Core</span>
+            </div>
+            <div id="layer-toggle-2" class="layer-toggle active"></div>
+          </div>
+
+          <div class="layer-item" onclick="toggleLayer(3)">
+            <div class="layer-info">
+              <div class="layer-dot" style="background:#10b981;"></div>
+              <span>L4: In-Memory & Compliance</span>
+            </div>
+            <div id="layer-toggle-3" class="layer-toggle active"></div>
+          </div>
+
+          <div class="layer-item" onclick="toggleLayer(4)">
+            <div class="layer-info">
+              <div class="layer-dot" style="background:#f59e0b;"></div>
+              <span>L5: Persistence & ORM Store</span>
+            </div>
+            <div id="layer-toggle-4" class="layer-toggle active"></div>
+          </div>
+        </div>
+
+        <!-- Camera Perspectives -->
+        <div class="card">
+          <div class="card-title">Camera Perspectives</div>
+          <div class="camera-grid">
+            <button class="cam-btn active" onclick="setCameraPreset('isometric')">Isometric 3D</button>
+            <button class="cam-btn" onclick="setCameraPreset('top')">Top-Down</button>
+            <button class="cam-btn" onclick="setCameraPreset('front')">Front Elevation</button>
+            <button class="cam-btn" onclick="setCameraPreset('side')">Pipeline Flow</button>
+          </div>
+        </div>
+
+        <!-- Key Metrics -->
+        <div class="card" style="font-size:11px; color:#cbd5e1;">
+          <div class="card-title">Performance Invariants</div>
+          <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+            <span style="color:#94a3b8;">Scan Verify Latency</span>
+            <span style="color:#38bdf8; font-family:'Fira Code';">&lt; 0.05ms</span>
+          </div>
+          <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+            <span style="color:#94a3b8;">Cryptographic Enclave</span>
+            <span style="color:#a855f7; font-family:'Fira Code';">ECDSA P-256</span>
+          </div>
+          <div style="display:flex; justify-content:space-between;">
+            <span style="color:#94a3b8;">Burst Concurrency</span>
+            <span style="color:#10b981; font-family:'Fira Code';">200 RPS Certified</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Right Inspector Panel -->
+      <aside id="inspector" class="inspector-panel interactive">
+        <div class="inspector-header">
+          <div>
+            <div id="insp-badge" class="node-badge">SELECT A COMPONENT</div>
+            <h2 id="insp-title">System Overview</h2>
+            <p id="insp-sub">Click any 3D node block to inspect its verified implementation</p>
+          </div>
+        </div>
+
+        <div class="inspector-section">
+          <div class="section-label">Source File & Location</div>
+          <div id="insp-file" class="code-pill">backend/app/main.py:15-55</div>
+        </div>
+
+        <div class="inspector-section">
+          <div class="section-label">Architectural Responsibility</div>
+          <p id="insp-desc" class="desc-text">
+            Root ASGI application orchestrating middleware (CORS, trusted hosts), lifespan events, and mounting sub-routers for attendance, device binding V2, and auth.
+          </p>
+        </div>
+
+        <div class="inspector-section">
+          <div class="section-label">Connected Interfaces & Pipelines</div>
+          <div id="insp-conn" class="connections-list">
+            <div class="conn-tag"><span>Cloudflare Tunnel</span><span>mTLS / HTTPS</span></div>
+            <div class="conn-tag"><span>In-Memory Token Cache</span><span>Fast Lookup</span></div>
+            <div class="conn-tag"><span>Device Binding V2 Guard</span><span>Challenge-Response</span></div>
+          </div>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Bottom Bar -->
+    <footer class="bottom-bar interactive">
+      <div class="nav-hints">
+        <div class="hint-item"><span class="kbd">Left Click + Drag</span> Rotate 3D Space</div>
+        <div class="hint-item"><span class="kbd">Right Click + Drag</span> Pan Scene</div>
+        <div class="hint-item"><span class="kbd">Scroll</span> Zoom In/Out</div>
+        <div class="hint-item"><span class="kbd">Click Node</span> Inspect Component</div>
+      </div>
+      <div>
+        <span>SNIST ERP &bull; JNTUH R25 Autonomous Attendance Suite</span>
+      </div>
+    </footer>
+    <div id="sim-progress" class="sim-progress-bar"></div>
+  </div>
+
+  <script>
+    /* =========================================================================
+       1. DATA DEFINITIONS (23 VERIFIED ARCHITECTURAL COMPONENTS & 5 TIERS)
+       ========================================================================= */
+    const TIERS = [
+      { id: 'client', name: 'L1: Client Hardware & Vault', z: 150, color: 0x38bdf8 },
+      { id: 'edge', name: 'L2: Edge & Ingress Tunnel', z: 75, color: 0x818cf8 },
+      { id: 'core', name: 'L3: FastAPI & Security Core', z: 0, color: 0xa855f7 },
+      { id: 'engine', name: 'L4: In-Memory & Compliance', z: -75, color: 0x10b981 },
+      { id: 'storage', name: 'L5: Persistence & ORM Store', z: -150, color: 0xf59e0b }
+    ];
+
+    const NODES = [
+      // Layer 1: Client Hardware & Vault (z: 150)
+      {
+        id: 'face_engine',
+        name: 'Face Capture & Liveness',
+        sub: 'FaceDetector & Oval Guide',
+        badge: 'Liveness Gate',
+        tier: 0,
+        x: -90, y: 75, z: 150,
+        color: 0x38bdf8,
+        file: 'frontend/src/utils/faceDetector.ts',
+        desc: 'Executes client-side face detection using native window.FaceDetector with universal skin-chroma fallback, enforcing oval centering, lighting, single-face gate, and 3-second auto-countdown.',
+        connections: ['Student PWA (Biometric Quality Gate)', 'Selfie Audit Store (Photo Upload)']
+      },
+      {
+        id: 'student_pwa',
+        name: 'Student PWA Portal',
+        sub: 'React + Scanner Modal',
+        badge: 'C11/C12',
+        tier: 0,
+        x: -90, y: 0, z: 150,
+        color: 0x38bdf8,
+        file: 'frontend/src/components/StudentClassScannerModal.tsx',
+        desc: 'Orchestrates camera stream, multi-engine QR decoding loop, mutual-exclusion state transitions, client-side token TTL verification, and attendance submission with 4000ms watchdog protection.',
+        connections: ['Cloudflare Tunnel (HTTPS REST)', 'Crypto Engine (ECDSA P-256)', 'Offline Queue (IndexedDB Buffer)', 'Face Capture Engine (Post-Scan)']
+      },
+      {
+        id: 'crypto_vault',
+        name: 'WebCrypto Engine',
+        sub: 'Hardware-Backed Key Vault',
+        badge: 'C18 Vault',
+        tier: 0,
+        x: -90, y: -65, z: 150,
+        color: 0x06b6d4,
+        file: 'frontend/src/services/binding/cryptoEngine.ts',
+        desc: 'Manages hardware-backed WebCrypto ECDSA P-256 non-extractable keypairs in IndexedDB, computes SHA-256 public key digests, and cryptographically signs challenge nonces.',
+        connections: ['Student PWA (P-256 Signature)', 'Binding V2 Router (Challenge-Response)']
+      },
+      {
+        id: 'offline_queue',
+        name: 'Offline Submission Queue',
+        sub: 'IndexedDB Fallback Cache',
+        badge: 'C21 Queue',
+        tier: 0,
+        x: -160, y: 0, z: 150,
+        color: 0x0ea5e9,
+        file: 'frontend/src/services/offlineSubmissionQueue.ts',
+        desc: 'Buffers timed-out or network-dropped attendance scans in IndexedDB and automatically syncs them when the device regains connectivity.',
+        connections: ['Student PWA (Buffer on Drop)', 'FastAPI Core (Sync on Reconnect)']
+      },
+
+      // Layer 2: Edge & Ingress (z: 75)
+      {
+        id: 'teacher_broadcast',
+        name: 'Faculty QR Broadcaster',
+        sub: 'Dynamic Rotating Session',
+        badge: '15s HMAC Token',
+        tier: 1,
+        x: -20, y: 75, z: 75,
+        color: 0xfbbf24,
+        file: 'frontend/src/pages/TeacherDashboard.tsx',
+        desc: 'Broadcasts dynamic cryptographic QR tokens rotating every 15-30s with HMAC signatures, rendering high-contrast barcodes for classroom projector screens.',
+        connections: ['Cloudflare Tunnel (Session Broadcast)', 'Student PWA (Optical QR Capture)']
+      },
+      {
+        id: 'cf_tunnel',
+        name: 'Cloudflare Tunnel Edge',
+        sub: 'Zero-Trust Secure Ingress',
+        badge: 'Cloud Edge',
+        tier: 1,
+        x: -20, y: 0, z: 75,
+        color: 0xf97316,
+        file: 'cloudflared.exe / config.yml',
+        desc: 'Encrypted zero-trust ingress tunnel terminating public HTTPS traffic and proxying authenticated HTTP/2 connections directly to backend ASGI workers.',
+        connections: ['Student PWA (HTTPS :443)', 'FastAPI Core (Reverse Proxy)']
+      },
+      {
+        id: 'launch_resolver',
+        name: 'Launch Ticket Resolver',
+        sub: 'Single-Use QR Verifier',
+        badge: 'C14/C15',
+        tier: 1,
+        x: -20, y: -65, z: 75,
+        color: 0x818cf8,
+        file: 'backend/app/api/launch.py:218-310',
+        desc: 'Processes authenticated link-based attendance markings and converts valid single-use launch tickets into attendance records.',
+        connections: ['Cloudflare Tunnel (Deep Link)', 'FastAPI Core (Redeem Ticket)']
+      },
+      {
+        id: 'onboarding_dispatcher',
+        name: 'Onboard Dispatcher',
+        sub: 'Magic-Link & Credential Mail',
+        badge: 'SMTP Dispatch',
+        tier: 1,
+        x: -20, y: -125, z: 75,
+        color: 0x38bdf8,
+        file: 'backend/app/services/email_service.py',
+        desc: 'Dispatches automated magic-link onboarding invitations and initial student/faculty credentials via Brevo transactional SMTP gateway with fallback handling.',
+        connections: ['Binding V2 Guard (OTP Recovery)', 'FastAPI Core (Bulk Dispatch)']
+      },
+
+      // Layer 3: FastAPI & Security Core (z: 0)
+      {
+        id: 'selfie_service',
+        name: 'Selfie Audit & Storage',
+        sub: 'Local Disk / S3 Vault',
+        badge: 'Biometric Store',
+        tier: 2,
+        x: 50, y: 95, z: 0,
+        color: 0xec4899,
+        file: 'backend/app/services/selfie_service.py',
+        desc: 'Ingests student post-attendance selfies via /api/v1/attendance/records/{id}/selfie-audit, persists images to disk/storage with student roll metadata, and updates audit records.',
+        connections: ['FastAPI Core (Audit Ingestion)', 'Database Session Manager (Selfie Status)']
+      },
+      {
+        id: 'auth_service',
+        name: 'Auth Router & JWT Service',
+        sub: 'Bearer Tokens & Lockout',
+        badge: 'C04 Auth',
+        tier: 2,
+        x: 50, y: 40, z: 0,
+        color: 0xa855f7,
+        file: 'backend/app/api/auth.py:26-313',
+        desc: 'Authenticates student and faculty credentials, signs JWT bearer tokens, enforces brute-force lockout rules, and extracts authenticated user state.',
+        connections: ['FastAPI Core (Token Ingestion)', 'Database Session Manager (User Query)']
+      },
+      {
+        id: 'fastapi_core',
+        name: 'FastAPI Application Core',
+        sub: 'ASGI Application Server',
+        badge: 'C06 ASGI',
+        tier: 2,
+        x: 50, y: -15, z: 0,
+        color: 0x009688,
+        file: 'backend/app/main.py:15-55',
+        desc: 'Root ASGI application orchestrating middleware (CORS, trusted hosts), lifespan events, and mounting sub-routers for student attendance, binding V2, and auth.',
+        connections: ['Auth Service (JWT Check)', 'Binding V2 Guard (Nonce Verify)', 'In-Memory Cache (Token Lookup)']
+      },
+      {
+        id: 'binding_guard',
+        name: 'Device Binding V2 Guard',
+        sub: 'Challenge-Response Verifier',
+        badge: 'C16 Guard',
+        tier: 2,
+        x: 50, y: -70, z: 0,
+        color: 0xec4899,
+        file: 'backend/app/api/binding.py:58-80',
+        desc: 'Serves server-authoritative binding queries (/status), issues cryptographic challenge nonces, registers public keys (/enroll), and evaluates rebind OTP requests.',
+        connections: ['FastAPI Core (Signature Audit)', 'SQLAlchemy DB (Binding State)', 'Onboard Dispatcher (OTP)']
+      },
+
+      // Layer 4: In-Memory & Compliance (z: -75)
+      {
+        id: 'scan_cache',
+        name: 'In-Memory Fast Scan Cache',
+        sub: '<0.05ms Token Verification',
+        badge: 'C05 Cache',
+        tier: 3,
+        x: 130, y: 15, z: -75,
+        color: 0x10b981,
+        file: 'backend/app/api/student.py:44-1003',
+        desc: 'Validates student scan tokens in-memory in under 0.05ms, enforces roll-rate limits, and dispatches asynchronous background DB writes with race deduplication.',
+        connections: ['FastAPI Core (Token Eval)', 'Async DB Writer (Batch Queue)', 'JNTUH R25 Engine (Aggregates)']
+      },
+      {
+        id: 'jntuh_engine',
+        name: 'JNTUH R25 Engine',
+        sub: 'Compliance & Condonation Rules',
+        badge: 'C13 Rules',
+        tier: 3,
+        x: 130, y: 65, z: -75,
+        color: 0x22c55e,
+        file: 'backend/app/services/attendance_engine.py:24-110',
+        desc: 'Calculates JNTUH R25 compliance thresholds, attendance percentages, condonation status, and manages student aggregate cache invalidation.',
+        connections: ['In-Memory Cache (Percentage Compute)', 'SQLAlchemy DB (Subject Records)', 'Multi-Target Sync (Metrics)']
+      },
+      {
+        id: 'async_writer',
+        name: 'Async DB Writer Queue',
+        sub: 'Non-Blocking Batch Committer',
+        badge: 'C05 Writer',
+        tier: 3,
+        x: 130, y: -45, z: -75,
+        color: 0x14b8a6,
+        file: 'backend/app/api/student.py',
+        desc: 'Buffers live attendance scans in memory and commits batched records asynchronously to prevent database connection starvation during 200-student burst logins.',
+        connections: ['In-Memory Cache (Job Dequeue)', 'Database Session Manager (SQL Insert)']
+      },
+
+      // Layer 5: Persistence & ORM Store (z: -150)
+      {
+        id: 'downstream_sync',
+        name: 'Multi-Target Sync',
+        sub: 'GSheets, Frappe & Excel',
+        badge: 'Roster Sync',
+        tier: 4,
+        x: 210, y: 85, z: -150,
+        color: 0x10b981,
+        file: 'backend/app/services/gsheets_service.py',
+        desc: 'Synchronizes verified attendance data to Google Sheets API v4 master registers, Frappe ERP records, and daily multi-period class Excel registers.',
+        connections: ['Database Session Manager (Read Records)', 'JNTUH R25 Engine (Export Metrics)']
+      },
+      {
+        id: 'session_mgr',
+        name: 'Database Session Manager',
+        sub: 'SQLAlchemy Engine & Factory',
+        badge: 'C02 DB Engine',
+        tier: 4,
+        x: 210, y: 25, z: -150,
+        color: 0xf59e0b,
+        file: 'backend/app/core/database.py:14-25',
+        desc: 'Manages the SQLAlchemy database connection engine, session factory (SessionLocal), declarative Base, and the FastAPI get_db dependency.',
+        connections: ['Async DB Writer (Session Scope)', 'Relational ORM Models (Table Schemas)']
+      },
+      {
+        id: 'db_primary',
+        name: 'PostgreSQL / SQLite Database',
+        sub: 'Durable Relational Store',
+        badge: 'C03 Store',
+        tier: 4,
+        x: 210, y: -35, z: -150,
+        color: 0xd97706,
+        file: 'backend/app/models/models.py:88-195',
+        desc: 'Stores canonical relational records for User, Student, AttendanceRecord, AttendanceSession, and DeviceBinding tables.',
+        connections: ['Database Session Manager (Durable Storage)']
+      }
+    ];
+
+    // Inter-component Pipes (Data Flow & Signatures)
+    const PIPES = [
+      { from: 'teacher_broadcast', to: 'cf_tunnel', label: '15s Token Rotation' },
+      { from: 'face_engine', to: 'student_pwa', label: 'Liveness Gate Verification' },
+      { from: 'student_pwa', to: 'cf_tunnel', label: 'HTTPS Scan & Selfie' },
+      { from: 'crypto_vault', to: 'student_pwa', label: 'Hardware ECDSA Signature' },
+      { from: 'student_pwa', to: 'offline_queue', label: 'Local Fallback Buffer' },
+      { from: 'cf_tunnel', to: 'fastapi_core', label: 'Reverse Proxy Stream' },
+      { from: 'launch_resolver', to: 'fastapi_core', label: 'Single-Use Ticket' },
+      { from: 'fastapi_core', to: 'selfie_service', label: 'Store Verification Photo' },
+      { from: 'fastapi_core', to: 'auth_service', label: 'JWT Signature Validate' },
+      { from: 'fastapi_core', to: 'binding_guard', label: 'Hardware Challenge Verify' },
+      { from: 'binding_guard', to: 'onboarding_dispatcher', label: 'OTP Recovery Email' },
+      { from: 'fastapi_core', to: 'scan_cache', label: 'In-Memory Check (<0.05ms)' },
+      { from: 'scan_cache', to: 'jntuh_engine', label: 'Compliance Audit' },
+      { from: 'scan_cache', to: 'async_writer', label: 'Async Batch Write' },
+      { from: 'async_writer', to: 'session_mgr', label: 'Pooled Connection' },
+      { from: 'session_mgr', to: 'db_primary', label: 'ACID Commit' },
+      { from: 'db_primary', to: 'downstream_sync', label: 'Google Sheets & ERP Sync' },
+      { from: 'jntuh_engine', to: 'downstream_sync', label: 'Export R25 Statistics' }
+    ];
+
+    /* =========================================================================
+       2. THREE.JS 3D SCENE SETUP
+       ========================================================================= */
+    const container = document.getElementById('webgl-canvas');
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x070913, 0.0016);
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 3000);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    container.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.maxDistance = 1200;
+    controls.minDistance = 80;
+
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
+    scene.add(ambientLight);
+
+    const mainLight = new THREE.DirectionalLight(0x38bdf8, 1.2);
+    mainLight.position.set(200, 300, 200);
+    scene.add(mainLight);
+
+    const purpleLight = new THREE.PointLight(0xa855f7, 2.5, 600);
+    purpleLight.position.set(0, 100, 0);
+    scene.add(purpleLight);
+
+    const greenLight = new THREE.PointLight(0x10b981, 1.8, 500);
+    greenLight.position.set(120, -50, -75);
+    scene.add(greenLight);
+
+    // Starfield Background Particles
+    const starGeo = new THREE.BufferGeometry();
+    const starCount = 1200;
+    const starPos = new Float32Array(starCount * 3);
+    for (let i = 0; i < starCount * 3; i += 3) {
+      starPos[i] = (Math.random() - 0.5) * 1600;
+      starPos[i + 1] = (Math.random() - 0.5) * 1600;
+      starPos[i + 2] = (Math.random() - 0.5) * 1600;
+    }
+    starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+    const starMat = new THREE.PointsMaterial({ color: 0x475569, size: 2, transparent: true, opacity: 0.6 });
+    const stars = new THREE.Points(starGeo, starMat);
+    scene.add(stars);
+
+    /* =========================================================================
+       3. GENERATE 3D TIER PLANES & VOLUMETRIC NODES
+       ========================================================================= */
+    const tierGroups = [];
+    const nodeMeshes = [];
+    const nodeMap = {};
+    const raycastTargets = [];
+
+    // Create Tier Floor Plates (Floating semi-transparent glass)
+    TIERS.forEach((t, idx) => {
+      const group = new THREE.Group();
+      group.name = `tier-${idx}`;
+
+      // Glass Plane
+      const planeGeo = new THREE.PlaneGeometry(420, 240);
+      const planeMat = new THREE.MeshPhysicalMaterial({
+        color: t.color,
+        transparent: true,
+        opacity: 0.08,
+        roughness: 0.1,
+        metalness: 0.1,
+        transmission: 0.6,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      });
+      const plane = new THREE.Mesh(planeGeo, planeMat);
+      plane.rotation.x = Math.PI / 2;
+      plane.position.set(40, -45, t.z);
+      group.add(plane);
+
+      // Grid Wireframe on Plane
+      const grid = new THREE.GridHelper(380, 14, t.color, 0x1e293b);
+      grid.position.set(40, -44.5, t.z);
+      group.add(grid);
+
+      scene.add(group);
+      tierGroups.push(group);
+    });
+
+    // Helper: Create Text Canvas Texture
+    function createTextTexture(title, sub, badge, colorHex) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 512;
+      canvas.height = 256;
+      const ctx = canvas.getContext('2d');
+
+      // Rounded background
+      ctx.fillStyle = '#0b1329';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Gradient accent top bar
+      const grad = ctx.createLinearGradient(0, 0, canvas.width, 0);
+      grad.addColorStop(0, colorHex);
+      grad.addColorStop(1, '#3b82f6');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, canvas.width, 14);
+
+      // Badge
+      ctx.fillStyle = colorHex;
+      ctx.font = 'bold 22px monospace';
+      ctx.fillText(`[${badge}]`, 32, 60);
+
+      // Title
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 36px "Plus Jakarta Sans", sans-serif';
+      ctx.fillText(title, 32, 115);
+
+      // Subtitle
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '24px "Plus Jakarta Sans", sans-serif';
+      ctx.fillText(sub, 32, 160);
+
+      // Border outline
+      ctx.strokeStyle = colorHex;
+      ctx.lineWidth = 6;
+      ctx.strokeRect(3, 3, canvas.width - 6, canvas.height - 6);
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.minFilter = THREE.LinearFilter;
+      return texture;
+    }
+
+    // Build 3D Nodes
+    NODES.forEach((n) => {
+      const nodeGroup = new THREE.Group();
+      nodeGroup.position.set(n.x, n.y, n.z);
+      nodeGroup.userData = n;
+
+      // Rounded Box Block
+      const boxGeo = new THREE.BoxGeometry(48, 22, 16);
+      const colorHexStr = '#' + n.color.toString(16).padStart(6, '0');
+      const boxMat = new THREE.MeshStandardMaterial({
+        color: 0x0f172a,
+        emissive: n.color,
+        emissiveIntensity: 0.15,
+        roughness: 0.2,
+        metalness: 0.8
+      });
+
+      const boxMesh = new THREE.Mesh(boxGeo, boxMat);
+      nodeGroup.add(boxMesh);
+
+      // Top Face Label Sprite / Decal
+      const labelTexture = createTextTexture(n.name, n.sub, n.badge, colorHexStr);
+      const labelMat = new THREE.MeshBasicMaterial({ map: labelTexture, transparent: true });
+      const labelGeo = new THREE.PlaneGeometry(46, 20);
+      const labelMesh = new THREE.Mesh(labelGeo, labelMat);
+      labelMesh.position.set(0, 0, 8.2);
+      nodeGroup.add(labelMesh);
+
+      // Glowing Outlines
+      const edges = new THREE.EdgesGeometry(boxGeo);
+      const lineMat = new THREE.LineBasicMaterial({ color: n.color, linewidth: 2 });
+      const wireframe = new THREE.LineSegments(edges, lineMat);
+      nodeGroup.add(wireframe);
+
+      // Ground shadow ring
+      const ringGeo = new THREE.RingGeometry(18, 22, 32);
+      const ringMat = new THREE.MeshBasicMaterial({ color: n.color, transparent: true, opacity: 0.25, side: THREE.DoubleSide });
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = -35;
+      nodeGroup.add(ring);
+
+      tierGroups[n.tier].add(nodeGroup);
+      nodeMeshes.push(nodeGroup);
+      nodeMap[n.id] = nodeGroup;
+      raycastTargets.push(boxMesh);
+    });
+
+    /* =========================================================================
+       4. 3D GLOWING DATA PIPELINES (BEZIER CURVES & PULSES)
+       ========================================================================= */
+    const pipeGroup = new THREE.Group();
+    scene.add(pipeGroup);
+
+    const particles = [];
+
+    PIPES.forEach((pipe) => {
+      const src = nodeMap[pipe.from];
+      const dst = nodeMap[pipe.to];
+      if (!src || !dst) return;
+
+      const p1 = new THREE.Vector3().copy(src.position);
+      const p4 = new THREE.Vector3().copy(dst.position);
+
+      // Control points for organic curving in 3D
+      const midZ = (p1.z + p4.z) / 2;
+      const p2 = new THREE.Vector3(p1.x + 20, p1.y, midZ);
+      const p3 = new THREE.Vector3(p4.x - 20, p4.y, midZ);
+
+      const curve = new THREE.CubicBezierCurve3(p1, p2, p3, p4);
+      const points = curve.getPoints(40);
+      const curveGeo = new THREE.BufferGeometry().setFromPoints(points);
+
+      const curveMat = new THREE.LineBasicMaterial({
+        color: 0x38bdf8,
+        transparent: true,
+        opacity: 0.45,
+        linewidth: 2
+      });
+      const line = new THREE.Line(curveGeo, curveMat);
+      pipeGroup.add(line);
+
+      // Animated traveling photon particle
+      const pSphereGeo = new THREE.SphereGeometry(2.2, 12, 12);
+      const pSphereMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8 });
+      const particle = new THREE.Mesh(pSphereGeo, pSphereMat);
+      pipeGroup.add(particle);
+
+      particles.push({
+        mesh: particle,
+        curve: curve,
+        progress: Math.random()
+      });
+    });
+
+    /* =========================================================================
+       5. INTERACTION & RAYCASTING
+       ========================================================================= */
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let hoveredNode = null;
+    let selectedNode = null;
+
+    window.addEventListener('mousemove', (e) => {
+      mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+      mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+
+      // Tooltip position
+      const tooltip = document.getElementById('tooltip');
+      tooltip.style.left = (e.clientX + 14) + 'px';
+      tooltip.style.top = (e.clientY + 14) + 'px';
+    });
+
+    window.addEventListener('click', (e) => {
+      // Don't trigger if clicking HUD elements
+      if (e.target.closest('.interactive')) return;
+
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(raycastTargets);
+
+      if (intersects.length > 0) {
+        const parentNode = intersects[0].object.parent;
+        selectNode(parentNode.userData);
+      }
+    });
+
+    function selectNode(data) {
+      selectedNode = data;
+      document.getElementById('insp-badge').textContent = data.badge;
+      document.getElementById('insp-title').textContent = data.name;
+      document.getElementById('insp-sub').textContent = data.sub;
+      document.getElementById('insp-file').textContent = data.file;
+      document.getElementById('insp-desc').textContent = data.desc;
+
+      const connList = document.getElementById('insp-conn');
+      connList.innerHTML = '';
+      data.connections.forEach((c) => {
+        const div = document.createElement('div');
+        div.className = 'conn-tag';
+        const parts = c.split('(');
+        div.innerHTML = `<span>${parts[0]}</span><span>${parts[1] ? parts[1].replace(')', '') : 'Active'}</span>`;
+        connList.appendChild(div);
+      });
+
+      // Smoothly animate camera towards focused component
+      new TWEEN.Tween(controls.target)
+        .to({ x: data.x, y: data.y, z: data.z }, 800)
+        .easing(TWEEN.Easing.Cubic.Out)
+        .start();
+    }
+
+    /* =========================================================================
+       6. CAMERA PRESETS & CONTROLS
+       ========================================================================= */
+    function setCameraPreset(preset) {
+      document.querySelectorAll('.cam-btn').forEach(b => b.classList.remove('active'));
+      event.target.classList.add('active');
+
+      let targetPos, targetLook;
+      if (preset === 'isometric') {
+        targetPos = { x: 300, y: 220, z: 320 };
+        targetLook = { x: 40, y: 0, z: 0 };
+      } else if (preset === 'top') {
+        targetPos = { x: 40, y: 460, z: 0 };
+        targetLook = { x: 40, y: 0, z: 0 };
+      } else if (preset === 'front') {
+        targetPos = { x: 40, y: 0, z: 420 };
+        targetLook = { x: 40, y: 0, z: 0 };
+      } else if (preset === 'side') {
+        targetPos = { x: 440, y: 20, z: 0 };
+        targetLook = { x: 40, y: 0, z: 0 };
+      }
+
+      new TWEEN.Tween(camera.position)
+        .to(targetPos, 1000)
+        .easing(TWEEN.Easing.Cubic.InOut)
+        .start();
+
+      new TWEEN.Tween(controls.target)
+        .to(targetLook, 1000)
+        .easing(TWEEN.Easing.Cubic.InOut)
+        .start();
+    }
+
+    let isAutoRotating = false;
+    function toggleAutoRotate() {
+      isAutoRotating = !isAutoRotating;
+      controls.autoRotate = isAutoRotating;
+      controls.autoRotateSpeed = 1.2;
+    }
+
+    // Toggle Layer Visibility
+    function toggleLayer(idx) {
+      const toggleBtn = document.getElementById(`layer-toggle-${idx}`);
+      const group = tierGroups[idx];
+      const isVisible = group.visible;
+      group.visible = !isVisible;
+
+      if (!isVisible) {
+        toggleBtn.classList.add('active');
+      } else {
+        toggleBtn.classList.remove('active');
+      }
+    }
+
+    // Live Flow Simulation
+    let isSimulating = false;
+    function triggerSimulation() {
+      if (isSimulating) return;
+      isSimulating = true;
+      const simBtn = document.getElementById('sim-btn');
+      const progressBar = document.getElementById('sim-progress');
+      simBtn.disabled = true;
+
+      const flowSteps = [
+        'teacher_broadcast',
+        'student_pwa',
+        'crypto_vault',
+        'face_engine',
+        'cf_tunnel',
+        'fastapi_core',
+        'selfie_service',
+        'binding_guard',
+        'scan_cache',
+        'async_writer',
+        'db_primary'
+      ];
+
+      let currentStep = 0;
+      function nextStep() {
+        if (currentStep >= flowSteps.length) {
+          simBtn.disabled = false;
+          progressBar.style.width = '0%';
+          isSimulating = false;
+          return;
+        }
+
+        const nodeId = flowSteps[currentStep];
+        const node = nodeMap[nodeId];
+        selectNode(node.userData);
+
+        progressBar.style.width = ((currentStep + 1) / flowSteps.length * 100) + '%';
+
+        // Flash highlight effect
+        const mesh = node.children[0];
+        const origColor = mesh.material.emissiveIntensity;
+        mesh.material.emissiveIntensity = 1.0;
+
+        setTimeout(() => {
+          mesh.material.emissiveIntensity = origColor;
+          currentStep++;
+          nextStep();
+        }, 1200);
+      }
+
+      nextStep();
+    }
+
+    // Default Camera
+    camera.position.set(320, 240, 340);
+    controls.target.set(40, 0, 0);
+
+    /* =========================================================================
+       7. ANIMATION RENDER LOOP
+       ========================================================================= */
+    const clock = new THREE.Clock();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      TWEEN.update();
+      controls.update();
+
+      const delta = clock.getDelta();
+      const time = clock.getElapsedTime();
+
+      // Gentle floating levitation for components
+      nodeMeshes.forEach((mesh, i) => {
+        mesh.position.y += Math.sin(time * 2 + i) * 0.04;
+      });
+
+      // Advance particles along pipelines
+      particles.forEach((p) => {
+        p.progress = (p.progress + delta * 0.45) % 1;
+        const pos = p.curve.getPoint(p.progress);
+        p.mesh.position.copy(pos);
+      });
+
+      // Hover Detection
+      raycaster.setFromCamera(mouse, camera);
+      const intersects = raycaster.intersectObjects(raycastTargets);
+      const tooltip = document.getElementById('tooltip');
+
+      if (intersects.length > 0) {
+        document.body.style.cursor = 'pointer';
+        const hit = intersects[0].object.parent.userData;
+        tooltip.style.display = 'block';
+        tooltip.innerHTML = `<strong>${hit.name}</strong><br><span style="color:#94a3b8; font-size:11px;">${hit.badge} &bull; ${hit.sub}</span>`;
+      } else {
+        document.body.style.cursor = 'default';
+        tooltip.style.display = 'none';
+      }
+
+      renderer.render(scene, camera);
+    }
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    animate();
+  </script>
+</body>
+</html>

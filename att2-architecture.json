@@ -1,0 +1,335 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "SNIST ERP Attendance (att2) Complete Architecture",
+    "subtitle": "High-Throughput QR, AI Face Capture, Device Binding & Multi-Target Sync",
+    "output": "att2-archify.html",
+    "quality_profile": "showcase",
+    "animation": "trace",
+    "views": [
+      {
+        "id": "scan-selfie-path",
+        "label": "Live Scan & Face Capture Pipeline",
+        "focus": ["teacher_broadcast", "student_pwa", "face_engine", "cf_tunnel", "fastapi_core", "selfie_service", "scan_cache", "async_writer", "db_primary"],
+        "note": "Traces teacher dynamic QR broadcast, student scan, client face liveness gate, and backend biometric storage."
+      },
+      {
+        "id": "binding-lockout",
+        "label": "Hardware Device Binding & Lockout",
+        "focus": ["crypto_vault", "student_pwa", "cf_tunnel", "binding_guard", "fastapi_core", "db_primary"],
+        "note": "Hardware-backed WebCrypto ECDSA P-256 non-extractable key pair enrollment and 30-minute lockout protection."
+      },
+      {
+        "id": "compliance-sync",
+        "label": "JNTUH Compliance & Multi-Target Sync",
+        "focus": ["student_pwa", "fastapi_core", "scan_cache", "jntuh_engine", "db_primary", "downstream_sync"],
+        "note": "Sub-0.05ms in-memory scan verification, JNTUH R25 compliance rules, and Google Sheets / Frappe / Excel sync."
+      },
+      {
+        "id": "onboarding-dispatch",
+        "label": "Identity Onboarding & Credential Dispatch",
+        "focus": ["onboarding_dispatcher", "cf_tunnel", "fastapi_core", "db_primary"],
+        "note": "Automated student magic-link onboarding, bulk credential dispatch, and Brevo / Gmail SMTP gateway."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "face_engine",
+      "type": "security",
+      "label": "Face Capture Engine",
+      "sublabel": "FaceDetector & Oval Guide",
+      "pos": [40, 70],
+      "size": [130, 60],
+      "tag": "Liveness Gate"
+    },
+    {
+      "id": "student_pwa",
+      "type": "frontend",
+      "label": "Student PWA",
+      "sublabel": "WASM Scanner & Queue",
+      "brand": "react",
+      "pos": [40, 250],
+      "size": [130, 60],
+      "tag": "C11/C12"
+    },
+    {
+      "id": "crypto_vault",
+      "type": "security",
+      "label": "Crypto Enclave",
+      "sublabel": "ECDSA P-256 WebCrypto",
+      "pos": [40, 430],
+      "size": [130, 60],
+      "tag": "C18 Vault"
+    },
+    {
+      "id": "teacher_broadcast",
+      "type": "frontend",
+      "label": "Faculty Broadcaster",
+      "sublabel": "Dynamic Rotating QR",
+      "pos": [240, 70],
+      "size": [130, 60],
+      "tag": "15s HMAC Token"
+    },
+    {
+      "id": "cf_tunnel",
+      "type": "cloud",
+      "label": "Cloudflare Tunnel",
+      "sublabel": "Zero-Trust Edge",
+      "brand": "cloudflare",
+      "pos": [240, 250],
+      "size": [130, 60],
+      "tag": "HTTPS :443"
+    },
+    {
+      "id": "onboarding_dispatcher",
+      "type": "backend",
+      "label": "Onboard Dispatch",
+      "sublabel": "Magic-Link & Mail",
+      "pos": [240, 430],
+      "size": [130, 60],
+      "tag": "SMTP Dispatch"
+    },
+    {
+      "id": "selfie_service",
+      "type": "database",
+      "label": "Selfie Audit Store",
+      "sublabel": "ArcFace / Local Vault",
+      "pos": [450, 70],
+      "size": [130, 60],
+      "tag": "Biometric Store"
+    },
+    {
+      "id": "fastapi_core",
+      "type": "backend",
+      "label": "FastAPI Core",
+      "sublabel": "ASGI App Server",
+      "brand": "fastapi",
+      "pos": [450, 250],
+      "size": [130, 60],
+      "tag": "C06 Engine"
+    },
+    {
+      "id": "binding_guard",
+      "type": "security",
+      "label": "Binding V2 & Lockout",
+      "sublabel": "30-Min Lockout Manager",
+      "pos": [450, 430],
+      "size": [130, 60],
+      "tag": "C16 Guard"
+    },
+    {
+      "id": "jntuh_engine",
+      "type": "backend",
+      "label": "JNTUH R25 Engine",
+      "sublabel": "Compliance Aggregator",
+      "pos": [700, 70],
+      "size": [130, 60],
+      "tag": "C13 Rules"
+    },
+    {
+      "id": "scan_cache",
+      "type": "backend",
+      "label": "In-Memory Cache",
+      "sublabel": "<0.05ms Token Verify",
+      "pos": [700, 250],
+      "size": [130, 60],
+      "tag": "C05 Cache"
+    },
+    {
+      "id": "async_writer",
+      "type": "messagebus",
+      "label": "Async DB Writer",
+      "sublabel": "Dedupe Batch Writer",
+      "pos": [700, 430],
+      "size": [130, 60],
+      "tag": "C05 Worker"
+    },
+    {
+      "id": "downstream_sync",
+      "type": "external",
+      "label": "Multi-Target Sync",
+      "sublabel": "GSheets, Frappe & Excel",
+      "pos": [950, 70],
+      "size": [130, 60],
+      "tag": "Roster Sync"
+    },
+    {
+      "id": "db_primary",
+      "type": "database",
+      "label": "SQLAlchemy DB",
+      "sublabel": "MySQL / PostgreSQL",
+      "brand": "sqlite",
+      "pos": [950, 250],
+      "size": [130, 60],
+      "tag": "C02/C03 ORM"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "security-group",
+      "label": "Student Hardware Device Boundary",
+      "wraps": ["face_engine", "student_pwa", "crypto_vault"]
+    },
+    {
+      "kind": "region",
+      "label": "Backend Application Cluster (Docker / Server)",
+      "wraps": ["onboarding_dispatcher", "selfie_service", "fastapi_core", "binding_guard", "jntuh_engine", "scan_cache", "async_writer", "db_primary"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "face-to-pwa",
+      "from": "face_engine",
+      "to": "student_pwa",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "label": "liveness gate",
+      "labelAt": [105, 180],
+      "variant": "security"
+    },
+    {
+      "id": "crypto-to-pwa",
+      "from": "crypto_vault",
+      "to": "student_pwa",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "label": "sign token",
+      "labelAt": [105, 340],
+      "variant": "security"
+    },
+    {
+      "id": "pwa-to-tunnel",
+      "from": "student_pwa",
+      "to": "cf_tunnel",
+      "label": "scan & selfie",
+      "variant": "emphasis"
+    },
+    {
+      "id": "teacher-to-tunnel",
+      "from": "teacher_broadcast",
+      "to": "cf_tunnel",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "label": "broadcast",
+      "labelAt": [305, 180],
+      "variant": "dashed"
+    },
+    {
+      "id": "tunnel-to-api",
+      "from": "cf_tunnel",
+      "to": "fastapi_core",
+      "label": "ingress",
+      "variant": "emphasis"
+    },
+    {
+      "id": "binding-to-onboarding",
+      "from": "binding_guard",
+      "to": "onboarding_dispatcher",
+      "fromSide": "left",
+      "toSide": "right",
+      "label": "OTP recovery",
+      "variant": "dashed"
+    },
+    {
+      "id": "api-to-selfie",
+      "from": "fastapi_core",
+      "to": "selfie_service",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "label": "store photo",
+      "labelAt": [515, 180]
+    },
+    {
+      "id": "api-to-binding",
+      "from": "fastapi_core",
+      "to": "binding_guard",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "label": "verify",
+      "labelAt": [515, 340],
+      "variant": "security"
+    },
+    {
+      "id": "api-to-cache",
+      "from": "fastapi_core",
+      "to": "scan_cache",
+      "label": "check cache",
+      "variant": "emphasis"
+    },
+    {
+      "id": "cache-to-rules",
+      "from": "scan_cache",
+      "to": "jntuh_engine",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "label": "rules",
+      "labelAt": [765, 180]
+    },
+    {
+      "id": "cache-to-writer",
+      "from": "scan_cache",
+      "to": "async_writer",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "label": "enqueue",
+      "labelAt": [765, 340],
+      "variant": "dashed"
+    },
+    {
+      "id": "writer-to-db",
+      "from": "async_writer",
+      "to": "db_primary",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "label": "commit",
+      "variant": "emphasis"
+    },
+    {
+      "id": "engine-to-sync",
+      "from": "jntuh_engine",
+      "to": "downstream_sync",
+      "label": "export stats"
+    },
+    {
+      "id": "db-to-sync",
+      "from": "db_primary",
+      "to": "downstream_sync",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "label": "sync sheets",
+      "labelAt": [1015, 180],
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Edge & Cryptographic Security",
+      "items": [
+        "Hardware-backed WebCrypto ECDSA P-256 non-extractable keys in IndexedDB",
+        "Challenge-response replay protection prevents proxy attendance attacks",
+        "Cloudflare Tunnel provides encrypted zero-trust edge termination"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Ultra-Low Latency & Face Capture",
+      "items": [
+        "Dual-tier client face detection (FaceDetector + skin-chroma fallback) with oval quality gate",
+        "Teacher 15-30s dynamic HMAC rotating QR codes displayed on classroom projector",
+        "Sub-0.05ms in-memory scan verification eliminates DB contention during burst"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Academic Compliance & Multi-Target Sync",
+      "items": [
+        "JNTUH R25 compliance rule calculations with automated condonation flags",
+        "Multi-target synchronization across Google Sheets API v4, Frappe ERP, and Master Excel",
+        "Automated magic-link onboarding and credential email dispatch pipeline"
+      ]
+    }
+  ]
+}
