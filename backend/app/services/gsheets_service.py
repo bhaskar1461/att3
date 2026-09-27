@@ -91,6 +91,74 @@ class GoogleSheetsService:
             return gspread.authorize(creds)
 
     @classmethod
+    def _execute_with_retry(cls, operation, max_retries: int = 3, base_delay: float = 1.0, op_name: str = "GSheets API call"):
+        """
+        Executes a Google Sheets API operation with exponential backoff and jitter
+        to mitigate rate-limiting (HTTP 429) and transient server errors (HTTP 500/503).
+        Defensive handling ensures errors are logged with diagnostic context without crashing.
+        """
+        import time
+        import random
+
+        last_exc = None
+        for attempt in range(max_retries):
+            try:
+                return operation()
+            except Exception as e:
+                last_exc = e
+                err_str = str(e).lower()
+                is_transient = any(code in err_str for code in [
+                    "429", "500", "502", "503", "504",
+                    "quota", "rate limit", "ratelimit",
+                    "timeout", "timed out", "concurrent",
+                    "resource exhausted", "temporary", "service unavailable"
+                ])
+                if attempt < max_retries - 1 and is_transient:
+                    sleep_time = (base_delay * (2 ** attempt)) + random.uniform(0.1, 0.5)
+                    logger.warning(f"[{op_name}] Transient API error (attempt {attempt + 1}/{max_retries}): {e}. Retrying in {sleep_time:.2f}s...")
+                    time.sleep(sleep_time)
+                else:
+                    if not is_transient:
+                        logger.error(f"[{op_name}] Permanent/non-transient API error: {e}")
+                    else:
+                        logger.error(f"[{op_name}] Exhausted all {max_retries} retries: {e}")
+                    raise
+        if last_exc:
+            raise last_exc
+
+    @classmethod
+    def _open_spreadsheet(cls, client, spreadsheet_id: str):
+        """Opens a Google Spreadsheet by ID with exponential retry."""
+        return cls._execute_with_retry(
+            lambda: client.open_by_key(spreadsheet_id),
+            op_name=f"Open spreadsheet {spreadsheet_id}"
+        )
+
+    @classmethod
+    def _read_worksheet_values(cls, worksheet):
+        """Reads all values from worksheet with exponential retry."""
+        return cls._execute_with_retry(
+            lambda: worksheet.get_all_values(),
+            op_name=f"Read worksheet {getattr(worksheet, 'title', 'unknown')}"
+        )
+
+    @classmethod
+    def _update_worksheet_values(cls, worksheet, values, range_name="A1", value_input_option="USER_ENTERED"):
+        """Updates values in worksheet with exponential retry."""
+        return cls._execute_with_retry(
+            lambda: worksheet.update(values=values, range_name=range_name, value_input_option=value_input_option),
+            op_name=f"Update worksheet {getattr(worksheet, 'title', 'unknown')} ({range_name})"
+        )
+
+    @classmethod
+    def _batch_update_spreadsheet(cls, spreadsheet, requests):
+        """Applies batch formatting requests to spreadsheet with exponential retry."""
+        return cls._execute_with_retry(
+            lambda: spreadsheet.batch_update({"requests": requests}),
+            op_name="Batch update spreadsheet"
+        )
+
+    @classmethod
     def create_and_populate_student_sheet(
         cls,
         credentials_json: str,
@@ -101,7 +169,10 @@ class GoogleSheetsService:
         """Creates a new Google Sheet spreadsheet and populates it with formatted student roster."""
         try:
             client = cls._get_client(credentials_json)
-            spreadsheet = client.create(title)
+            spreadsheet = cls._execute_with_retry(
+                lambda: client.create(title),
+                op_name=f"Create spreadsheet '{title}'"
+            )
             
             if share_email == "anyone":
                 try:
@@ -166,7 +237,7 @@ class GoogleSheetsService:
 
         try:
             client = cls._get_client(credentials_json)
-            spreadsheet = client.open_by_key(spreadsheet_id)
+            spreadsheet = cls._open_spreadsheet(client, spreadsheet_id)
             
             try:
                 worksheet = spreadsheet.worksheet("Attendance Register")
@@ -178,7 +249,7 @@ class GoogleSheetsService:
                     pass
 
             # Read existing grid if present to preserve date columns and data
-            existing_vals = worksheet.get_all_values()
+            existing_vals = cls._read_worksheet_values(worksheet)
 
             import re
             def is_valid_date(val: str) -> bool:
@@ -245,7 +316,7 @@ class GoogleSheetsService:
                     st_row.append(val)
                 rows.append(st_row)
 
-            worksheet.update(values=rows, range_name="A1")
+            cls._update_worksheet_values(worksheet, rows, range_name="A1")
 
             num_rows = len(rows)
             num_cols = max(len(rows[5]), 14)  # Guarantee banner spans wide across sheet
@@ -273,8 +344,59 @@ class GoogleSheetsService:
         return result
 
     @staticmethod
-    def _get_worksheet(spreadsheet):
-        """Retrieves active worksheet, prioritizing 'CSE-CS', 'Attendance Register', then sheet1."""
+    def _get_worksheet(
+        spreadsheet, 
+        section_name: Optional[str] = None, 
+        roll_number: Optional[str] = None,
+        rolls: Optional[List[str]] = None
+    ):
+        """
+        Retrieves active worksheet, prioritizing:
+        1. Exact or normalized match on section_name (e.g. 'IT-A' -> 'IT-A LATEST', 'IT-B' -> 'IT-B LATEST')
+        2. Worksheet containing roll_number or any roll in rolls in Col B (index 1)
+        3. Prioritized defaults ('CSE-CS', 'Attendance Register')
+        4. Fallback to sheet1
+        """
+        if section_name:
+            import re
+            sec_raw = str(section_name).strip().upper()
+            match = re.search(r'\b([A-Z0-9]+)[-_ ]*([A-Z0-9]+)\b', sec_raw)
+            if match:
+                canonical_sec = f"{match.group(1)}-{match.group(2)}"
+                norm_sec = f"{match.group(1)}{match.group(2)}"
+            else:
+                canonical_sec = sec_raw
+                norm_sec = sec_raw.replace(" ", "").replace("-", "")
+
+            # 1. Exact match on title or normalized title
+            for ws in spreadsheet.worksheets():
+                ws_norm = ws.title.strip().upper().replace(" ", "").replace("-", "")
+                if ws_norm == norm_sec:
+                    return ws
+
+            # 2. Check if canonical_sec is in ws.title (e.g. 'IT-B' in 'IT-B LATEST')
+            for ws in spreadsheet.worksheets():
+                ws_title = ws.title.strip().upper()
+                if canonical_sec in ws_title or norm_sec in ws_title.replace(" ", "").replace("-", ""):
+                    return ws
+
+        target_rolls = set()
+        if roll_number:
+            target_rolls.add(str(roll_number).strip().upper())
+        if rolls:
+            for r in rolls:
+                if r:
+                    target_rolls.add(str(r).strip().upper())
+
+        if target_rolls:
+            for ws in spreadsheet.worksheets():
+                try:
+                    ws_rolls = {str(r).strip().upper() for r in ws.col_values(2)}
+                    if target_rolls & ws_rolls:
+                        return ws
+                except Exception:
+                    continue
+
         for title in ["CSE-CS", "Attendance Register"]:
             try:
                 return spreadsheet.worksheet(title)
@@ -519,9 +641,40 @@ class GoogleSheetsService:
                 }
             ]
 
-            spreadsheet.batch_update({"requests": requests})
+            cls._batch_update_spreadsheet(spreadsheet, requests)
         except Exception as fmt_err:
             logger.warning(f"Batch formatting warning: {fmt_err}")
+
+    @classmethod
+    def _apply_borders(cls, spreadsheet, worksheet, start_row: int, end_row: int, start_col: int, end_col: int):
+        """Applies crisp solid 1px dark borders to every cell in the specified range."""
+        try:
+            sheet_id = getattr(worksheet, 'id', 0)
+            if isinstance(sheet_id, str) and sheet_id.isdigit():
+                sheet_id = int(sheet_id)
+            elif not isinstance(sheet_id, int):
+                sheet_id = 0
+
+            req = {
+                "updateBorders": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": max(0, start_row),
+                        "endRowIndex": end_row,
+                        "startColumnIndex": max(0, start_col),
+                        "endColumnIndex": end_col
+                    },
+                    "top": {"style": "SOLID", "width": 1, "color": {"red": 0.0, "green": 0.0, "blue": 0.0}},
+                    "bottom": {"style": "SOLID", "width": 1, "color": {"red": 0.0, "green": 0.0, "blue": 0.0}},
+                    "left": {"style": "SOLID", "width": 1, "color": {"red": 0.0, "green": 0.0, "blue": 0.0}},
+                    "right": {"style": "SOLID", "width": 1, "color": {"red": 0.0, "green": 0.0, "blue": 0.0}},
+                    "innerHorizontal": {"style": "SOLID", "width": 1, "color": {"red": 0.0, "green": 0.0, "blue": 0.0}},
+                    "innerVertical": {"style": "SOLID", "width": 1, "color": {"red": 0.0, "green": 0.0, "blue": 0.0}}
+                }
+            }
+            cls._batch_update_spreadsheet(spreadsheet, [req])
+        except Exception as e:
+            logger.warning(f"Could not apply borders to worksheet: {e}")
 
     @classmethod
     def record_attendance_in_gsheet(
@@ -531,16 +684,15 @@ class GoogleSheetsService:
         roll_number: str,
         date_str: str,
         status_code: str = "4",
-        period_total: str = "4"
+        period_total: str = "4",
+        section_name: Optional[str] = None
     ) -> bool:
         """
         Records attendance for a roll number under date_str in real-time.
         Matches SNIST layout:
-          Conducted periods row = Row 4 (Col G+)
-          Title banner row      = Row 5
-          Date header row       = Row 6 (Col G+)
-          Total summary col     = Placed immediately after all date columns
-          Student rows          = Row 7+
+          Header Row            = Dynamically located by 'ROLL'
+          Total / Cumulative    = Positioned AFTER all date columns
+          Student rows          = Follow header row
           Roll No col           = Col B (index 1)
           Status code           = "1"-"8" (Present) or "A" (Absent)
         """
@@ -569,81 +721,97 @@ class GoogleSheetsService:
                     return f"{day}/{month}/{year}"
                 return s
 
-            # Sanitize and clamp status code: "A" for Absent, integer 1-8 for Present (NEVER 32)
+            # Sanitize and clamp status code: "A" for Absent, integer 1-4 for Present (session max is 4 periods)
             clean_status = str(status_code).strip().upper()
             if clean_status in ["A", "ABSENT"]:
                 status_code_clean = "A"
             else:
                 try:
-                    status_code_clean = str(max(1, min(8, int(clean_status))))
+                    status_code_clean = str(max(1, min(4, int(clean_status))))
                 except Exception:
                     status_code_clean = "4"
 
             try:
-                period_total_clean = str(max(1, min(8, int(period_total))))
+                period_total_clean = str(max(1, min(4, int(period_total))))
             except Exception:
                 period_total_clean = "4"
 
-            # Format display date as DD/MM/YYYY
+            # Format display date as D/M/YY (e.g. 15/9/26) to match the existing sheet register headers
             target_date_norm = norm_d(date_str)
             display_date = target_date_norm
-            for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y"]:
-                try:
-                    dt_obj = datetime.strptime(str(date_str).strip(), fmt)
-                    display_date = dt_obj.strftime("%d/%m/%Y")
-                    break
-                except ValueError:
-                    pass
 
             client = cls._get_client(credentials_json)
-            spreadsheet = client.open_by_key(spreadsheet_id)
-            worksheet = cls._get_worksheet(spreadsheet)
+            spreadsheet = cls._open_spreadsheet(client, spreadsheet_id)
+            worksheet = cls._get_worksheet(spreadsheet, section_name=section_name, roll_number=roll_number)
 
-            vals = worksheet.get_all_values()
+            vals = cls._read_worksheet_values(worksheet)
             if len(vals) < 6:
                 logger.warning("Sheet does not have SNIST layout headers yet.")
                 return False
 
             target_roll = str(roll_number).strip().upper()
 
-            # Locate Total column index in Row 6 (vals[5])
+            # Dynamically locate Header Row containing ROLL NO
+            header_r_0idx = -1
+            roll_col_0idx = 1
+            for r_i, r_data in enumerate(vals[:10]):
+                for c_i, cell in enumerate(r_data):
+                    if "ROLL" in str(cell).upper():
+                        header_r_0idx = r_i
+                        roll_col_0idx = c_i
+                        break
+                if header_r_0idx != -1:
+                    break
+
+            if header_r_0idx == -1:
+                header_r_0idx = 5
+
+            headers = vals[header_r_0idx]
+            student_start_r_0idx = header_r_0idx + 1
+
+            # Locate Total / Cumulative column index by searching all rows up to header row
             total_c_0idx = -1
-            for c_idx in range(4, len(vals[5])):
-                if str(vals[5][c_idx]).strip().lower() == "total":
-                    total_c_0idx = c_idx
+            for c_idx in range(roll_col_0idx + 1, len(headers)):
+                for r_check in range(header_r_0idx + 1):
+                    if c_idx < len(vals[r_check]):
+                        val_str = str(vals[r_check][c_idx]).strip().lower()
+                        if "total" in val_str or "cumulative" in val_str:
+                            total_c_0idx = c_idx
+                            break
+                if total_c_0idx != -1:
                     break
 
-            # Locate first date column index in Row 6 (default to Col G = index 6)
-            first_date_c_0idx = 6
-            for c_idx in range(4, len(vals[5])):
-                d_str = str(vals[5][c_idx]).strip()
-                if ("/" in d_str or "-" in d_str) and str(vals[5][c_idx]).strip().lower() != "total":
-                    first_date_c_0idx = c_idx
-                    break
-
-            # Locate date column in Row 6 (vals[5])
-            date_col_0idx = -1
-            for c_idx in range(4, len(vals[5])):
+            # Locate first date column index
+            first_date_c_0idx = -1
+            for c_idx in range(roll_col_0idx + 1, len(headers)):
                 if c_idx == total_c_0idx:
                     continue
-                d_val = str(vals[5][c_idx]).strip()
-                if d_val and norm_d(d_val) == target_date_norm:
-                    date_col_0idx = c_idx
+                for r_check in range(header_r_0idx + 1):
+                    if c_idx < len(vals[r_check]):
+                        d_str = str(vals[r_check][c_idx]).strip()
+                        if ("/" in d_str or "-" in d_str) and "total" not in d_str.lower() and "cumulative" not in d_str.lower():
+                            first_date_c_0idx = c_idx
+                            break
+                if first_date_c_0idx != -1:
+                    break
+            if first_date_c_0idx == -1:
+                first_date_c_0idx = 6
+
+            # Locate target date column across all header rows
+            date_col_0idx = -1
+            for c_idx in range(roll_col_0idx + 1, len(headers)):
+                if c_idx == total_c_0idx:
+                    continue
+                for r_check in range(header_r_0idx + 1):
+                    if c_idx < len(vals[r_check]):
+                        d_val = str(vals[r_check][c_idx]).strip()
+                        if d_val and norm_d(d_val) == target_date_norm:
+                            date_col_0idx = c_idx
+                            break
+                if date_col_0idx != -1:
                     break
 
-            # Fallback check in Row 5 (vals[4]) in case date was previously misplaced there
-            if date_col_0idx == -1 and len(vals) > 4:
-                for c_idx in range(4, len(vals[4])):
-                    if c_idx == total_c_0idx:
-                        continue
-                    d_val = str(vals[4][c_idx]).strip()
-                    if d_val and norm_d(d_val) == target_date_norm:
-                        date_col_0idx = c_idx
-                        vals[4][c_idx] = ""
-                        vals[5][c_idx] = display_date
-                        break
-
-            # If date column not found, insert a new date column BEFORE Total (or append at end)
+            # If date column not found, insert a new date column BEFORE Cumulative Attendance (or append at end)
             if date_col_0idx == -1:
                 if total_c_0idx != -1:
                     date_col_0idx = total_c_0idx
@@ -651,19 +819,16 @@ class GoogleSheetsService:
                         vals[r_i].insert(date_col_0idx, "")
                     total_c_0idx += 1
                 else:
-                    date_col_0idx = len(vals[5])
+                    date_col_0idx = len(headers)
                     for r_i in range(len(vals)):
                         vals[r_i].append("")
 
-                if len(vals) > 3:
-                    vals[3][date_col_0idx] = period_total_clean
-                if len(vals) > 4:
-                    vals[4][date_col_0idx] = ""
-                if len(vals) > 5:
-                    vals[5][date_col_0idx] = display_date
+                if header_r_0idx > 0 and len(vals) > header_r_0idx - 1:
+                    vals[header_r_0idx - 1][date_col_0idx] = ""
+                vals[header_r_0idx][date_col_0idx] = display_date
 
-                for r_i in range(6, len(vals)):
-                    roll = str(vals[r_i][1]).strip() if len(vals[r_i]) > 1 else ""
+                for r_i in range(student_start_r_0idx, len(vals)):
+                    roll = str(vals[r_i][roll_col_0idx]).strip() if len(vals[r_i]) > roll_col_0idx else ""
                     sno = str(vals[r_i][0]).strip() if len(vals[r_i]) > 0 else ""
                     if roll and not roll.startswith("*") and not sno.startswith("*"):
                         vals[r_i][date_col_0idx] = "A"
@@ -672,38 +837,36 @@ class GoogleSheetsService:
 
             # Set attendance for the student
             student_found = False
-            for r_idx in range(6, len(vals)):
+            for r_idx in range(student_start_r_0idx, len(vals)):
                 while len(vals[r_idx]) <= date_col_0idx:
                     vals[r_idx].append("")
-                row_roll = str(vals[r_idx][1]).strip().upper() if len(vals[r_idx]) > 1 else ""
+                row_roll = str(vals[r_idx][roll_col_0idx]).strip().upper() if len(vals[r_idx]) > roll_col_0idx else ""
                 if row_roll == target_roll:
                     vals[r_idx][date_col_0idx] = status_code_clean
                     student_found = True
                     break
 
-            # Update Total column formulas if present
+            # If Total / Cumulative column is missing, create it AFTER all date columns
+            if total_c_0idx == -1:
+                total_c_0idx = max(len(r) for r in vals)
+                for r_i in range(len(vals)):
+                    while len(vals[r_i]) <= total_c_0idx:
+                        vals[r_i].append("")
+                if header_r_0idx > 0 and len(vals) > header_r_0idx - 1:
+                    vals[header_r_0idx - 1][total_c_0idx] = "Cumulative Attendance"
+                vals[header_r_0idx][total_c_0idx] = "Cumulative Attendance"
+
+            # Update Total / Cumulative column formulas
             if total_c_0idx != -1:
                 if first_date_c_0idx >= total_c_0idx:
                     first_date_c_0idx = max(4, total_c_0idx - 1)
                 first_col_letter = cls._col_to_letter(first_date_c_0idx + 1)
                 last_col_letter = cls._col_to_letter(total_c_0idx)
-                if len(vals) > 3:
-                    while len(vals[3]) <= total_c_0idx:
-                        vals[3].append("")
-                    vals[3][total_c_0idx] = f"=SUM({first_col_letter}4:{last_col_letter}4)"
-                if len(vals) > 4:
-                    while len(vals[4]) <= total_c_0idx:
-                        vals[4].append("")
-                    vals[4][total_c_0idx] = ""
-                if len(vals) > 5:
-                    while len(vals[5]) <= total_c_0idx:
-                        vals[5].append("")
-                    vals[5][total_c_0idx] = "Total"
-                for r_i in range(6, len(vals)):
+                for r_i in range(student_start_r_0idx, len(vals)):
                     row_num = r_i + 1
                     while len(vals[r_i]) <= total_c_0idx:
                         vals[r_i].append("")
-                    roll = str(vals[r_i][1]).strip() if len(vals[r_i]) > 1 else ""
+                    roll = str(vals[r_i][roll_col_0idx]).strip() if len(vals[r_i]) > roll_col_0idx else ""
                     sno = str(vals[r_i][0]).strip() if len(vals[r_i]) > 0 else ""
                     if roll and not roll.startswith("*") and not sno.startswith("*"):
                         vals[r_i][total_c_0idx] = f"=SUM({first_col_letter}{row_num}:{last_col_letter}{row_num})"
@@ -711,10 +874,14 @@ class GoogleSheetsService:
                         vals[r_i][total_c_0idx] = ""
 
             # Single atomic update with USER_ENTERED to evaluate formulas
-            worksheet.update(values=vals, range_name="A1", value_input_option="USER_ENTERED")
+            cls._update_worksheet_values(worksheet, vals, range_name="A1", value_input_option="USER_ENTERED")
+
+            # Apply full borders to the sheet
+            max_c = max(len(r) for r in vals) if vals else 37
+            cls._apply_borders(spreadsheet, worksheet, start_row=max(0, header_r_0idx - 2), end_row=len(vals), start_col=0, end_col=max_c)
 
             if student_found:
-                logger.info(f"[GSheets Sync] Roll {target_roll} on {date_str} marked '{status_code_clean}' in date col {date_col_0idx+1}, Total column updated.")
+                logger.info(f"[GSheets Sync] Roll {target_roll} on {date_str} marked '{status_code_clean}' in date col {date_col_0idx+1}, Total column updated, borders applied.")
                 return True
             else:
                 logger.warning(f"[GSheets Sync] Student Roll {target_roll} not found in sheet rows.")
@@ -728,41 +895,80 @@ class GoogleSheetsService:
     def mark_all_absent(
         cls,
         credentials_json: str,
-        spreadsheet_id: str
+        spreadsheet_id: str,
+        section_name: Optional[str] = None
     ) -> bool:
         """
         Resets all student attendance entries to "A" (Absent) across all date columns,
         preserving the Total column and dynamically updating formulas.
+        Uses dynamic header lookup (FIX 6).
         """
         if not credentials_json or not spreadsheet_id:
             return False
 
         try:
             client = cls._get_client(credentials_json)
-            spreadsheet = client.open_by_key(spreadsheet_id)
-            worksheet = cls._get_worksheet(spreadsheet)
+            spreadsheet = cls._open_spreadsheet(client, spreadsheet_id)
+            worksheet = cls._get_worksheet(spreadsheet, section_name=section_name)
 
-            vals = worksheet.get_all_values()
+            vals = cls._read_worksheet_values(worksheet)
             if len(vals) < 6:
                 return False
 
+            # FIX 6: Dynamically locate Header Row containing ROLL NO
+            header_r_0idx = -1
+            roll_col_0idx = 1
+            for r_i, r_data in enumerate(vals[:10]):
+                for c_i, cell in enumerate(r_data):
+                    if "ROLL" in str(cell).upper():
+                        header_r_0idx = r_i
+                        roll_col_0idx = c_i
+                        break
+                if header_r_0idx != -1:
+                    break
+
+            if header_r_0idx == -1:
+                header_r_0idx = 5
+
+            headers = vals[header_r_0idx]
+            student_start_r_0idx = header_r_0idx + 1
+
+            # Locate Total / Cumulative column by header text
             total_c_0idx = -1
-            for c_idx in range(4, len(vals[5])):
-                if str(vals[5][c_idx]).strip().lower() == "total":
-                    total_c_0idx = c_idx
+            for c_idx in range(roll_col_0idx + 1, len(headers)):
+                for r_check in range(header_r_0idx + 1):
+                    if c_idx < len(vals[r_check]):
+                        val_str = str(vals[r_check][c_idx]).strip().lower()
+                        if "total" in val_str or "cumulative" in val_str:
+                            total_c_0idx = c_idx
+                            break
+                if total_c_0idx != -1:
                     break
 
-            first_date_c_0idx = 6
-            for c_idx in range(4, len(vals[5])):
-                d_str = str(vals[5][c_idx]).strip()
-                if ("/" in d_str or "-" in d_str) and str(vals[5][c_idx]).strip().lower() != "total":
-                    first_date_c_0idx = c_idx
+            # Locate first date column
+            first_date_c_0idx = -1
+            for c_idx in range(roll_col_0idx + 1, len(headers)):
+                if c_idx == total_c_0idx:
+                    continue
+                for r_check in range(header_r_0idx + 1):
+                    if c_idx < len(vals[r_check]):
+                        d_str = str(vals[r_check][c_idx]).strip()
+                        if ("/" in d_str or "-" in d_str) and "total" not in d_str.lower() and "cumulative" not in d_str.lower():
+                            first_date_c_0idx = c_idx
+                            break
+                if first_date_c_0idx != -1:
                     break
+            if first_date_c_0idx == -1:
+                first_date_c_0idx = roll_col_0idx + 1
 
-            # Update all student rows (Row 7+) for all date columns to "A", skipping Total column
-            for r_idx in range(6, len(vals)):
+            # Update all student rows for all date columns to "A", skipping Total column
+            for r_idx in range(student_start_r_0idx, len(vals)):
                 row_len = len(vals[r_idx])
-                for c_idx in range(4, row_len):
+                roll = str(vals[r_idx][roll_col_0idx]).strip() if row_len > roll_col_0idx else ""
+                sno = str(vals[r_idx][0]).strip() if row_len > 0 else ""
+                if not (roll and not roll.startswith("*") and not sno.startswith("*")):
+                    continue
+                for c_idx in range(first_date_c_0idx, row_len):
                     if c_idx == total_c_0idx:
                         continue
                     vals[r_idx][c_idx] = "A"
@@ -770,16 +976,21 @@ class GoogleSheetsService:
             # Re-apply Total formula
             if total_c_0idx != -1:
                 if first_date_c_0idx >= total_c_0idx:
-                    first_date_c_0idx = max(4, total_c_0idx - 1)
+                    first_date_c_0idx = max(roll_col_0idx + 1, total_c_0idx - 1)
                 first_col_letter = cls._col_to_letter(first_date_c_0idx + 1)
                 last_col_letter = cls._col_to_letter(total_c_0idx)
-                for r_i in range(6, len(vals)):
+                for r_i in range(student_start_r_0idx, len(vals)):
                     row_num = r_i + 1
                     while len(vals[r_i]) <= total_c_0idx:
                         vals[r_i].append("")
-                    vals[r_i][total_c_0idx] = f"=SUM({first_col_letter}{row_num}:{last_col_letter}{row_num})"
+                    roll = str(vals[r_i][roll_col_0idx]).strip() if len(vals[r_i]) > roll_col_0idx else ""
+                    sno = str(vals[r_i][0]).strip() if len(vals[r_i]) > 0 else ""
+                    if roll and not roll.startswith("*") and not sno.startswith("*"):
+                        vals[r_i][total_c_0idx] = f"=SUM({first_col_letter}{row_num}:{last_col_letter}{row_num})"
+                    else:
+                        vals[r_i][total_c_0idx] = ""
 
-            worksheet.update(values=vals, range_name="A1", value_input_option="USER_ENTERED")
+            cls._update_worksheet_values(worksheet, vals, range_name="A1", value_input_option="USER_ENTERED")
             logger.info(f"Successfully marked all students as ABSENT (A) in Google Sheet ID: {spreadsheet_id}")
             return True
         except Exception as e:
@@ -794,15 +1005,18 @@ class GoogleSheetsService:
         date_str: str,
         present_rolls: List[str],
         all_section_rolls: List[str],
-        period_total: str = "4"
+        period_total: str = "4",
+        section_name: Optional[str] = None,
+        session_half: Optional[str] = None
     ) -> bool:
         """
         Syncs an entire session's attendance to Google Sheet in a SINGLE atomic batch call:
-        Present rolls get clamped 1-8 periods, Absent rolls get "A".
+        Present rolls get clamped 1-4 periods per half-day session (FN / AN), Absent rolls get "A".
         Maintains SNIST template layout:
-          Row 4: Conducted periods per session
-          Row 6: Date header (DD/MM/YYYY)
-          Total: Dynamically placed after all dates with =SUM formulas evaluated via USER_ENTERED.
+          Header Row            = Dynamically located by 'ROLL'
+          Session Halves        = Respects FN (Periods 1-4) and AN (Periods 5-8)
+          Total / Cumulative    = Positioned AFTER all date columns
+          Borders               = Crisp solid 1px borders on all cells
         """
         if not credentials_json or not spreadsheet_id:
             logger.info("Google Sheets session sync skipped: Credentials or Spreadsheet ID missing.")
@@ -810,171 +1024,312 @@ class GoogleSheetsService:
 
         try:
             from datetime import datetime
+            import re
 
-            def norm_d(d):
-                s = str(d).strip()
-                if not s:
-                    return ""
-                for fmt in ["%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d"]:
+            # Infer session_half ("FN", "AN", "BOTH") if not explicitly passed
+            period_str_upper = str(period_total).strip().upper()
+            if not session_half:
+                if "1-8" in period_str_upper or "8 PERIODS" in period_str_upper or "FULL DAY" in period_str_upper or period_str_upper == "8":
+                    session_half = "BOTH"
+                elif "AN" in period_str_upper or "AFTERNOON" in period_str_upper:
+                    session_half = "AN"
+                elif "FN" in period_str_upper or "FORENOON" in period_str_upper:
+                    session_half = "FN"
+                elif any(p in period_str_upper for p in ["5-8", "PERIOD 5", "PERIOD 6", "PERIOD 7", "PERIOD 8"]):
+                    session_half = "AN"
+                elif any(p in period_str_upper for p in ["1-4", "PERIOD 1", "PERIOD 2", "PERIOD 3", "PERIOD 4"]):
+                    session_half = "FN"
+                else:
                     try:
-                        dt = datetime.strptime(s, fmt)
-                        return f"{dt.day}/{dt.month}/{str(dt.year)[-2:]}"
-                    except ValueError:
-                        continue
-                parts = s.replace("-", "/").split("/")
-                if len(parts) == 3:
-                    day = str(int(parts[0])) if parts[0].isdigit() else parts[0]
-                    month = str(int(parts[1])) if parts[1].isdigit() else parts[1]
-                    year = parts[2][-2:] if len(parts[2]) == 4 else parts[2]
-                    return f"{day}/{month}/{year}"
-                return s
+                        from app.core.security import get_server_ist_datetime
+                        ist_now = get_server_ist_datetime()
+                        session_half = "AN" if ist_now.hour >= 13 else "FN"
+                    except Exception:
+                        session_half = "FN"
 
-            # Sanitize and clamp period total strictly between 1 and 8 (default 4, NEVER 32)
+            # If session is full-day (8 periods / BOTH), treat as a single 8-period full-day session
+            if session_half == "BOTH":
+                session_half = None
+                period_total = "8"
+
+            # 1. Parse target date (day, month, year) from date_str
+            target_day, target_month, target_year = None, None, 2026
+            for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%m/%d/%Y"]:
+                try:
+                    dt_obj = datetime.strptime(str(date_str).strip(), fmt)
+                    target_day = dt_obj.day
+                    target_month = dt_obj.month
+                    target_year = dt_obj.year
+                    break
+                except ValueError:
+                    continue
+            if not target_day:
+                parts = str(date_str).strip().replace("-", "/").split("/")
+                if len(parts) >= 2:
+                    if len(parts[0]) == 4:
+                        target_year, target_month, target_day = int(parts[0]), int(parts[1]), int(parts[2])
+                    else:
+                        target_day, target_month = int(parts[0]), int(parts[1])
+                        target_year = int(parts[2]) if len(parts) > 2 else 2026
+
+            # Clean period total: supports 1 to 8 periods (e.g. 4 for half-day, 8 for full-day)
             clean_period = str(period_total).strip().upper()
             try:
                 period_total_clean = str(max(1, min(8, int(clean_period))))
             except Exception:
-                period_total_clean = "4"
-
-            target_date_norm = norm_d(date_str)
-            display_date = target_date_norm
-            for fmt in ["%Y-%m-%d", "%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y"]:
-                try:
-                    dt_obj = datetime.strptime(str(date_str).strip(), fmt)
-                    display_date = dt_obj.strftime("%d/%m/%Y")
-                    break
-                except ValueError:
-                    pass
+                m_p = re.search(r'\((\d+)\s*PERIODS?', clean_period)
+                if m_p:
+                    period_total_clean = str(max(1, min(8, int(m_p.group(1)))))
+                else:
+                    period_total_clean = "4"
 
             client = cls._get_client(credentials_json)
-            spreadsheet = client.open_by_key(spreadsheet_id)
-            worksheet = cls._get_worksheet(spreadsheet)
+            spreadsheet = cls._open_spreadsheet(client, spreadsheet_id)
+            worksheet = cls._get_worksheet(spreadsheet, section_name=section_name, rolls=(all_section_rolls or present_rolls))
 
-            vals = worksheet.get_all_values()
+            vals = cls._read_worksheet_values(worksheet)
             if len(vals) < 6:
                 logger.warning("Sheet does not have SNIST layout headers yet.")
                 return False
 
-            # Locate Total column index in Row 6 (vals[5])
-            total_c_0idx = -1
-            for c_idx in range(4, len(vals[5])):
-                if str(vals[5][c_idx]).strip().lower() == "total":
-                    total_c_0idx = c_idx
+            # Dynamically locate Header Row containing ROLL NO
+            header_r_0idx = -1
+            roll_col_0idx = 1
+            for r_i, r_data in enumerate(vals[:10]):
+                for c_i, cell in enumerate(r_data):
+                    if "ROLL" in str(cell).upper():
+                        header_r_0idx = r_i
+                        roll_col_0idx = c_i
+                        break
+                if header_r_0idx != -1:
                     break
 
-            # Locate first date column index in Row 6 (default to Col G = index 6)
-            first_date_c_0idx = 6
-            for c_idx in range(4, len(vals[5])):
-                d_str = str(vals[5][c_idx]).strip()
-                if ("/" in d_str or "-" in d_str) and str(vals[5][c_idx]).strip().lower() != "total":
-                    first_date_c_0idx = c_idx
-                    break
+            if header_r_0idx == -1:
+                header_r_0idx = 5
 
-            # Locate date column in Row 6 (vals[5])
+            headers = vals[header_r_0idx]
+            student_start_r_0idx = header_r_0idx + 1
+
+            # Helper to parse any cell into (day, month, has_year, cell_half, raw_str)
+            def parse_cell_dm(val):
+                if val is None:
+                    return None
+                s = str(val).strip()
+                if not s:
+                    return None
+                s_low = s.lower()
+                if any(k in s_low for k in ["sno", "roll", "name", "gender", "section", "agency", "cumulative", "total", "cet", "coign", "sreenidhi", "department"]):
+                    return None
+
+                cell_half = None
+                s_upper = s.upper()
+                if "(FN)" in s_upper or " FN" in s_upper or "/FN" in s_upper:
+                    cell_half = "FN"
+                elif "(AN)" in s_upper or "((AN)" in s_upper or " AN" in s_upper or "/AN" in s_upper:
+                    cell_half = "AN"
+
+                for fmt in ["%d/%m/%Y", "%d/%m/%y", "%d-%m-%Y", "%d-%m-%y", "%Y-%m-%d"]:
+                    try:
+                        dt = datetime.strptime(s, fmt)
+                        return (dt.day, dt.month, True, cell_half, s)
+                    except ValueError:
+                        pass
+                for fmt in ["%d/%m", "%d-%m"]:
+                    try:
+                        dt = datetime.strptime(s, fmt)
+                        return (dt.day, dt.month, False, cell_half, s)
+                    except ValueError:
+                        pass
+                m_date = re.search(r'(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?', s)
+                if m_date:
+                    p0, p1, p2 = m_date.group(1), m_date.group(2), m_date.group(3)
+                    d, m_val = int(p0), int(p1)
+                    if 1 <= m_val <= 12 and 1 <= d <= 31:
+                        return (d, m_val, p2 is not None, cell_half, s)
+                return None
+
+            # Scan all columns across header rows to detect existing date columns
+            existing_date_cols = {}  # c_idx -> (day, month, has_year, cell_half, raw_str)
             date_col_0idx = -1
-            for c_idx in range(4, len(vals[5])):
-                if c_idx == total_c_0idx:
-                    continue
-                d_val = str(vals[5][c_idx]).strip()
-                if d_val and norm_d(d_val) == target_date_norm:
-                    date_col_0idx = c_idx
-                    break
 
-            # Fallback check in Row 5 (vals[4]) in case date was previously misplaced there
-            if date_col_0idx == -1 and len(vals) > 4:
-                for c_idx in range(4, len(vals[4])):
-                    if c_idx == total_c_0idx:
-                        continue
-                    d_val = str(vals[4][c_idx]).strip()
-                    if d_val and norm_d(d_val) == target_date_norm:
+            for c_idx in range(roll_col_0idx + 1, len(headers)):
+                for r_check in range(header_r_0idx + 1):
+                    if c_idx < len(vals[r_check]):
+                        cell_raw = str(vals[r_check][c_idx]).strip()
+                        parsed = parse_cell_dm(cell_raw)
+                        if parsed:
+                            existing_date_cols[c_idx] = parsed
+                            break
+
+            # 1st preference: exact date match AND session_half match
+            for c_idx, (d, m, has_yr, ch, raw_s) in existing_date_cols.items():
+                if d == target_day and m == target_month:
+                    if session_half in ["FN", "AN"] and ch == session_half:
                         date_col_0idx = c_idx
-                        vals[4][c_idx] = ""
-                        vals[5][c_idx] = display_date
+                        break
+                    elif session_half is None and ch is None:
+                        date_col_0idx = c_idx
                         break
 
-            # If date column not found, insert a new date column BEFORE Total (or append at end)
+            # 2nd preference: fallback match by date if only 1 column matches or no half-day distinctions
             if date_col_0idx == -1:
-                if total_c_0idx != -1:
-                    date_col_0idx = total_c_0idx
-                    for r_i in range(len(vals)):
-                        vals[r_i].insert(date_col_0idx, "")
-                    total_c_0idx += 1
+                for c_idx, (d, m, has_yr, ch, raw_s) in existing_date_cols.items():
+                    if d == target_day and m == target_month:
+                        date_col_0idx = c_idx
+                        break
+
+            # Check date format used in existing date columns of the sheet
+            uses_year = False
+            uses_compact_brackets = False
+            if existing_date_cols:
+                yr_count = sum(1 for _, (_, _, has_yr, _, _) in existing_date_cols.items() if has_yr)
+                uses_year = yr_count > (len(existing_date_cols) // 2)
+                uses_compact_brackets = any("(" in raw_s and " (" not in raw_s for _, (_, _, _, _, raw_s) in existing_date_cols.items())
+
+            # Format display_date matching sheet style (e.g. 18/09/2026 or 18/9/26 (FN))
+            bracket_sep = "" if uses_compact_brackets else " "
+            suffix = f"{bracket_sep}({session_half})" if session_half in ["FN", "AN"] else ""
+            if uses_year:
+                # Check if 4-digit or 2-digit year is standard in this sheet
+                uses_4digit_yr = any(len(raw_s.split("/")[2][:4]) == 4 for _, (_, _, has_yr, _, raw_s) in existing_date_cols.items() if has_yr and "/" in raw_s and len(raw_s.split("/")) > 2)
+                yr_str = str(target_year) if uses_4digit_yr else str(target_year)[-2:]
+                day_str = f"{target_day:02d}" if any(raw_s.startswith(f"{target_day:02d}") for _, (_, _, _, _, raw_s) in existing_date_cols.items()) else f"{target_day}"
+                month_str = f"{target_month:02d}" if any(f"/{target_month:02d}/" in raw_s for _, (_, _, _, _, raw_s) in existing_date_cols.items()) else f"{target_month}"
+                display_date = f"{day_str}/{month_str}/{yr_str}{suffix}"
+            else:
+                display_date = f"{target_day}/{target_month}{suffix}"
+
+            # Locate first date column index
+            first_date_c_0idx = min(existing_date_cols.keys()) if existing_date_cols else (roll_col_0idx + 1)
+
+            # If date column not found, insert BEFORE Cumulative Attendance (or after the last date column)
+            if date_col_0idx == -1:
+                # Detect if an existing Cumulative Attendance / Total column exists
+                existing_cum_c_0idx = -1
+                for c_idx in range(roll_col_0idx + 1, len(headers)):
+                    for r_check in range(header_r_0idx + 1):
+                        if c_idx < len(vals[r_check]):
+                            v_str = str(vals[r_check][c_idx]).strip().lower()
+                            if "total" in v_str or "cumulative" in v_str:
+                                existing_cum_c_0idx = c_idx
+                                break
+                    if existing_cum_c_0idx != -1:
+                        break
+
+                if existing_cum_c_0idx != -1:
+                    # Insert right before the cumulative column so cumulative stays at the end
+                    date_col_0idx = existing_cum_c_0idx
+                elif existing_date_cols:
+                    last_date_c_0idx = max(existing_date_cols.keys())
+                    date_col_0idx = last_date_c_0idx + 1
                 else:
-                    date_col_0idx = len(vals[5])
-                    for r_i in range(len(vals)):
+                    date_col_0idx = roll_col_0idx + 1
+
+                # Insert column at date_col_0idx across all rows
+                for r_i in range(len(vals)):
+                    if date_col_0idx < len(vals[r_i]):
+                        vals[r_i].insert(date_col_0idx, "")
+                    else:
+                        while len(vals[r_i]) < date_col_0idx:
+                            vals[r_i].append("")
                         vals[r_i].append("")
 
-                if len(vals) > 3:
-                    vals[3][date_col_0idx] = period_total_clean
-                if len(vals) > 4:
-                    vals[4][date_col_0idx] = ""
-                if len(vals) > 5:
-                    vals[5][date_col_0idx] = display_date
+                # Clean upper banner rows above the header row
+                for r_banner in range(header_r_0idx):
+                    if len(vals) > r_banner and len(vals[r_banner]) > date_col_0idx:
+                        vals[r_banner][date_col_0idx] = ""
 
-                for r_i in range(6, len(vals)):
-                    roll = str(vals[r_i][1]).strip() if len(vals[r_i]) > 1 else ""
+                vals[header_r_0idx][date_col_0idx] = display_date
+
+                for r_i in range(student_start_r_0idx, len(vals)):
+                    roll = str(vals[r_i][roll_col_0idx]).strip() if len(vals[r_i]) > roll_col_0idx else ""
                     sno = str(vals[r_i][0]).strip() if len(vals[r_i]) > 0 else ""
                     if roll and not roll.startswith("*") and not sno.startswith("*"):
                         vals[r_i][date_col_0idx] = "A"
                     else:
                         vals[r_i][date_col_0idx] = ""
             else:
-                if len(vals) > 3:
-                    while len(vals[3]) <= date_col_0idx:
-                        vals[3].append("")
-                    if not vals[3][date_col_0idx]:
-                        vals[3][date_col_0idx] = period_total_clean
-                if len(vals) > 5:
-                    while len(vals[5]) <= date_col_0idx:
-                        vals[5].append("")
-                    vals[5][date_col_0idx] = display_date
+                # Column exists: preserve existing custom teacher name in header if present (e.g. 18/09/2026(FN)(V.RAVITEJA))
+                curr_header = str(vals[header_r_0idx][date_col_0idx]).strip()
+                if not curr_header or session_half not in curr_header.upper():
+                    vals[header_r_0idx][date_col_0idx] = display_date
 
             present_set = {str(r).strip().upper() for r in present_rolls}
 
             # Update every student row in memory
-            for r_idx in range(6, len(vals)):
+            for r_idx in range(student_start_r_0idx, len(vals)):
                 while len(vals[r_idx]) <= date_col_0idx:
                     vals[r_idx].append("")
-                row_roll = str(vals[r_idx][1]).strip().upper() if len(vals[r_idx]) > 1 else ""
+                row_roll = str(vals[r_idx][roll_col_0idx]).strip().upper() if len(vals[r_idx]) > roll_col_0idx else ""
                 row_sno = str(vals[r_idx][0]).strip() if len(vals[r_idx]) > 0 else ""
                 if row_roll and not row_roll.startswith("*") and not row_sno.startswith("*"):
                     vals[r_idx][date_col_0idx] = period_total_clean if row_roll in present_set else "A"
                 else:
                     vals[r_idx][date_col_0idx] = ""
 
-            # Update Total column formulas if present
-            if total_c_0idx != -1:
-                if first_date_c_0idx >= total_c_0idx:
-                    first_date_c_0idx = max(4, total_c_0idx - 1)
+            # Check if there is a FINAL Cumulative Attendance column strictly after date_col_0idx
+            final_total_c_0idx = -1
+            for c_idx in range(date_col_0idx + 1, max(len(r) for r in vals)):
+                for r_check in range(header_r_0idx + 1):
+                    if c_idx < len(vals[r_check]):
+                        val_str = str(vals[r_check][c_idx]).strip().lower()
+                        if "total" in val_str or "cumulative" in val_str:
+                            final_total_c_0idx = c_idx
+                            break
+                if final_total_c_0idx != -1:
+                    break
+
+            # Update Final Cumulative column formula if present
+            if final_total_c_0idx != -1:
                 first_col_letter = cls._col_to_letter(first_date_c_0idx + 1)
-                last_col_letter = cls._col_to_letter(total_c_0idx)
-                if len(vals) > 3:
-                    while len(vals[3]) <= total_c_0idx:
-                        vals[3].append("")
-                    vals[3][total_c_0idx] = f"=SUM({first_col_letter}4:{last_col_letter}4)"
-                if len(vals) > 4:
-                    while len(vals[4]) <= total_c_0idx:
-                        vals[4].append("")
-                    vals[4][total_c_0idx] = ""
-                if len(vals) > 5:
-                    while len(vals[5]) <= total_c_0idx:
-                        vals[5].append("")
-                    vals[5][total_c_0idx] = "Total"
-                for r_i in range(6, len(vals)):
+                last_col_letter = cls._col_to_letter(final_total_c_0idx)
+                for r_i in range(student_start_r_0idx, len(vals)):
                     row_num = r_i + 1
-                    while len(vals[r_i]) <= total_c_0idx:
+                    while len(vals[r_i]) <= final_total_c_0idx:
                         vals[r_i].append("")
-                    roll = str(vals[r_i][1]).strip() if len(vals[r_i]) > 1 else ""
+                    roll = str(vals[r_i][roll_col_0idx]).strip() if len(vals[r_i]) > roll_col_0idx else ""
                     sno = str(vals[r_i][0]).strip() if len(vals[r_i]) > 0 else ""
                     if roll and not roll.startswith("*") and not sno.startswith("*"):
-                        vals[r_i][total_c_0idx] = f"=SUM({first_col_letter}{row_num}:{last_col_letter}{row_num})"
+                        vals[r_i][final_total_c_0idx] = f"=SUM({first_col_letter}{row_num}:{last_col_letter}{row_num})"
                     else:
-                        vals[r_i][total_c_0idx] = ""
+                        vals[r_i][final_total_c_0idx] = ""
 
             # Execute single atomic update across the entire sheet with USER_ENTERED
-            worksheet.update(values=vals, range_name="A1", value_input_option="USER_ENTERED")
+            cls._update_worksheet_values(worksheet, vals, range_name="A1", value_input_option="USER_ENTERED")
 
-            logger.info(f"[GSheets Batch Sync] Successfully synchronized session attendance ({len(present_set)} present, {len(all_section_rolls) - len(present_set)} absent) for {date_str} via atomic update.")
+            # Replicate formatting from preceding date column (background color, text style) to target column
+            if date_col_0idx > first_date_c_0idx:
+                try:
+                    cls._batch_update_spreadsheet(spreadsheet, [
+                        {
+                            'copyPaste': {
+                                'source': {
+                                    'sheetId': worksheet.id,
+                                    'startRowIndex': max(0, header_r_0idx),
+                                    'endRowIndex': len(vals),
+                                    'startColumnIndex': date_col_0idx - 1,
+                                    'endColumnIndex': date_col_0idx
+                                },
+                                'destination': {
+                                    'sheetId': worksheet.id,
+                                    'startRowIndex': max(0, header_r_0idx),
+                                    'endRowIndex': len(vals),
+                                    'startColumnIndex': date_col_0idx,
+                                    'endColumnIndex': date_col_0idx + 1
+                                },
+                                'pasteType': 'PASTE_FORMAT',
+                                'pasteOrientation': 'NORMAL'
+                            }
+                        }
+                    ])
+                except Exception as copy_err:
+                    logger.warning(f"Could not copy column format from previous column: {copy_err}")
+
+            # Apply full borders to the sheet
+            max_c = max(len(r) for r in vals) if vals else 37
+            cls._apply_borders(spreadsheet, worksheet, start_row=max(0, header_r_0idx - 2), end_row=len(vals), start_col=0, end_col=max_c)
+
+            logger.info(f"[GSheets Batch Sync] Successfully synchronized session attendance ({len(present_set)} present, {len(all_section_rolls) - len(present_set)} absent) for {date_str} via atomic update, borders applied.")
             return True
         except Exception as e:
             logger.error(f"Failed to batch sync session to Google Sheet: {str(e)}", exc_info=True)
@@ -985,45 +1340,80 @@ class GoogleSheetsService:
         cls,
         credentials_json: str,
         spreadsheet_id: str,
-        students: List[Dict[str, Any]]
+        students: List[Dict[str, Any]],
+        section_name: Optional[str] = None
     ) -> bool:
         """
         Marks all students as Present ("4") across all date columns in a single batch call,
         preserving the Total column and recalculating formulas.
+        Uses dynamic header lookup (FIX 6).
         """
         if not credentials_json or not spreadsheet_id:
             return False
 
         try:
             client = cls._get_client(credentials_json)
-            spreadsheet = client.open_by_key(spreadsheet_id)
-            worksheet = cls._get_worksheet(spreadsheet)
+            spreadsheet = cls._open_spreadsheet(client, spreadsheet_id)
+            worksheet = cls._get_worksheet(spreadsheet, section_name=section_name)
 
-            vals = worksheet.get_all_values()
+            vals = cls._read_worksheet_values(worksheet)
             if len(vals) < 6:
                 return False
 
+            # FIX 6: Dynamically locate Header Row containing ROLL NO
+            header_r_0idx = -1
+            roll_col_0idx = 1
+            for r_i, r_data in enumerate(vals[:10]):
+                for c_i, cell in enumerate(r_data):
+                    if "ROLL" in str(cell).upper():
+                        header_r_0idx = r_i
+                        roll_col_0idx = c_i
+                        break
+                if header_r_0idx != -1:
+                    break
+
+            if header_r_0idx == -1:
+                header_r_0idx = 5
+
+            headers = vals[header_r_0idx]
+            student_start_r_0idx = header_r_0idx + 1
+
+            # Locate Total / Cumulative column by header text
             total_c_0idx = -1
-            for c_idx in range(4, len(vals[5])):
-                if str(vals[5][c_idx]).strip().lower() == "total":
-                    total_c_0idx = c_idx
+            for c_idx in range(roll_col_0idx + 1, len(headers)):
+                for r_check in range(header_r_0idx + 1):
+                    if c_idx < len(vals[r_check]):
+                        val_str = str(vals[r_check][c_idx]).strip().lower()
+                        if "total" in val_str or "cumulative" in val_str:
+                            total_c_0idx = c_idx
+                            break
+                if total_c_0idx != -1:
                     break
 
-            first_date_c_0idx = 6
-            for c_idx in range(4, len(vals[5])):
-                d_str = str(vals[5][c_idx]).strip()
-                if ("/" in d_str or "-" in d_str) and str(vals[5][c_idx]).strip().lower() != "total":
-                    first_date_c_0idx = c_idx
+            # Locate first date column
+            first_date_c_0idx = -1
+            for c_idx in range(roll_col_0idx + 1, len(headers)):
+                if c_idx == total_c_0idx:
+                    continue
+                for r_check in range(header_r_0idx + 1):
+                    if c_idx < len(vals[r_check]):
+                        d_str = str(vals[r_check][c_idx]).strip()
+                        if ("/" in d_str or "-" in d_str) and "total" not in d_str.lower() and "cumulative" not in d_str.lower():
+                            first_date_c_0idx = c_idx
+                            break
+                if first_date_c_0idx != -1:
                     break
+            if first_date_c_0idx == -1:
+                first_date_c_0idx = roll_col_0idx + 1
 
-            # Update all student rows (Row 7+) for all date columns to "4", skipping Total column
-            for r_idx in range(6, len(vals)):
-                roll = str(vals[r_idx][1]).strip() if len(vals[r_idx]) > 1 else ""
+            # Update all student rows for all date columns to "4", skipping Total column
+            for r_idx in range(student_start_r_0idx, len(vals)):
+                roll = str(vals[r_idx][roll_col_0idx]).strip() if len(vals[r_idx]) > roll_col_0idx else ""
                 sno = str(vals[r_idx][0]).strip() if len(vals[r_idx]) > 0 else ""
                 if not (roll and not roll.startswith("*") and not sno.startswith("*")):
                     continue
                 row_len = len(vals[r_idx])
-                for c_idx in range(4, row_len):
+                for c_idx in range(first_date_c_0idx, row_len):
                     if c_idx == total_c_0idx:
                         continue
                     vals[r_idx][c_idx] = "4"
@@ -1031,21 +1421,21 @@ class GoogleSheetsService:
             # Re-apply Total formula
             if total_c_0idx != -1:
                 if first_date_c_0idx >= total_c_0idx:
-                    first_date_c_0idx = max(4, total_c_0idx - 1)
+                    first_date_c_0idx = max(roll_col_0idx + 1, total_c_0idx - 1)
                 first_col_letter = cls._col_to_letter(first_date_c_0idx + 1)
                 last_col_letter = cls._col_to_letter(total_c_0idx)
-                for r_i in range(6, len(vals)):
+                for r_i in range(student_start_r_0idx, len(vals)):
                     row_num = r_i + 1
                     while len(vals[r_i]) <= total_c_0idx:
                         vals[r_i].append("")
-                    roll = str(vals[r_i][1]).strip() if len(vals[r_i]) > 1 else ""
+                    roll = str(vals[r_i][roll_col_0idx]).strip() if len(vals[r_i]) > roll_col_0idx else ""
                     sno = str(vals[r_i][0]).strip() if len(vals[r_i]) > 0 else ""
                     if roll and not roll.startswith("*") and not sno.startswith("*"):
                         vals[r_i][total_c_0idx] = f"=SUM({first_col_letter}{row_num}:{last_col_letter}{row_num})"
                     else:
                         vals[r_i][total_c_0idx] = ""
 
-            worksheet.update(values=vals, range_name="A1", value_input_option="USER_ENTERED")
+            cls._update_worksheet_values(worksheet, vals, range_name="A1", value_input_option="USER_ENTERED")
             logger.info(f"Successfully marked all students as PRESENT (4) in Google Sheet ID: {spreadsheet_id}")
             return True
         except Exception as e:

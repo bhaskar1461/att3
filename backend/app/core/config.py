@@ -160,6 +160,12 @@ class Settings:
     # When True: Single cryptographic truth active; legacy device ID checks bypassed.
     # When False: Dev-only legacy test mode; scan rejects legacy IDs with legacy_binding_retired error.
     BINDING_V2: bool = os.getenv("BINDING_V2", "true").lower() == "true"
+    # FIX-4: Legacy device upgrade grace window (ISO-8601). Enforced if BINDING_V2 is False.
+    LEGACY_BINDING_GRACE_UNTIL: str = os.getenv("LEGACY_BINDING_GRACE_UNTIL", "2026-12-31T23:59:59Z")
+    # FIX-5: OTP Resend server-side cooldown window (seconds)
+    OTP_RESEND_COOLDOWN_S: int = int(os.getenv("OTP_RESEND_COOLDOWN_S", "30"))
+    # FIX-10: Versioned QR payload standard
+    QR_PAYLOAD_VERSION: int = int(os.getenv("QR_PAYLOAD_VERSION", "2"))
     ENROLL_LIMIT_30_DAYS: int = int(os.getenv("ENROLL_LIMIT_30_DAYS", "2"))
     MAX_ACTIVE_DEVICES_PER_STUDENT: int = int(os.getenv("MAX_ACTIVE_DEVICES_PER_STUDENT", "1"))
     CHALLENGE_TTL_SECONDS: int = int(os.getenv("CHALLENGE_TTL_SECONDS", "60"))
@@ -192,6 +198,23 @@ class R25Config:
     INCLUDE_APPROVED_ABSENCES: bool = os.getenv("JNTUH_INCLUDE_APPROVED_ABSENCES", "True").lower() == "true"
 
 settings = Settings()
+
+# Phase 10 Fix F-073/F-014: Fail-fast when production uses hardcoded default secrets
+# The default hex strings in SECRET_KEY / QR_SECRET_KEY are public in the codebase.
+# If ENVIRONMENT=production, refuse to start rather than run with forgeable JWT keys.
+_KNOWN_DEFAULT_SECRETS = {
+    "8f3b2a19e5d4c7b6a5f4e3d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2",
+    "a1b2c3d4e5f678901234567890abcdef1234567890abcdef1234567890abcdef",
+}
+if os.getenv("ENVIRONMENT", "").lower() == "production":
+    import logging as _cfg_log
+    _cfg_logger = _cfg_log.getLogger("snist_erp.config")
+    if settings.SECRET_KEY in _KNOWN_DEFAULT_SECRETS:
+        _cfg_logger.critical("FATAL: SECRET_KEY is set to the hardcoded default in production. Set a unique SECRET_KEY env var.")
+        raise SystemExit("FATAL: SECRET_KEY uses hardcoded default — set a unique value via environment variable.")
+    if settings.QR_SECRET_KEY in _KNOWN_DEFAULT_SECRETS:
+        _cfg_logger.critical("FATAL: QR_SECRET_KEY is set to the hardcoded default in production. Set a unique QR_SECRET_KEY env var.")
+        raise SystemExit("FATAL: QR_SECRET_KEY uses hardcoded default — set a unique value via environment variable.")
 
 # Ensure directories exist
 os.makedirs(settings.MASTER_TEMPLATE_DIR, exist_ok=True)

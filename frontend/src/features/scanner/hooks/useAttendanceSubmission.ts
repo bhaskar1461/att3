@@ -1,10 +1,43 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useReducer } from 'react';
 import { apiRequest } from '../../../services/api';
 import { offlineSubmissionQueue } from '../../../services/offlineSubmissionQueue';
 import { scannerTelemetry } from '../../../services/scannerTelemetry';
 import { BINDING_V2_ENABLED, signChallenge, getBindingState, generateKeyPair, commitBindingRecord } from '../../../services/binding';
 import { ScannerEngine } from '../../../services/qrEngine';
 import { GeoCoordinates } from './useGeoVerification';
+import { tokenLifecycleManager } from '../../../services/tokenLifecycle';
+import {
+  ScannerState,
+  SubmittingStage,
+  ScannerErrorInfo,
+  EnrollmentTicketInfo,
+  CanonicalQrPayload,
+  CachedQrPayload,
+  ScannerEvent,
+  scannerFsmReducer,
+  getInitialFsmContext,
+  buildErrorInfo,
+  isCachedPayloadValid
+} from '../state/scannerFSM';
+
+const SCAN_SUBMIT_TIMEOUT_MS = Number(import.meta.env.VITE_SCAN_SUBMIT_TIMEOUT_MS) || 8000;
+
+async function computeIdempotencyKey(tokenStr: string, deviceId?: string): Promise<string> {
+  const devId = deviceId || (typeof localStorage !== 'undefined' ? localStorage.getItem('snist_device_uuid') : null) || 'dev_client';
+  try {
+    const msgBuffer = new TextEncoder().encode(tokenStr);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+    const hashHex = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+    return `${devId}:${hashHex.slice(0, 16)}`;
+  } catch {
+    let hash = 0;
+    for (let i = 0; i < tokenStr.length; i++) {
+      hash = ((hash << 5) - hash) + tokenStr.charCodeAt(i);
+      hash |= 0;
+    }
+    return `${devId}:${Math.abs(hash).toString(16).padStart(16, '0').slice(0, 16)}`;
+  }
+}
 
 export type ScannerFlowState =
   | 'INITIALIZING'
@@ -23,6 +56,21 @@ export type ScannerFlowState =
 export interface ParsedQrPayload {
   token: string;
   sourceType: 'launch_url' | 'launch_path' | 'short_code' | 'legacy' | 'raw_token';
+  canonical?: CanonicalQrPayload | { token: string; [key: string]: any };
+  validationError?: 'qr_type_invalid' | 'qr_expired';
+}
+
+function getJwtExpMs(token: string): number | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length < 2) return null;
+    let b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    while (b64.length % 4 !== 0) b64 += '=';
+    const payload = JSON.parse(atob(b64));
+    return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+  } catch {
+    return null;
+  }
 }
 
 export interface UseAttendanceSubmissionProps {
@@ -46,11 +94,44 @@ export function useAttendanceSubmission({
   onNextScanReady,
   isDebugMode = false
 }: UseAttendanceSubmissionProps) {
+  const [fsmCtx, fsmDispatch] = useReducer(scannerFsmReducer, undefined, getInitialFsmContext);
   const [flowState, setFlowState] = useState<ScannerFlowState>('INITIALIZING');
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [scanError, setScanError] = useState<string | null>(null);
   const [scanErrorCode, setScanErrorCode] = useState<string | null>(null);
   const [successResult, setSuccessResult] = useState<any>(null);
+
+  // Synchronize legacy flowState and error states with FSM
+  useEffect(() => {
+    switch (fsmCtx.state) {
+      case 'IDLE':
+        setFlowState('INITIALIZING');
+        break;
+      case 'SCANNING':
+        setFlowState('IDLE_SCANNING');
+        break;
+      case 'LINK_CHECK':
+      case 'SUBMITTING':
+        setFlowState('SUBMITTING');
+        break;
+      case 'ENROLLING':
+        setFlowState('ENROLLING');
+        break;
+      case 'OTP_VERIFY':
+        setFlowState('REBIND_OTP');
+        break;
+      case 'SUCCESS':
+        setFlowState('SUCCESS');
+        break;
+      case 'ERROR':
+        setFlowState('ERROR');
+        if (fsmCtx.errorInfo) {
+          setScanError(fsmCtx.errorInfo.message);
+          setScanErrorCode(fsmCtx.errorInfo.code);
+        }
+        break;
+    }
+  }, [fsmCtx.state, fsmCtx.errorInfo]);
 
   const [isOffline, setIsOffline] = useState<boolean>(!navigator.onLine);
   const [isOfflineQueued, setIsOfflineQueued] = useState<boolean>(false);
@@ -249,6 +330,40 @@ export function useAttendanceSubmission({
     const trimmed = decodedText.trim();
     if (!trimmed || trimmed.length < 6) return null;
 
+    // 0. Canonical versioned JSON payload ({ v: 2, qr_type, session_id, token, issued_at, exp })
+    if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+      try {
+        const json = JSON.parse(trimmed);
+        if (json && typeof json === 'object') {
+          const rawToken = json.token || '';
+          if (json.v === 2 || json.qr_type) {
+            let validationError: 'qr_type_invalid' | 'qr_expired' | undefined = undefined;
+            if (json.qr_type !== 'live_session' && json.qr_type !== 'frequency_extended') {
+              validationError = 'qr_type_invalid';
+            } else if (json.exp != null) {
+              const now = Date.now();
+              // 30s clock-skew tolerance
+              if (now > Number(json.exp) + 30000) {
+                validationError = 'qr_expired';
+              }
+            }
+            return {
+              token: rawToken,
+              sourceType: 'raw_token',
+              canonical: json,
+              validationError
+            };
+          } else if (rawToken) {
+            return {
+              token: rawToken,
+              sourceType: 'raw_token',
+              canonical: json
+            };
+          }
+        }
+      } catch {}
+    }
+
     if (trimmed.startsWith('https://') || trimmed.startsWith('http://')) {
       try {
         const url = new URL(trimmed);
@@ -308,8 +423,427 @@ export function useAttendanceSubmission({
     return null;
   };
 
+  const submitScannedSession = useCallback(async (
+    payloadToken: string,
+    parsed: ParsedQrPayload,
+    customIdempotencyKey?: string
+  ) => {
+    isScanningLockedRef.current = true;
+    setIsSubmitting(true);
+    setFlowState('SUBMITTING');
+    inFlightTokenStrRef.current = payloadToken;
+    setScanError(null);
+    setScanErrorCode(null);
+
+    // Stage 1: validating_token (FIX-1: pre-refresh outside budget if exp - now < 10000ms)
+    fsmDispatch({ type: 'SET_SUBMITTING_STAGE', stage: 'validating_token' });
+    onGuideChange('Validating session token…');
+
+    const userToken = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    if (userToken) {
+      const expMs = getJwtExpMs(userToken);
+      if (expMs != null && expMs - Date.now() < 10000) {
+        console.log('[QR] Access token exp within 10s budget — pre-refreshing outside submission budget');
+        try {
+          const refreshed = await tokenLifecycleManager.executeRefresh('pre-submit');
+          if (!refreshed) {
+            throw new Error('Pre-refresh failed');
+          }
+        } catch {
+          console.warn('[QR] Pre-refresh failed — server_token_expired');
+          const err = buildErrorInfo('server_token_expired', 'Session expired — sign in again');
+          fsmDispatch({ type: 'SUBMIT_FAILED', error: err });
+          setScanError(err.message);
+          setScanErrorCode(err.code);
+          onGuideChange(err.message);
+          setIsSubmitting(false);
+          isScanningLockedRef.current = false;
+          return;
+        }
+      }
+    }
+
+    // Stage 2: signing (binding proof & idempotency key generation)
+    fsmDispatch({ type: 'SET_SUBMITTING_STAGE', stage: 'signing' });
+    onGuideChange('Signing request…');
+
+    const idempotencyKey = customIdempotencyKey || await computeIdempotencyKey(payloadToken);
+    let isSuccess = false;
+
+    try {
+      const geo = studentGeoRef.current || await getStudentGeolocation().catch(() => null);
+      const binding = bindingProofRef.current;
+
+      let res: any;
+      let attempt = 0;
+      let timedOut = false;
+
+      // Submission with 1 silent retry on timeout (FIX-1)
+      while (attempt < 2) {
+        attempt++;
+        const abortCtrl = new AbortController();
+        currentAbortCtrlRef.current = abortCtrl;
+        const timeoutId = setTimeout(() => abortCtrl.abort('timeout_submit'), SCAN_SUBMIT_TIMEOUT_MS);
+
+        try {
+          fsmDispatch({ type: 'SET_SUBMITTING_STAGE', stage: 'submitting' });
+          onGuideChange(attempt === 1 ? 'Submitting Attendance…' : 'Finalizing attendance…');
+
+          res = await apiRequest('/student/scan-session', {
+            method: 'POST',
+            signal: abortCtrl.signal,
+            headers: {
+              'Idempotency-Key': idempotencyKey
+            },
+            body: JSON.stringify({
+              session_token: payloadToken,
+              scan_mode: 'QR_CAMERA',
+              qr_type: (parsed?.canonical as any)?.qr_type || 'live_session',
+              exp: (parsed?.canonical as any)?.exp,
+              issued_at: (parsed?.canonical as any)?.issued_at,
+              ...(geo?.latitude != null ? {
+                latitude: geo.latitude,
+                longitude: geo.longitude,
+                accuracy_m: geo.accuracy_m
+              } : {}),
+              ...(binding?.challenge_token ? { challenge_token: binding.challenge_token } : {}),
+              ...(binding?.binding_signature ? {
+                binding_signature: binding.binding_signature,
+                device_signature: binding.binding_signature
+              } : {}),
+              ...(binding?.device_id ? { device_id: binding.device_id } : {})
+            })
+          });
+          timedOut = false;
+          break;
+        } catch (abortErr: any) {
+          if (abortErr?.name === 'AbortError' || abortCtrl.signal.aborted) {
+            timedOut = true;
+            console.warn(`[QR] Submit timeout on attempt ${attempt}/2 after ${SCAN_SUBMIT_TIMEOUT_MS}ms`);
+            if (attempt === 1) {
+              // Silent retry: retry with same Idempotency-Key & fresh budget
+              continue;
+            } else {
+              break;
+            }
+          }
+          throw abortErr;
+        } finally {
+          clearTimeout(timeoutId);
+          currentAbortCtrlRef.current = null;
+        }
+      }
+
+      if (timedOut) {
+        // Second timeout reached -> ERROR(client_abort)
+        const err = buildErrorInfo('client_abort', 'Taking longer than usual');
+        fsmDispatch({ type: 'SUBMIT_FAILED', error: err });
+        setScanError(err.message);
+        setScanErrorCode(err.code);
+        onGuideChange(err.message);
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      // Stage 4: confirming (Job API polling if 202 or pending) (FIX-3)
+      fsmDispatch({ type: 'SET_SUBMITTING_STAGE', stage: 'confirming' });
+      onGuideChange('Confirming attendance…');
+
+      if (res?.status === 'pending' || (res?.job_id && !res?.attendance_id)) {
+        const pollUrl = res.poll_url || `/attendance/job/${res.job_id}`;
+        let pollCount = 0;
+        let committedRes: any = null;
+
+        while (pollCount < 5) {
+          await new Promise(r => setTimeout(r, 500));
+          pollCount++;
+          try {
+            const jobRes: any = await apiRequest(pollUrl);
+            if (jobRes?.status === 'committed') {
+              committedRes = jobRes;
+              break;
+            } else if (jobRes?.status === 'failed') {
+              throw {
+                error_code: jobRes.error_code || 'selfie_store_failed',
+                message: "Photo didn't save"
+              };
+            }
+          } catch (pollErr: any) {
+            if (pollErr?.status === 404 || pollErr?.error_code === 'job_not_found') {
+              throw {
+                error_code: 'job_not_found',
+                message: 'Attendance verification expired'
+              };
+            }
+          }
+        }
+
+        if (committedRes && committedRes.status === 'committed') {
+          res = { ...res, ...committedRes, attendance_id: committedRes.attendance_id };
+        } else {
+          const err = buildErrorInfo('client_abort', 'Confirming attendance with server…');
+          fsmDispatch({ type: 'SUBMIT_FAILED', error: err });
+          setScanError(err.message);
+          setScanErrorCode(err.code);
+          setIsSubmitting(false);
+          isScanningLockedRef.current = false;
+          return;
+        }
+      }
+
+      isSuccess = true;
+      inFlightTokenStrRef.current = null;
+      setIsSubmitting(false);
+      setFlowState('SUCCESS');
+      fsmDispatch({ type: 'SUBMIT_SUCCESS', result: res });
+      console.log('[QR] Server response: SUCCESS —', res?.status || 'MARKED');
+
+      try {
+        offlineSubmissionQueue.saveCachedLastSession({
+          subject_name: res.subject_name || 'Class Session',
+          session_id: res.session_id,
+          session_date: res.session_date || new Date().toISOString().split('T')[0],
+          period_count: res.period_count || 1
+        });
+      } catch {}
+
+      try {
+        const totalFromOpen = Date.now() - pageOpenTimeRef.current;
+        scannerTelemetry.recordStage('attendance_confirmed', totalFromOpen, res.session_id);
+      } catch {}
+
+      triggerFeedback(true);
+      setSuccessResult(res);
+      const attId = res?.attendance_id || (res?.session_id ? Number(res.session_id) : 1);
+      const sId = res?.session_id ? Number(res.session_id) : null;
+      setSelfieAttendanceId(attId);
+      setSelfieSessionId(sId);
+      setShowSelfieModal(true);
+      onStopCamera();
+
+    } catch (err: any) {
+      failedTokensCacheRef.current.set(payloadToken, Date.now());
+      lastFailedPayloadRef.current = payloadToken;
+      inFlightTokenStrRef.current = null;
+
+      const rawMsg = err?.message || err?.detail || '';
+      const lowerMsg = rawMsg.toLowerCase();
+      const status = err?.status;
+      const errorCode = err?.error_code || err?.phase7_code || err?.code;
+
+      // 1. 409 binding_upgrade_required (FIX-4)
+      if (status === 409 && (errorCode === 'binding_upgrade_required' || lowerMsg.includes('binding_upgrade_required') || lowerMsg.includes('security upgrade'))) {
+        try {
+          localStorage.removeItem('binding_status');
+          localStorage.removeItem('binding_status_ts');
+        } catch {}
+
+        const ticket: EnrollmentTicketInfo = err.enrollment_ticket || {
+          ticket: 'et_inline',
+          expires_at: new Date(Date.now() + 600000).toISOString(),
+          grace_until: err.grace_until
+        };
+
+        const cached: CachedQrPayload = {
+          payload: parsed.canonical || { token: payloadToken, exp: Date.now() + 30000 },
+          captured_at: Date.now()
+        };
+        try {
+          sessionStorage.setItem('snist_cached_qr_payload', JSON.stringify(cached));
+        } catch {}
+
+        fsmDispatch({ type: 'LINK_UNBOUND_OR_LEGACY', ticket });
+        setScanError('This device needs a one-time security upgrade.');
+        setScanErrorCode('binding_upgrade_required');
+        onGuideChange('One-time security upgrade required');
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      // 2. 410 binding_revoked_post_grace (FIX-4)
+      if (status === 410 || errorCode === 'binding_revoked_post_grace') {
+        try {
+          localStorage.removeItem('binding_status');
+          localStorage.removeItem('binding_status_ts');
+        } catch {}
+        const errInfo = buildErrorInfo('binding_revoked_post_grace', 'This device must be re-enrolled', err.request_id || err.requestId);
+        fsmDispatch({ type: 'SUBMIT_FAILED', error: errInfo });
+        setScanError(errInfo.message);
+        setScanErrorCode(errInfo.code);
+        onGuideChange(errInfo.message);
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      // 3. 401 server_token_expired
+      if (status === 401 || errorCode === 'server_token_expired') {
+        const errInfo = buildErrorInfo('server_token_expired', 'Session expired — sign in again');
+        fsmDispatch({ type: 'SUBMIT_FAILED', error: errInfo });
+        setScanError(errInfo.message);
+        setScanErrorCode(errInfo.code);
+        onGuideChange(errInfo.message);
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      // 4. 422 qr_type_invalid / qr_expired (FIX-10)
+      if (status === 422 || errorCode === 'qr_type_invalid' || errorCode === 'qr_expired') {
+        const code = errorCode === 'qr_type_invalid' ? 'qr_type_invalid' : 'qr_expired';
+        const errInfo = buildErrorInfo(code);
+        fsmDispatch({ type: 'SUBMIT_FAILED', error: errInfo });
+        setScanError(errInfo.message);
+        setScanErrorCode(errInfo.code);
+        onGuideChange(errInfo.message);
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      // 5. 409 session_not_active
+      if (errorCode === 'session_not_active' || lowerMsg.includes('session ended') || lowerMsg.includes('qr-session-end')) {
+        const errInfo = buildErrorInfo('session_not_active', 'Session ended server-side');
+        fsmDispatch({ type: 'SUBMIT_FAILED', error: errInfo });
+        setScanError(errInfo.message);
+        setScanErrorCode(errInfo.code);
+        onGuideChange(errInfo.message);
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      // 6. 429 otp_cooldown
+      if (status === 429 || errorCode === 'otp_cooldown') {
+        const retrySec = err?.retry_after_s || err?.retry_after || 30;
+        const errInfo = buildErrorInfo('otp_cooldown', `Resend too soon; please wait`, undefined, retrySec);
+        fsmDispatch({ type: 'SUBMIT_FAILED', error: errInfo });
+        setScanError(errInfo.message);
+        setScanErrorCode(errInfo.code);
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      // 7. 502 otp_delivery_failed
+      if (status === 502 || errorCode === 'otp_delivery_failed') {
+        const errInfo = buildErrorInfo('otp_delivery_failed', 'Code not delivered');
+        fsmDispatch({ type: 'SUBMIT_FAILED', error: errInfo });
+        setScanError(errInfo.message);
+        setScanErrorCode(errInfo.code);
+        onGuideChange(errInfo.message);
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      // 8. 500 selfie_store_failed
+      if (errorCode === 'selfie_store_failed') {
+        const errInfo = buildErrorInfo('selfie_store_failed', "Photo didn't save");
+        fsmDispatch({ type: 'SUBMIT_FAILED', error: errInfo });
+        setScanError(errInfo.message);
+        setScanErrorCode(errInfo.code);
+        onGuideChange(errInfo.message);
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      // 9. True duplicate / already marked
+      if (err?.code === 'already_marked' || lowerMsg.includes('already marked') || lowerMsg.includes('already present')) {
+        fsmDispatch({
+          type: 'SUBMIT_SUCCESS',
+          result: { already_marked: true, attendance_id: err.attendance_id || 1, message: 'Attendance already recorded for this session.' }
+        });
+        setSuccessResult({
+          status: 'ALREADY_MARKED',
+          message: 'Attendance already recorded for this session.',
+          subject_name: err?.subject_name || 'Class Attendance Session',
+          roll_number: studentInfo.roll_number || studentRoll,
+          session_date: new Date().toISOString().split('T')[0]
+        });
+        onStopCamera();
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      // 10. Network error
+      const isNetErr = !navigator.onLine ||
+        lowerMsg.includes('failed to fetch') ||
+        lowerMsg.includes('networkerror') ||
+        lowerMsg.includes('load failed');
+      if (isNetErr) {
+        const errInfo = buildErrorInfo('network_error', 'No connection');
+        fsmDispatch({ type: 'SUBMIT_FAILED', error: errInfo });
+        setScanError(errInfo.message);
+        setScanErrorCode(errInfo.code);
+        onGuideChange(errInfo.message);
+        setIsSubmitting(false);
+        isScanningLockedRef.current = false;
+        return;
+      }
+
+      triggerFeedback(false);
+
+      if (lowerMsg.includes('challenge') && (lowerMsg.includes('expired') || lowerMsg.includes('invalid'))) {
+        bindingProofRef.current = null;
+        (async () => {
+          try {
+            const challengeRes: any = await apiRequest('/binding/challenge', {
+              method: 'POST', body: JSON.stringify({})
+            });
+            if (challengeRes?.challenge_token) {
+              const sigResult = await signChallenge(challengeRes.challenge_token, studentRoll);
+              bindingProofRef.current = {
+                challenge_token: challengeRes.challenge_token,
+                binding_signature: sigResult.signature_b64,
+                device_id: sigResult.device_id
+              };
+            }
+          } catch {}
+        })();
+        fsmDispatch({ type: 'DISMISS' });
+        setFlowState('IDLE_SCANNING');
+        onGuideChange('Align the QR inside the frame');
+        isScanningLockedRef.current = false;
+        setIsSubmitting(false);
+        onNextScanReady();
+        return;
+      }
+
+      const errInfo = buildErrorInfo('generic_error', rawMsg || 'Unable to mark attendance. Please try again.');
+      fsmDispatch({ type: 'SUBMIT_FAILED', error: errInfo });
+      setScanError(errInfo.message);
+      setScanErrorCode(errInfo.code);
+      onGuideChange('Scan failed — please try again');
+    } finally {
+      setIsSubmitting(false);
+      inFlightTokenStrRef.current = null;
+      if (!isSuccess && !rateLimitCooldownTimerRef.current) {
+        setTimeout(() => {
+          if (!rateLimitCooldownTimerRef.current) {
+            isScanningLockedRef.current = false;
+            onNextScanReady();
+          }
+        }, 1500);
+      }
+    }
+  }, [
+    getStudentGeolocation,
+    onGuideChange,
+    onNextScanReady,
+    onStopCamera,
+    studentGeoRef,
+    studentInfo.roll_number,
+    studentRoll,
+    triggerFeedback
+  ]);
+
   const handleScanSuccess = useCallback(async (decodedText: string, engineUsed?: ScannerEngine) => {
-    if (isScanningLockedRef.current || isSubmitting) return;
+    if (isScanningLockedRef.current || isSubmitting || fsmCtx.isActionInFlight) return;
 
     const trimmed = decodedText.trim();
     if (!trimmed || trimmed.length < 6) return;
@@ -317,9 +851,31 @@ export function useAttendanceSubmission({
     const parsed = parseAttendanceQrPayload(trimmed);
     if (!parsed || !parsed.token) {
       console.warn('[QR] Unrecognized QR structure:', trimmed.slice(0, 40));
-      setScanError('QR not recognized. Please scan the current classroom QR.');
-      onGuideChange('QR not recognized — scan classroom QR');
-      setFlowState('ERROR');
+      const err = buildErrorInfo('qr_type_invalid', 'Wrong QR — scan the live session QR');
+      fsmDispatch({ type: 'QR_INVALID', error: err });
+      setScanError(err.message);
+      setScanErrorCode(err.code);
+      onGuideChange(err.message);
+      triggerFeedback(false);
+      return;
+    }
+
+    if (parsed.validationError === 'qr_type_invalid') {
+      const err = buildErrorInfo('qr_type_invalid', 'Wrong QR — scan the live session QR');
+      fsmDispatch({ type: 'QR_INVALID', error: err });
+      setScanError(err.message);
+      setScanErrorCode(err.code);
+      onGuideChange(err.message);
+      triggerFeedback(false);
+      return;
+    }
+
+    if (parsed.validationError === 'qr_expired') {
+      const err = buildErrorInfo('qr_expired', 'QR expired — rescan');
+      fsmDispatch({ type: 'QR_INVALID', error: err });
+      setScanError(err.message);
+      setScanErrorCode(err.code);
+      onGuideChange(err.message);
       triggerFeedback(false);
       return;
     }
@@ -362,15 +918,16 @@ export function useAttendanceSubmission({
     lastExpiredPayloadRef.current = null;
     lastFailedPayloadRef.current = null;
 
-    isScanningLockedRef.current = true;
-    setIsSubmitting(true);
-    setFlowState('SUBMITTING');
-    inFlightTokenStepRef.current = scannedStep;
-    inFlightTokenStrRef.current = payloadToken;
-    setScanError(null);
-    setScanErrorCode(null);
-    onGuideChange('Submitting Attendance…');
-    console.log(`[QR] Token extracted (${payloadToken.length}ch, type=${parsed.sourceType}) — submitting directly to attendance API`);
+    fsmDispatch({ type: 'QR_VALIDATED', payload: parsed.canonical || { token: payloadToken } });
+
+    // Cache QR payload in sessionStorage
+    const cachedQr: CachedQrPayload = {
+      payload: parsed.canonical || { token: payloadToken, exp: Date.now() + 30000 },
+      captured_at: Date.now()
+    };
+    try {
+      sessionStorage.setItem('snist_cached_qr_payload', JSON.stringify(cachedQr));
+    } catch {}
 
     // Offline fast-path
     if (!navigator.onLine) {
@@ -395,284 +952,26 @@ export function useAttendanceSubmission({
       return;
     }
 
-    let isSuccess = false;
-    try {
-      const geo = studentGeoRef.current;
-      const binding = bindingProofRef.current;
-
-      const abortCtrl = new AbortController();
-      currentAbortCtrlRef.current = abortCtrl;
-      const timeoutId = setTimeout(() => abortCtrl.abort('timeout_8s'), 8000);
-
-      let res: any;
-      try {
-        res = await apiRequest('/student/scan-session', {
-          method: 'POST',
-          signal: abortCtrl.signal,
-          body: JSON.stringify({
-            session_token: payloadToken,
-            scan_mode: 'QR_CAMERA',
-            ...(geo?.latitude != null ? {
-              latitude: geo.latitude,
-              longitude: geo.longitude,
-              accuracy_m: geo.accuracy_m
-            } : {}),
-            ...(binding?.challenge_token ? { challenge_token: binding.challenge_token } : {}),
-            ...(binding?.binding_signature ? {
-              binding_signature: binding.binding_signature,
-              device_signature: binding.binding_signature
-            } : {}),
-            ...(binding?.device_id ? { device_id: binding.device_id } : {})
-          })
-        });
-      } catch (abortErr: any) {
-        if (abortErr?.name === 'AbortError' || abortCtrl.signal.aborted) {
-          console.warn('[QR] Submission timed out after 8s — returning to scanning');
-          failedTokensCacheRef.current.set(payloadToken, Date.now());
-          lastFailedPayloadRef.current = payloadToken;
-          const { step } = extractPayloadStep(payloadToken);
-          if (step != null) {
-            lastExpiredStepRef.current = Math.max(lastExpiredStepRef.current ?? 0, step);
-          }
-          inFlightTokenStepRef.current = null;
-          inFlightTokenStrRef.current = null;
-          setIsSubmitting(false);
-          setFlowState('TIMEOUT');
-          setScanError('Attendance request timed out. The 10s rotating QR token expired during submission.');
-          onGuideChange('Timed out — waiting for refreshed QR');
-          setTimeout(() => {
-            if (!rateLimitCooldownTimerRef.current) {
-              isScanningLockedRef.current = false;
-              onNextScanReady();
-            }
-          }, 1500);
-          return;
-        }
-        throw abortErr;
-      } finally {
-        clearTimeout(timeoutId);
-        currentAbortCtrlRef.current = null;
-      }
-
-      isSuccess = true;
-      inFlightTokenStepRef.current = null;
-      inFlightTokenStrRef.current = null;
-      setIsSubmitting(false);
-      setFlowState('SUCCESS');
-      console.log('[QR] Server response: SUCCESS —', res?.status || 'MARKED');
-
-      try {
-        offlineSubmissionQueue.saveCachedLastSession({
-          subject_name: res.subject_name || 'Class Session',
-          session_id: res.session_id,
-          session_date: res.session_date || new Date().toISOString().split('T')[0],
-          period_count: res.period_count || 1
-        });
-      } catch {}
-
-      try {
-        const totalFromOpen = Date.now() - pageOpenTimeRef.current;
-        scannerTelemetry.recordStage('attendance_confirmed', totalFromOpen, res.session_id);
-      } catch {}
-
-      triggerFeedback(true);
-      setSuccessResult(res);
-      const attId = res?.attendance_id || (res?.session_id ? Number(res.session_id) : 1);
-      const sId = res?.session_id ? Number(res.session_id) : null;
-      setSelfieAttendanceId(attId);
-      setSelfieSessionId(sId);
-      setShowSelfieModal(true);
-      onStopCamera();
-
-    } catch (err: any) {
-      failedTokensCacheRef.current.set(payloadToken, Date.now());
-      lastFailedPayloadRef.current = payloadToken;
-      const { step: failedStep } = extractPayloadStep(payloadToken);
-      inFlightTokenStepRef.current = null;
-      inFlightTokenStrRef.current = null;
-
-      const rawMsg = err?.message || err?.detail || '';
-      const lowerMsg = rawMsg.toLowerCase();
-      const p7Code = err?.phase7_code || err?.error_code || err?.qr_error_code;
-      const isSectionMismatch = 
-        lowerMsg.includes('section') || 
-        lowerMsg.includes('not enrolled in this section') || 
-        lowerMsg.includes('faculty incharge') ||
-        p7Code === 'section_mismatch' ||
-        err?.code === 'section_mismatch';
-
-      const code: string = isSectionMismatch ? 'section_mismatch' : (p7Code || err?.code || (
-        err?.status === 429 || lowerMsg.includes('too many') || lowerMsg.includes('rate_limited') ? 'rate_limited' :
-        lowerMsg.includes('qr-session-end') || lowerMsg.includes('session has ended') ? 'QR-SESSION-END' :
-        lowerMsg.includes('qr-old') || lowerMsg.includes('outdated') ? 'QR-OLD' :
-        lowerMsg.includes('expired') ? 'expired' :
-        lowerMsg.includes('invalid') ? 'invalid' :
-        (lowerMsg.includes('no_active_binding') || lowerMsg.includes('binding_required') || lowerMsg.includes('device')) ? 'no_active_binding' :
-        (lowerMsg.includes('geofence') || lowerMsg.includes('location') || lowerMsg.includes('gps')) ? 'geofence_failed' :
-        'error'
-      ));
-
-      console.warn('[QR] Scan submission error:', rawMsg, 'Code:', code);
-      setScanErrorCode(code);
-
-      if (code === 'rate_limited' || err?.status === 429 || lowerMsg.includes('too many scan attempts')) {
-        const retrySec = Math.max(1, Number(err?.retry_after || 20));
-        isScanningLockedRef.current = true;
-        setFlowState('RATE_LIMITED');
-        setRateLimitSecondsLeft(retrySec);
-        setScanError(`Too many scan attempts. Please wait ${retrySec}s before scanning again.`);
-        onGuideChange(`Rate limit active — cooldown ${retrySec}s`);
-
-        if (rateLimitCooldownTimerRef.current) clearInterval(rateLimitCooldownTimerRef.current);
-        let countdown = retrySec;
-        rateLimitCooldownTimerRef.current = setInterval(() => {
-          countdown -= 1;
-          if (countdown <= 0) {
-            clearInterval(rateLimitCooldownTimerRef.current);
-            rateLimitCooldownTimerRef.current = null;
-            setRateLimitSecondsLeft(0);
-            setScanError(null);
-            setFlowState('IDLE_SCANNING');
-            onGuideChange('Align the QR inside the frame');
-            isScanningLockedRef.current = false;
-            onNextScanReady();
-          } else {
-            setRateLimitSecondsLeft(countdown);
-            setScanError(`Too many scan attempts. Please wait ${countdown}s before scanning again.`);
-            onGuideChange(`Rate limit active — cooldown ${countdown}s`);
-          }
-        }, 1000);
-        return;
-      }
-
-      const isNetErr = !navigator.onLine ||
-        lowerMsg.includes('failed to fetch') ||
-        lowerMsg.includes('networkerror') ||
-        lowerMsg.includes('load failed');
-
-      if (isNetErr) {
-        try {
-          await offlineSubmissionQueue.enqueue({
-            client_id: `${Date.now()}_${Math.random().toString(36).slice(2, 9)}`,
-            session_token: payloadToken
-          });
-          triggerFeedback(true);
-          onStopCamera();
-          setIsOfflineQueued(true);
-          setQueuedSessionInfo({
-            token: payloadToken,
-            sessionPreview: 'Class Attendance Session',
-            queuedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-          });
-        } catch {}
-        return;
-      }
-
-      triggerFeedback(false);
-
-      if (code === 'QR-SESSION-END' || lowerMsg.includes('qr-session-end') || lowerMsg.includes('session has ended')) {
-        lastFailedPayloadRef.current = payloadToken;
-        setFlowState('ERROR');
-        setScanError('This class session has ended. If faculty refreshed or started attendance, please scan the active projector QR. (Code: QR-SESSION-END)');
-        onGuideChange('Session ended — point camera at active QR');
-        return;
-      }
-
-      if (code === 'QR-OLD' || code === 'expired' || lowerMsg.includes('outdated') || lowerMsg.includes('expired')) {
-        lastExpiredPayloadRef.current = payloadToken;
-        if (failedStep != null) {
-          lastExpiredStepRef.current = Math.max(lastExpiredStepRef.current ?? 0, failedStep);
-        }
-        setFlowState('STALE_QR');
-        onGuideChange('Old QR — waiting for the projector to refresh');
-        setScanError('The QR on the screen has expired. Waiting for projector rotation. (Code: QR-OLD)');
-        return;
-      }
-
-      const isChallengeReused = lowerMsg.includes('challenge') && (lowerMsg.includes('replayed') || lowerMsg.includes('used'));
-      if (!isChallengeReused && (err?.code === 'already_marked' || lowerMsg.includes('already marked') || lowerMsg.includes('already present') || lowerMsg.includes('already been marked'))) {
-        setSuccessResult({
-          status: 'ALREADY_MARKED',
-          message: 'Attendance already recorded for this session.',
-          subject_name: err?.subject_name || 'Class Attendance Session',
-          roll_number: studentInfo.roll_number || studentRoll,
-          session_date: new Date().toISOString().split('T')[0]
-        });
-        setFlowState('SUCCESS');
-        onStopCamera();
-        return;
-      }
-
-      if (code === 'geofence_failed' || lowerMsg.includes('location') || lowerMsg.includes('geofence') || lowerMsg.includes('gps')) {
-        setFlowState('ERROR');
-        setScanError(rawMsg || 'Location verification failed. Please ensure you are inside the classroom.');
-        onGuideChange('Location check failed');
-        return;
-      }
-
-      if (code === 'section_mismatch' || isSectionMismatch) {
-        setFlowState('ERROR');
-        setScanError('Not enrolled in this section. Please contact faculty incharge.');
-        onGuideChange('Section mismatch — contact faculty');
-        return;
-      }
-
-      if (code === 'no_active_binding' || lowerMsg.includes('no_active_binding') || lowerMsg.includes('binding_required')) {
-        setFlowState('BLOCKED');
-        setScanError('This device is not linked. Please enroll this device to record attendance.');
-        onGuideChange('Device not linked — enroll below');
-        return;
-      }
-
-      if (lowerMsg.includes('challenge') && (lowerMsg.includes('expired') || lowerMsg.includes('invalid'))) {
-        bindingProofRef.current = null;
-        (async () => {
-          try {
-            const challengeRes: any = await apiRequest('/binding/challenge', {
-              method: 'POST', body: JSON.stringify({})
-            });
-            if (challengeRes?.challenge_token) {
-              const sigResult = await signChallenge(challengeRes.challenge_token, studentRoll);
-              bindingProofRef.current = {
-                challenge_token: challengeRes.challenge_token,
-                binding_signature: sigResult.signature_b64,
-                device_id: sigResult.device_id
-              };
-            }
-          } catch {}
-        })();
-        setFlowState('IDLE_SCANNING');
-        onGuideChange('Align the QR inside the frame');
-        isScanningLockedRef.current = false;
-        onNextScanReady();
-        return;
-      }
-
-      setFlowState('ERROR');
-      setScanError(rawMsg || 'Unable to mark attendance. Please try again.');
-      onGuideChange('Scan failed — please try again');
-    } finally {
-      setIsSubmitting(false);
-      inFlightTokenStepRef.current = null;
-      inFlightTokenStrRef.current = null;
-      if (!isSuccess && !rateLimitCooldownTimerRef.current) {
-        setTimeout(() => {
-          if (!rateLimitCooldownTimerRef.current) {
-            isScanningLockedRef.current = false;
-            onNextScanReady();
-          }
-        }, 1500);
-      }
+    // Pre-check cached binding status (5-min TTL) (FIX-6 LINK_CHECK pre-check)
+    const cachedBindingStatus = localStorage.getItem('binding_status');
+    const cachedBindingTs = Number(localStorage.getItem('binding_status_ts') || '0');
+    const isBindingCacheValid = Date.now() - cachedBindingTs < 5 * 60 * 1000;
+    if (isBindingCacheValid && (cachedBindingStatus === 'unbound' || cachedBindingStatus === 'legacy')) {
+      fsmDispatch({ type: 'LINK_UNBOUND_OR_LEGACY' });
+      setScanError('This device needs a one-time security upgrade.');
+      setScanErrorCode('binding_upgrade_required');
+      onGuideChange('One-time security upgrade required');
+      return;
     }
+
+    fsmDispatch({ type: 'LINK_V2_CONFIRMED' });
+    await submitScannedSession(payloadToken, parsed);
   }, [
-    getStudentGeolocation,
+    fsmCtx.isActionInFlight,
     isSubmitting,
     onGuideChange,
-    onNextScanReady,
     onStopCamera,
-    studentGeoRef,
-    studentInfo.roll_number,
-    studentRoll,
+    submitScannedSession,
     triggerFeedback
   ]);
 
@@ -774,6 +1073,14 @@ export function useAttendanceSubmission({
         setRebindMaskedEmail(res.email_masked || 'your registered college email');
         setScanError(null);
         setScanErrorCode(null);
+        fsmDispatch({
+          type: 'TICKET_ISSUED',
+          ticket: {
+            ticket: res.enrollment_ticket?.ticket || 'et_rebind',
+            expires_at: res.enrollment_ticket?.expires_at || new Date(Date.now() + 600000).toISOString(),
+            masked_recipient: res.email_masked
+          }
+        });
         onGuideChange('Verification code sent to your email to link this device.');
         return;
       }
@@ -787,24 +1094,56 @@ export function useAttendanceSubmission({
         setRebindOtpRequired(false);
         isScanningLockedRef.current = false;
         setIsSubmitting(false);
-        setFlowState('IDLE_SCANNING');
-        onGuideChange('Device enrolled securely! Rescan the attendance QR now.');
         triggerFeedback(true);
+
+        try {
+          localStorage.setItem('binding_status', 'v2');
+          localStorage.setItem('binding_status_ts', String(Date.now()));
+        } catch {}
+
+        let cached: CachedQrPayload | null = null;
+        try {
+          const raw = sessionStorage.getItem('snist_cached_qr_payload');
+          if (raw) cached = JSON.parse(raw);
+        } catch {}
+
+        if (cached && isCachedPayloadValid(cached)) {
+          console.log('[QR] Enrollment complete — auto-resuming submission with cached payload');
+          fsmDispatch({ type: 'ENROLLED' });
+          onGuideChange('Device enrolled! Submitting attendance…');
+          setTimeout(() => {
+            submitScannedSession(cached!.payload.token, {
+              token: cached!.payload.token,
+              sourceType: 'raw_token',
+              canonical: cached!.payload as any
+            });
+          }, 100);
+        } else {
+          console.warn('[QR] Enrollment complete but cached QR expired');
+          const err = buildErrorInfo('qr_expired', 'QR expired — rescan');
+          fsmDispatch({ type: 'ENROLL_FAILED', error: err });
+          setScanError(err.message);
+          setScanErrorCode(err.code);
+          onGuideChange('QR expired — rescan active QR');
+        }
       } else {
         throw new Error(res?.detail?.message || res?.message || 'Device enrollment rejected by server.');
       }
     } catch (err: any) {
-      if (err?.name === 'AbortError' || enrollAbortCtrl.signal.aborted) {
-        setScanError('Device enrollment timed out. Please check connection and try again.');
-      } else {
-        setScanError(err.message || 'Inline enrollment failed. Please try again.');
-      }
+      const errInfo = buildErrorInfo(
+        'generic_error',
+        err?.name === 'AbortError' || enrollAbortCtrl.signal.aborted
+          ? 'Device enrollment timed out. Please check connection and try again.'
+          : (err.message || 'Inline enrollment failed. Please try again.')
+      );
+      fsmDispatch({ type: 'ENROLL_FAILED', error: errInfo });
+      setScanError(errInfo.message);
       setFlowState('ERROR');
     } finally {
       clearTimeout(enrollTimeoutId);
       setIsInlineEnrolling(false);
     }
-  }, [onGuideChange, studentInfo.roll_number, studentRoll, triggerFeedback]);
+  }, [onGuideChange, studentInfo.roll_number, studentRoll, submitScannedSession, triggerFeedback]);
 
   const handleConfirmRebindOtp = useCallback(async () => {
     if (!rebindOtpValue || rebindOtpValue.trim().length !== 6) {
@@ -841,25 +1180,63 @@ export function useAttendanceSubmission({
         setRebindOtpValue('');
         isScanningLockedRef.current = false;
         setIsSubmitting(false);
-        setFlowState('IDLE_SCANNING');
-        onGuideChange('New device verified & linked! Rescan the attendance QR now.');
         triggerFeedback(true);
+
+        try {
+          localStorage.setItem('binding_status', 'v2');
+          localStorage.setItem('binding_status_ts', String(Date.now()));
+        } catch {}
+
+        let cached: CachedQrPayload | null = null;
+        try {
+          const raw = sessionStorage.getItem('snist_cached_qr_payload');
+          if (raw) cached = JSON.parse(raw);
+        } catch {}
+
+        if (cached && isCachedPayloadValid(cached)) {
+          console.log('[QR] Rebind verified — auto-resuming submission with cached payload');
+          fsmDispatch({ type: 'OTP_VERIFIED' });
+          onGuideChange('Device verified! Submitting attendance…');
+          setTimeout(() => {
+            submitScannedSession(cached!.payload.token, {
+              token: cached!.payload.token,
+              sourceType: 'raw_token',
+              canonical: cached!.payload as any
+            });
+          }, 100);
+        } else {
+          console.warn('[QR] Rebind verified but cached QR expired');
+          const err = buildErrorInfo('qr_expired', 'QR expired — rescan');
+          fsmDispatch({ type: 'OTP_FAILED', error: err });
+          setScanError(err.message);
+          setScanErrorCode(err.code);
+          onGuideChange('QR expired — rescan active QR');
+        }
       } else {
         throw new Error(res?.detail?.message || res?.message || 'Rebind verification failed.');
       }
     } catch (err: any) {
+      const errInfo = buildErrorInfo('otp_delivery_failed', err.message || 'Invalid verification code. Please try again.');
+      fsmDispatch({ type: 'OTP_FAILED', error: errInfo });
       setRebindOtpError(err.message || 'Invalid verification code. Please try again.');
     } finally {
       setIsSubmittingRebindOtp(false);
     }
-  }, [cachedEnrollPayload, onGuideChange, rebindOtpValue, triggerFeedback]);
+  }, [cachedEnrollPayload, onGuideChange, rebindOtpValue, submitScannedSession, triggerFeedback]);
 
   const handleResendRebindOtp = useCallback(async () => {
     try {
       setRebindOtpError(null);
+      fsmDispatch({ type: 'OTP_RESEND' });
       await apiRequest('/binding/request-rebind-otp', { method: 'POST' });
       onGuideChange('New verification code sent to your email.');
     } catch (err: any) {
+      const isCooldown = err?.status === 429 || err?.error_code === 'otp_cooldown';
+      const retrySec = err?.retry_after_s || err?.retry_after || 30;
+      const errInfo = isCooldown
+        ? buildErrorInfo('otp_cooldown', `Resend too soon; please wait ${retrySec}s`, undefined, retrySec)
+        : buildErrorInfo('otp_delivery_failed', err.message || 'Failed to resend code. Please try again.');
+      fsmDispatch({ type: 'OTP_FAILED', error: errInfo });
       setRebindOtpError(err.message || 'Failed to resend code. Please try again.');
     }
   }, [onGuideChange]);
@@ -871,6 +1248,7 @@ export function useAttendanceSubmission({
       } catch {}
       currentAbortCtrlRef.current = null;
     }
+    fsmDispatch({ type: 'DISMISS' });
     setIsSubmitting(false);
     setFlowState('IDLE_SCANNING');
     isScanningLockedRef.current = false;
@@ -878,14 +1256,41 @@ export function useAttendanceSubmission({
   }, [onGuideChange]);
 
   const resetAfterTimeoutOrStale = useCallback(() => {
+    fsmDispatch({ type: 'DISMISS' });
     setFlowState('IDLE_SCANNING');
     setScanError(null);
+    setScanErrorCode(null);
     onGuideChange('Align the QR inside the frame');
     lastExpiredPayloadRef.current = null;
     lastExpiredStepRef.current = null;
     isScanningLockedRef.current = false;
     onNextScanReady();
   }, [onGuideChange, onNextScanReady]);
+
+  const retrySubmit = useCallback(async () => {
+    let cached: CachedQrPayload | null = null;
+    try {
+      const raw = sessionStorage.getItem('snist_cached_qr_payload');
+      if (raw) cached = JSON.parse(raw);
+    } catch {}
+
+    fsmDispatch({ type: 'RETRY' });
+    setScanError(null);
+    setScanErrorCode(null);
+
+    if (cached && isCachedPayloadValid(cached)) {
+      await submitScannedSession(cached.payload.token, {
+        token: cached.payload.token,
+        sourceType: 'raw_token',
+        canonical: cached.payload as any
+      });
+    } else {
+      isScanningLockedRef.current = false;
+      setIsSubmitting(false);
+      onNextScanReady();
+      onGuideChange('Align the QR inside the frame');
+    }
+  }, [onGuideChange, onNextScanReady, submitScannedSession]);
 
   const retryOfflineQueue = useCallback(async () => {
     setIsRetryingQueue(true);
@@ -905,6 +1310,14 @@ export function useAttendanceSubmission({
   }, [studentInfo.roll_number, studentRoll, triggerFeedback]);
 
   return {
+    // FSM State Context
+    fsmState: fsmCtx.state,
+    submittingStage: fsmCtx.submittingStage || 'validating_token',
+    errorInfo: fsmCtx.errorInfo || (scanError ? buildErrorInfo(scanErrorCode as any || 'generic_error', scanError) : null),
+    enrollmentTicket: fsmCtx.enrollmentTicket,
+    fsmDispatch,
+    retrySubmit,
+    // Flow State
     flowState,
     setFlowState,
     isSubmitting,

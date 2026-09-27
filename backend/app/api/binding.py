@@ -53,7 +53,13 @@ from app.core.binding_crypto import (
     check_verify_lockout,
     clear_verify_failures
 )
-from app.services.email_service import send_single_email, render_email_template
+from app.services.email_service import (
+    send_single_email,
+    render_email_template,
+    resolve_otp_recipient,
+    send_otp_with_retry_and_logging,
+    OTPRecipientUnresolved
+)
 
 logger = logging.getLogger("snist_erp.binding_api")
 
@@ -70,13 +76,14 @@ def check_binding_v2_enabled():
 
 
 def mask_email(email: Optional[str]) -> str:
+    """FIX-5: Masks username preserving institutional domain (e.g. 2••••••1@cse.sreenidhi.edu.in)."""
     if not email or "@" not in email:
         return "registered college email"
     user_part, domain = email.split("@", 1)
     if len(user_part) <= 2:
-        masked_user = user_part[0] + "*"
+        masked_user = user_part[0] + "•"
     else:
-        masked_user = user_part[0] + "*" * (len(user_part) - 2) + user_part[-1]
+        masked_user = user_part[0] + "••••••" + user_part[-1]
     return f"{masked_user}@{domain}"
 
 
@@ -148,8 +155,10 @@ def create_rebind_otp_record(student: Student, db: Session) -> Tuple[Optional[st
     Generates, hashes, and stores a 6-digit OTP in the database synchronously.
     Returns (otp_code, error_message).
     """
-    if not student.email:
-        return None, "No email address registered for student."
+    try:
+        resolve_otp_recipient(student)
+    except OTPRecipientUnresolved:
+        return None, "No registered recipient email found for student."
 
     now = datetime.utcnow()
     # Rate limit: max 5 OTP requests per hour
@@ -172,6 +181,8 @@ def create_rebind_otp_record(student: Student, db: Session) -> Tuple[Optional[st
         expires_at=now + timedelta(minutes=10),
         attempts=0,
         is_verified=False,
+        otp_delivery_status="sent",
+        delivery_channel="EMAIL",
         created_at=now
     )
     db.add(record)
@@ -402,26 +413,29 @@ def enroll_device_key(
     # --------------------------------------------------------------------------
     if active_binding and not is_recovery_case:
         if not req.rebind_otp:
-            # Trigger OTP creation synchronously and email dispatch in background
+            # Trigger OTP creation and email dispatch with delivery verification
+            try:
+                recipient = resolve_otp_recipient(student)
+            except OTPRecipientUnresolved:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"error_code": "otp_delivery_failed", "message": "No valid student recipient email found."}
+                )
+
             otp_code, err = create_rebind_otp_record(student, db)
             if err or not otp_code:
                 raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=err or "Too many verification requests.")
-            background_tasks.add_task(
-                dispatch_rebind_otp_email_bg,
-                student.id,
-                student.user_id,
-                student.roll_number,
-                student.name,
-                student.email,
-                otp_code
-            )
+
+            send_otp_with_retry_and_logging(db, student, otp_code, channel="EMAIL", enforce_cooldown=False)
+
             return {
                 "status": "REBIND_REQUIRED",
                 "otp_required": True,
-                "detail": f"An existing device is bound to this account. A verification code has been dispatched to {mask_email(student.email)} to authorize device replacement.",
-                "email_masked": mask_email(student.email),
+                "detail": f"An existing device is bound to this account. A verification code has been dispatched to {mask_email(recipient)} to authorize device replacement.",
+                "email_masked": mask_email(recipient),
                 "rebind_in_progress": True
             }
+
 
         # Validate OTP
         otp_hash = hashlib.sha256(req.rebind_otp.strip().encode("utf-8")).hexdigest()
@@ -669,37 +683,39 @@ def verify_binding_signature(
 
 @router.post("/request-rebind-otp", dependencies=[Depends(check_binding_v2_enabled)])
 def request_rebind_otp(
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Explicit student endpoint to request an email OTP for device re-registration.
+    FIX-5: Enforces 30s cooldown (429 otp_cooldown), canonical recipient resolution, and non-swallowing retry dispatch.
     """
     student = db.query(Student).filter(Student.user_id == current_user.id).first()
     if not student:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only students can request device rebind codes.")
 
+    try:
+        recipient = resolve_otp_recipient(student)
+    except OTPRecipientUnresolved:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error_code": "otp_delivery_failed", "message": "No valid student recipient email found."}
+        )
+
     otp_code, err = create_rebind_otp_record(student, db)
     if err or not otp_code:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err or "Too many verification requests.")
 
-    background_tasks.add_task(
-        dispatch_rebind_otp_email_bg,
-        student.id,
-        student.user_id,
-        student.roll_number,
-        student.name,
-        student.email,
-        otp_code
-    )
+    # Synchronous delivery with retry and delivery logging; raises 429 on cooldown or 502 on failure
+    send_otp_with_retry_and_logging(db, student, otp_code, channel="EMAIL", enforce_cooldown=True)
 
     return {
         "status": "SENT",
-        "email_masked": mask_email(student.email),
+        "email_masked": mask_email(recipient),
         "expires_in_minutes": 10,
-        "message": f"Verification code sent to {mask_email(student.email)}"
+        "message": f"Verification code sent to {mask_email(recipient)}"
     }
+
 
 
 # ============================================================

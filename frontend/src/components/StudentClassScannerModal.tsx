@@ -125,7 +125,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
             <div className="w-full flex flex-col items-center">
               <div 
                 className="relative w-full h-[58vh] sm:h-[420px] min-h-[320px] bg-black overflow-hidden select-none flex items-center justify-center"
-                style={{ touchAction: 'none' }}
+                style={{ touchAction: 'none', aspectRatio: 'var(--qr-viewfinder-ar, 4/3)' }}
                 onTouchStart={camera.handleTouchStart}
                 onTouchMove={camera.handleTouchMove}
                 onTouchEnd={camera.handleTouchEnd}
@@ -145,6 +145,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                   torchActive={camera.torchActive}
                   onToggleTorch={camera.toggleTorch}
                   onToggleFacingMode={camera.toggleFacingMode}
+                  isFlipDisabled={submission.flowState === 'SUBMITTING' || submission.flowState === 'ENROLLING'}
                   onOpenHelp={() => setShowHelpSheet(true)}
                   onClose={handleClose}
                 />
@@ -160,6 +161,8 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
 
                 <ScannerFeedbackOverlay
                   flowState={submission.flowState}
+                  submittingStage={submission.submittingStage}
+                  errorInfo={submission.errorInfo}
                   guideText={scanner.guideText}
                   cameraStarting={camera.cameraStarting}
                   cameraError={camera.cameraError}
@@ -175,6 +178,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                   onCancelSubmitting={submission.cancelSubmission}
                   onResetAfterTimeoutOrStale={submission.resetAfterTimeoutOrStale}
                   onInlineEnroll={submission.handleInlineEnroll}
+                  onRetrySubmit={submission.retrySubmit}
                   onCopySafariLink={camera.handleCopySafariLink}
                   onShowRollCard={() => setShowRollCard(true)}
                   onClose={handleClose}

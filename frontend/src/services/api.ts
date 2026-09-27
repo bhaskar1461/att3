@@ -98,9 +98,11 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
       let errorCode: string | undefined;
       let serverNow: number | undefined;
       let retryAfter: number | undefined;
+      let parsedErrData: any = null;
       if (text) {
         try {
           const errData = JSON.parse(text);
+          parsedErrData = errData;
           if (typeof errData.detail === 'string') {
             msg = errData.detail;
           } else if (errData.detail && typeof errData.detail === 'object') {
@@ -135,6 +137,11 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
       if (errorCode) apiErr.error_code = errorCode;
       if (serverNow) apiErr.serverNow = serverNow;
       if (retryAfter) apiErr.retry_after = retryAfter;
+      if (typeof parsedErrData === 'object' && parsedErrData !== null) {
+        apiErr.data = parsedErrData;
+        if (parsedErrData.enrollment_ticket) apiErr.enrollment_ticket = parsedErrData.enrollment_ticket;
+        if (parsedErrData.grace_until) apiErr.grace_until = parsedErrData.grace_until;
+      }
       throw apiErr;
     }
 
@@ -144,6 +151,9 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
 
     try {
       const data = JSON.parse(text) as T;
+      if (response.headers.get('Idempotent-Replay') === 'true' && typeof data === 'object' && data !== null) {
+        (data as any).idempotent_replay = true;
+      }
       scheduleTokenAutoRefresh();
       return data;
     } catch {
@@ -168,6 +178,9 @@ export async function apiRequest<T>(endpoint: string, options: RequestInit = {})
     if (err?.status) finalErr.status = err.status;
     if (err?.serverNow) finalErr.serverNow = err.serverNow;
     if (err?.retry_after) finalErr.retry_after = err.retry_after;
+    if (err?.enrollment_ticket) finalErr.enrollment_ticket = err.enrollment_ticket;
+    if (err?.grace_until) finalErr.grace_until = err.grace_until;
+    if (err?.data) finalErr.data = err.data;
     throw finalErr;
   }
 }

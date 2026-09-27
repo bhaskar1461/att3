@@ -7,6 +7,9 @@ export interface UseCameraStreamProps {
   onFrameReady?: () => void;
 }
 
+// Module-level singleton holding the active MediaStream across sheet open/close within session (FIX-8)
+let _sessionMediaStream: MediaStream | null = null;
+
 export function useCameraStream({
   displayType = 'projector',
   onFrameReady
@@ -73,30 +76,73 @@ export function useCameraStream({
     }
   }, []);
 
-  // getUserMedia Constraint Ladder Rungs
-  const CAMERA_LADDER_RUNGS: MediaStreamConstraints[] = useMemo(() => [
-    // Rung 1: Ideal 720p landscape environment camera (no min framerate constraint to prevent Safari OverconstrainedError)
-    {
-      audio: false,
-      video: {
-        facingMode: { ideal: facingMode },
-        width: { ideal: 1280 },
-        height: { ideal: 720 }
-      }
-    },
-    // Rung 2: Basic environment camera without dimension constraints
-    {
-      audio: false,
-      video: {
-        facingMode: { ideal: facingMode }
-      }
-    },
-    // Rung 3: Absolute fallback: any available video device
-    {
-      audio: false,
-      video: true
+  // Session-level stream singleton to ensure one getUserMedia per session (FIX-8)
+  const isMobileUA = useMemo(() => {
+    if (typeof navigator === 'undefined') return false;
+    return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  }, []);
+
+  const [isToolbarInteractive, setIsToolbarInteractive] = useState<boolean>(false);
+
+  // getUserMedia Constraint Ladder Rungs with Rear-Camera Lock (FIX-8)
+  const CAMERA_LADDER_RUNGS: MediaStreamConstraints[] = useMemo(() => {
+    if (isMobileUA) {
+      return [
+        // Rung 1: Exact environment facingMode for mobile devices
+        {
+          audio: false,
+          video: {
+            facingMode: { exact: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        },
+        // Rung 2: Fallback to ideal environment if exact is overconstrained
+        {
+          audio: false,
+          video: {
+            facingMode: { ideal: 'environment' },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          }
+        },
+        // Rung 3: Basic environment camera without dimension constraints
+        {
+          audio: false,
+          video: {
+            facingMode: { ideal: 'environment' }
+          }
+        },
+        // Rung 4: Absolute fallback
+        {
+          audio: false,
+          video: true
+        }
+      ];
     }
-  ], [facingMode]);
+
+    return [
+      // Desktop: Ideal facingMode
+      {
+        audio: false,
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      },
+      {
+        audio: false,
+        video: {
+          facingMode: { ideal: facingMode }
+        }
+      },
+      {
+        audio: false,
+        video: true
+      }
+    ];
+  }, [facingMode, isMobileUA]);
 
   // Robust Video Stream Setup & Playback for iOS Safari & Android
   const playVideoStream = useCallback(async (video: HTMLVideoElement, stream: MediaStream): Promise<void> => {
@@ -260,9 +306,9 @@ export function useCameraStream({
     }
   }, [autoZoomEnabled, hasZoomCapability, zoomRange, currentZoom, applyZoom]);
 
-  const stopCamera = useCallback(() => {
-    console.log('[Scanner] stopCamera invoked');
-    if (mediaStreamRef.current) {
+  const stopCamera = useCallback((forceTeardown: boolean = false) => {
+    console.log('[Scanner] stopCamera invoked, forceTeardown=', forceTeardown);
+    if (forceTeardown && mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => {
         try {
           track.stop();
@@ -270,9 +316,13 @@ export function useCameraStream({
         } catch {}
       });
       mediaStreamRef.current = null;
+      _sessionMediaStream = null;
     }
     if (videoRef.current) {
-      videoRef.current.srcObject = null;
+      try {
+        videoRef.current.pause();
+        videoRef.current.srcObject = null;
+      } catch {}
     }
     if (wakeLockRef.current) {
       try {
@@ -292,6 +342,19 @@ export function useCameraStream({
       setCameraError(null);
       setIsCameraInUse(false);
       stopCamera();
+
+      // Check session singleton stream first (FIX-8: One getUserMedia per session)
+      if (_sessionMediaStream && _sessionMediaStream.active && _sessionMediaStream.getVideoTracks().some(t => t.readyState === 'live')) {
+        mediaStreamRef.current = _sessionMediaStream;
+        setPermissionState('granted');
+        if (videoRef.current) {
+          await playVideoStream(videoRef.current, _sessionMediaStream);
+        }
+        setCameraStarting(false);
+        setCameraActive(true);
+        if (onFrameReady) onFrameReady();
+        return;
+      }
 
       if (typeof window !== 'undefined' && !window.isSecureContext && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
         setPermissionState('insecure_origin');
@@ -380,6 +443,12 @@ export function useCameraStream({
       console.log(`[Scanner] stream acquired (${vTracks.length} video tracks, active=${stream.active})`);
 
       mediaStreamRef.current = stream;
+      _sessionMediaStream = stream;
+      try {
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem('camera_granted', 'true');
+        }
+      } catch {}
 
       if (videoRef.current) {
         await playVideoStream(videoRef.current, stream);
@@ -521,16 +590,18 @@ export function useCameraStream({
       startCamera(1);
     }
 
+    // FIX-7 & FIX-8: Non-tearing visibilitychange handler
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
-        if (mediaStreamRef.current) {
-          stopCamera();
-          (window as any).__snist_resume_camera_after_vis__ = true;
+        if (videoRef.current) {
+          try { videoRef.current.pause(); } catch {}
         }
       } else if (document.visibilityState === 'visible') {
-        if ((window as any).__snist_resume_camera_after_vis__) {
-          (window as any).__snist_resume_camera_after_vis__ = false;
-          startCamera(1);
+        if (videoRef.current && mediaStreamRef.current) {
+          videoRef.current.play().catch(() => {});
+        }
+        if (onFrameReady) {
+          onFrameReady();
         }
       }
     };
@@ -626,6 +697,7 @@ export function useCameraStream({
     handleTouchMove,
     handleDoubleTap,
     handleTouchEnd,
+    isToolbarInteractive,
     barcodeDetectorRef
   };
 }

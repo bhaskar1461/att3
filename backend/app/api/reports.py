@@ -405,6 +405,7 @@ def request_report_job(
             "error": None,
         }
 
+    # sync-only — run via run_in_threadpool
     def _worker(rep_id: str, s_date: str, e_date: str, fmt: str, s_id: Optional[int]):
         from app.core.database import SessionLocal
         worker_db = SessionLocal()

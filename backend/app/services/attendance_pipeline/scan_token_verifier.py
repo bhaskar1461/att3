@@ -88,6 +88,27 @@ def verify_and_resolve_scan_token(
                     _INVALID_TOKEN_PREFILTER_CACHE.pop(cache_key, None)
 
     try:
+        # FIX-10: Canonical QR Payload validation (Defense in Depth)
+        if getattr(req, "qr_type", None) is not None:
+            qr_t = str(req.qr_type).strip()
+            if qr_t not in ("live_session", "frequency_extended"):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={"error_code": "qr_type_invalid", "message": "Wrong QR — scan the live session QR"}
+                )
+        if getattr(req, "exp", None) is not None:
+            try:
+                exp_val = float(req.exp)
+                now_ms = (now_ts or time.time()) * 1000
+                exp_ms = exp_val if exp_val > 1e11 else exp_val * 1000
+                if now_ms - 30000 > exp_ms:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail={"error_code": "qr_expired", "message": "QR expired — rescan"}
+                    )
+            except (ValueError, TypeError):
+                pass
+
         if getattr(req, "claim_token", None):
             from app.services.launch_token import validate_and_consume_claim
             claim_data = validate_and_consume_claim(req.claim_token, now_ts=now_ts)

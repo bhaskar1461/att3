@@ -1,7 +1,7 @@
 import time
 import logging
 from typing import Dict, Any, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import HTTPException, status, Request
 from sqlalchemy.orm import Session
 
@@ -68,26 +68,93 @@ def validate_session_and_enrollment(
             detail="Not enrolled in this section. Please contact faculty incharge."
         )
 
-    # Step 0f: Device Binding V2 Possession Proof (Feature-Flagged, Phase 4 & Phase 5 Cutover)
+    # Step 0f: Device Binding V2 Possession Proof & FIX-4 Legacy Grace Window
     binding_proof_meta = None
+    dev_id = (req.device_id or req.device_uuid or request.headers.get("x-device-public-id", "")).strip()
+    has_v2_proof = bool(req.challenge_token and (req.binding_signature or req.device_signature))
+
     if getattr(settings, 'BINDING_V2', False):
         if not req.is_offline_submission:
-            try:
-                binding_proof_meta = verify_binding_proof_fn(db, current_student, req, ip_addr)
-            except HTTPException:
-                raise
-            except Exception as binding_err:
-                logger.error(f"[BINDING V2] Non-fatal verification error for {clean_roll}: {binding_err}")
-                binding_proof_meta = {"binding_verified": False, "reason": "internal_error"}
+            if has_v2_proof:
+                try:
+                    binding_proof_meta = verify_binding_proof_fn(db, current_student, req, ip_addr)
+                except HTTPException:
+                    raise
+                except Exception as binding_err:
+                    logger.error(f"[BINDING V2] Non-fatal verification error for {clean_roll}: {binding_err}")
+                    binding_proof_meta = {"binding_verified": False, "reason": "internal_error"}
+            else:
+                # Device sending without V2 proof: check legacy device registry
+                from app.models.models import DeviceRegistration, EnrollmentTicket
+                import secrets
+                known_device = db.query(DeviceRegistration).filter(
+                    DeviceRegistration.device_public_id == dev_id
+                ).first() if dev_id else None
+
+                grace_iso = getattr(settings, "LEGACY_BINDING_GRACE_UNTIL", "2026-12-31T23:59:59Z")
+                grace_until_dt = datetime.fromisoformat(grace_iso.replace("Z", "+00:00")).replace(tzinfo=None)
+                
+                if known_device and known_device.is_active:
+                    if now_utc < grace_until_dt:
+                        # FIX-4: During grace window, known legacy device gets 409 binding_upgrade_required + ticket
+                        ticket_str = f"et_{secrets.token_hex(16)}"
+                        ticket_exp = now_utc + timedelta(seconds=600)
+                        ticket = EnrollmentTicket(
+                            ticket_code=ticket_str,
+                            device_public_id=dev_id,
+                            student_id=current_student.id,
+                            expires_at=ticket_exp,
+                            is_used=False
+                        )
+                        db.add(ticket)
+                        db.commit()
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail={
+                                "error_code": "binding_upgrade_required",
+                                "message": "This device needs a one-time security upgrade.",
+                                "enrollment_ticket": {
+                                    "ticket": ticket_str,
+                                    "expires_at": ticket_exp.isoformat() + "Z"
+                                },
+                                "grace_until": grace_iso
+                            }
+                        )
+                    else:
+                        # Post grace: 410 with binding_revoked_post_grace
+                        raise HTTPException(
+                            status_code=status.HTTP_410_GONE,
+                            detail={
+                                "error_code": "binding_revoked_post_grace",
+                                "message": "This device must be re-enrolled. Legacy security grace period has expired."
+                            }
+                        )
+                else:
+                    # Unknown device: existing auth behavior via verify_binding_proof_fn
+                    try:
+                        binding_proof_meta = verify_binding_proof_fn(db, current_student, req, ip_addr)
+                    except HTTPException:
+                        raise
     else:
-        # Standard device binding path: verify V2 proof if provided, otherwise defer to Layer 1 & 2 binding in recorder
-        has_v2_proof = bool(req.challenge_token and req.binding_signature)
+        # Standard device binding path / flag-off migration:
+        grace_iso = getattr(settings, "LEGACY_BINDING_GRACE_UNTIL", "2026-12-31T23:59:59Z")
+        grace_until_dt = datetime.fromisoformat(grace_iso.replace("Z", "+00:00")).replace(tzinfo=None)
         if has_v2_proof:
             try:
                 binding_proof_meta = verify_binding_proof_fn(db, current_student, req, ip_addr)
             except Exception as binding_err:
                 logger.info(f"[BINDING V2] Optional proof check for {clean_roll}: {binding_err}")
                 binding_proof_meta = {"binding_verified": False, "reason": "optional_fallback"}
+        elif now_utc >= grace_until_dt and dev_id:
+            # Post-grace even under flag-off returns 410 legacy_binding_retired
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail={
+                    "error_code": "binding_revoked_post_grace",
+                    "detail": "legacy_binding_retired: Grace period has expired. Please enroll with V2 proof.",
+                    "message": "This device must be re-enrolled. Legacy security grace period has expired."
+                }
+            )
 
     status_str = getattr(session_meta["status"], "value", str(session_meta["status"]))
     if status_str != "OPEN":

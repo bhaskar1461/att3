@@ -1,9 +1,10 @@
 from typing import Optional, Any, Dict, List
 from pydantic import BaseModel
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
 from app.core.config import settings
-from app.core.database import engine, Base
+from app.core.database import engine, Base, get_db
 from app.api import auth, admin, teacher, attendance, student, reports, devices, telemetry, compliance_analytics, defaulters, binding, attendance_devices, launch
 
 # Onboarding & Credential Dispatch routers (defensive import — never crash if module has issues)
@@ -454,12 +455,19 @@ def _run_defensive_schema_migrations():
                 except Exception as dev_col_err:
                     logger.warning(f"Notice: device_bindings column check skipped: {dev_col_err}")
 
-            if "qr_device_rebind_otps" not in tables:
-                try:
-                    Base.metadata.create_all(bind=engine, tables=[Base.metadata.tables["qr_device_rebind_otps"]])
-                    logger.info("Created missing qr_device_rebind_otps table.")
-                except Exception as otp_tbl_err:
-                    logger.warning(f"qr_device_rebind_otps create_all notice: {otp_tbl_err}")
+            # FIX-4, FIX-5, INV-2: Ensure required tables exist
+            for tbl_name in ["qr_device_rebind_otps", "qr_enrollment_tickets", "qr_otp_delivery_log", "qr_scan_idempotency_records"]:
+                if tbl_name not in tables and tbl_name in Base.metadata.tables:
+                    try:
+                        Base.metadata.create_all(bind=engine, tables=[Base.metadata.tables[tbl_name]])
+                        logger.info(f"Created missing {tbl_name} table.")
+                    except Exception as tbl_err:
+                        logger.warning(f"{tbl_name} create_all notice: {tbl_err}")
+
+            # Section 3.5 & INV-7: Startup validation for legacy binding grace window
+            if not getattr(settings, 'BINDING_V2', True) and not getattr(settings, 'LEGACY_BINDING_GRACE_UNTIL', None):
+                logger.error("[CONFIG FATAL] BINDING_V2 is disabled but LEGACY_BINDING_GRACE_UNTIL is unset. Refusing to boot.")
+                raise RuntimeError("Configuration error: LEGACY_BINDING_GRACE_UNTIL required when BINDING_V2 is False.")
 
             # Enforce single active binding database invariant index
             with engine.connect() as conn:
@@ -896,6 +904,19 @@ async def lifespan(app: FastAPI):
         # Defensive: startup guard itself must never crash the server
         logger.error(f"Email template startup guard encountered an unexpected error: {guard_err}", exc_info=True)
 
+    # Startup (INV-7): Strict configuration validation — fail fast if required config missing/invalid
+    if not getattr(settings, "BINDING_V2", True):
+        grace_until = getattr(settings, "LEGACY_BINDING_GRACE_UNTIL", None)
+        if not grace_until or not str(grace_until).strip():
+            logger.error("[INV-7 FATAL] BINDING_V2=false but LEGACY_BINDING_GRACE_UNTIL is unset. Refusing to boot.")
+            raise RuntimeError("LEGACY_BINDING_GRACE_UNTIL must be set when BINDING_V2=false")
+        try:
+            from datetime import datetime
+            datetime.fromisoformat(str(grace_until).replace("Z", "+00:00"))
+        except Exception as dt_err:
+            logger.error(f"[INV-7 FATAL] LEGACY_BINDING_GRACE_UNTIL is invalid ISO-8601: {grace_until}. Refusing to boot.")
+            raise RuntimeError(f"Invalid LEGACY_BINDING_GRACE_UNTIL: {dt_err}")
+
     # Startup: Expand AnyIO worker threadpool for I/O-blocked remote DB queries (AM2)
     try:
         import anyio.to_thread
@@ -1005,6 +1026,23 @@ app.add_middleware(
 from starlette.middleware.gzip import GZipMiddleware
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
+# Phase 10 Fix F-069: Standard browser defense security headers middleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as StarletteRequest
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Injects OWASP-recommended browser defense headers into every API response."""
+    async def dispatch(self, request: StarletteRequest, call_next):
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        # HSTS only applies on HTTPS; harmless if set unconditionally
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
 # Include Routers with defensive safeguards
 for r_module, name in [
     (auth.router, "Auth"),
@@ -1026,6 +1064,12 @@ for r_module, name in [
         logger.info(f"Successfully registered router module: {name}")
     except Exception as r_err:
         logger.error(f"Failed to register router {name}: {r_err}", exc_info=True)
+
+# Section 3.3 Job API root-level routing compatibility
+@app.get("/attendance/job/{job_id}")
+def get_root_attendance_job_status(job_id: str, db: Session = Depends(get_db)):
+    from app.api.attendance import get_attendance_job_status
+    return get_attendance_job_status(job_id, db)
 
 # Defensive redirect for /a/{token} to frontend universal landing page
 import os

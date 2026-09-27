@@ -472,9 +472,74 @@ class DeviceRebindOTP(Base):
     expires_at = Column(DateTime, nullable=False)
     attempts = Column(Integer, default=0, nullable=False)
     is_verified = Column(Boolean, default=False, nullable=False)
+    otp_delivery_status = Column(String(20), default="sent", nullable=False)  # sent | failed | bounced
+    message_id = Column(String(128), nullable=True)
+    delivery_channel = Column(String(20), default="EMAIL", nullable=False)  # EMAIL | SMS | IN_APP
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     student = relationship("Student", primaryjoin="DeviceRebindOTP.student_id==Student.id", foreign_keys="[DeviceRebindOTP.student_id]")
+
+
+class EnrollmentTicket(Base):
+    """
+    FIX-4: One-time enrollment ticket for legacy-to-V2 device migration during grace period (§3.6).
+    Single-use, TTL 600s, bound to (device_public_id, student_id).
+    """
+    __tablename__ = "qr_enrollment_tickets"
+    __table_args__ = (
+        Index("idx_enroll_ticket_code", "ticket_code"),
+        Index("idx_enroll_ticket_student", "student_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticket_code = Column(String(64), unique=True, nullable=False)  # et_<32 hex>
+    device_public_id = Column(String(100), nullable=False)
+    student_id = Column(Integer, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    is_used = Column(Boolean, default=False, nullable=False)
+    used_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class OTPDeliveryLog(Base):
+    """
+    FIX-5: Persistent delivery audit trail for OTP emails/messages.
+    Tracks status (sent|failed|bounced), message_id, attempt count, and latency.
+    """
+    __tablename__ = "qr_otp_delivery_log"
+    __table_args__ = (
+        Index("idx_otp_delivery_student_created", "student_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    student_id = Column(Integer, nullable=False)
+    channel = Column(String(20), default="EMAIL", nullable=False)  # EMAIL | SMS | IN_APP
+    recipient = Column(String(150), nullable=False)
+    status = Column(String(20), nullable=False)  # sent | failed | bounced
+    message_id = Column(String(128), nullable=True)
+    error_text = Column(Text, nullable=True)
+    attempt = Column(Integer, default=1, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ScanIdempotencyRecord(Base):
+    """
+    INV-2 & Section 3.2: 24h persistence for scan session Idempotency-Key.
+    Guarantees replay returns original response with Idempotent-Replay: true.
+    """
+    __tablename__ = "qr_scan_idempotency_records"
+    __table_args__ = (
+        Index("idx_scan_idem_key", "idempotency_key"),
+        Index("idx_scan_idem_created", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    idempotency_key = Column(String(128), unique=True, nullable=False)
+    student_id = Column(Integer, nullable=False)
+    session_id = Column(Integer, nullable=False)
+    status_code = Column(Integer, default=200, nullable=False)
+    response_body = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 # ============================================================

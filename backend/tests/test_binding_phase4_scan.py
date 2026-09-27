@@ -222,26 +222,32 @@ class TestBindingPhase4ScanPath(unittest.TestCase):
         return binding
 
     # ================================================================
-    # TEST 1: BINDING_V2=false → scan works without binding fields
+    # TEST 1: BINDING_V2=false, grace expired → legacy device receives 410
     # ================================================================
     def test_01_flag_off_scan_succeeds_without_binding(self):
-        """Phase 5 Cutover: When BINDING_V2 is disabled, client sending legacy device_uuid receives HTTP 410 legacy_binding_retired."""
+        """Phase 5 Cutover: When BINDING_V2 is disabled and grace expired, client sending legacy device_uuid receives HTTP 410 legacy_binding_retired."""
         settings.BINDING_V2 = False
+        orig_grace = getattr(settings, "LEGACY_BINDING_GRACE_UNTIL", "2026-12-31T23:59:59Z")
+        settings.LEGACY_BINDING_GRACE_UNTIL = "2020-01-01T00:00:00Z"
 
-        qr_payload = self._get_broadcast_token()
+        try:
+            qr_payload = self._get_broadcast_token()
 
-        res = self.client.post(
-            "/api/v1/student/scan-session",
-            json={
-                "session_token": qr_payload,
-                "token_format": "short",
-                "device_uuid": "DEV-TEST-P4"
-            },
-            headers=self.s1_headers
-        )
-        self.assertEqual(res.status_code, 410, f"Expected 410, got {res.status_code}: {res.text}")
-        data = res.json()
-        self.assertIn("legacy_binding_retired", data.get("detail", ""))
+            res = self.client.post(
+                "/api/v1/student/scan-session",
+                json={
+                    "session_token": qr_payload,
+                    "token_format": "short",
+                    "device_uuid": "DEV-TEST-P4"
+                },
+                headers=self.s1_headers
+            )
+            self.assertEqual(res.status_code, 410, f"Expected 410, got {res.status_code}: {res.text}")
+            data = res.json()
+            self.assertIn("legacy_binding_retired", str(data))
+        finally:
+            settings.LEGACY_BINDING_GRACE_UNTIL = orig_grace
+
 
     # ================================================================
     # TEST 2: BINDING_V2=true, enrolled + valid signature → SUCCESS

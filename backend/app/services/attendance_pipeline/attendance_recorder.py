@@ -5,6 +5,7 @@ import hashlib
 from typing import Dict, Any, Optional
 from datetime import datetime
 from fastapi import HTTPException, status, BackgroundTasks, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 
@@ -72,6 +73,7 @@ async def record_scan_attendance(
             ).first()
             return {
                 "status": "ALREADY_MARKED",
+                "already_marked": True,
                 "attendance_id": existing_record.id if existing_record else None,
                 "message": "You have already been marked present for this session.",
                 "session_id": session_id,
@@ -121,6 +123,8 @@ async def record_scan_attendance(
             }
         }
 
+        # FIX-3: Register per-job asyncio.Future before enqueuing to background worker
+        job_fut = async_attendance_writer.create_waiter(job_id)
         async_attendance_writer.enqueue(job_id, payload)
         student_scan_limiter.reset_limit(clean_roll)
         failed_token_tracker.record_success(tracker_key)
@@ -133,13 +137,34 @@ async def record_scan_attendance(
             pass
 
         resolved_att_id = None
-        t_wait_start = time.perf_counter()
-        while (time.perf_counter() - t_wait_start) < 0.80:
-            status_data = async_attendance_writer.get_status(job_id)
-            if status_data and status_data.get("attendance_id"):
-                resolved_att_id = status_data["attendance_id"]
-                break
-            await asyncio.sleep(0.02)
+        try:
+            resolved_att_id = await asyncio.wait_for(job_fut, timeout=2.0)
+        except (asyncio.TimeoutError, TimeoutError):
+            # Authoritative DB lookup fallback by (session_id, student_id)
+            existing = db.query(AttendanceRecord).filter(
+                AttendanceRecord.session_id == session_id,
+                AttendanceRecord.student_id == current_student.id
+            ).first()
+            if existing:
+                resolved_att_id = existing.id
+            else:
+                # 202 Accepted pending job poll per Section 3.3 contract
+                poll_url = f"/api/v1/attendance/job/{job_id}"
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={
+                        "job_id": job_id,
+                        "status": "pending",
+                        "poll_url": poll_url,
+                        "session_id": session_id,
+                        "subject_name": resolved_subject_name,
+                        "period_name": session_meta["period"],
+                        "period_count": period_count,
+                        "session_date": session_meta["session_date"],
+                        "roll_number": current_student.roll_number,
+                        "student_name": current_student.name
+                    }
+                )
 
         t_total_ms = (time.perf_counter() - t_scan_start) * 1000
         logger.info(

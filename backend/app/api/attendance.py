@@ -1744,3 +1744,40 @@ def skip_attendance_selfie_endpoint(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to update selfie status.")
 
 
+@router.get("/job/{job_id}")
+def get_attendance_job_status(job_id: str, db: Session = Depends(get_db)):
+    """
+    Section 3.3 Job API:
+    GET /attendance/job/{job_id} ->
+    { "job_id": "...", "status": "pending | committed | failed", "attendance_id": 12345, "error_code": null }
+    404 after 10-min TTL or if unknown.
+    """
+    from app.api.student import async_attendance_writer
+    status_info = async_attendance_writer.get_job_status(job_id)
+    if not status_info:
+        # Cross-worker DB fallback: if job committed in another worker process
+        parts = job_id.split("-")
+        if len(parts) >= 4 and parts[0] == "SCAN":
+            try:
+                s_id = int(parts[1])
+                roll = parts[2]
+                rec = db.query(AttendanceRecord).filter(
+                    AttendanceRecord.session_id == s_id,
+                    AttendanceRecord.roll_number == roll
+                ).first()
+                if rec:
+                    return {
+                        "job_id": job_id,
+                        "status": "committed",
+                        "attendance_id": rec.id,
+                        "error_code": None
+                    }
+            except Exception:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "job_not_found", "message": "Unknown or expired job_id."}
+        )
+    return status_info
+
+

@@ -4,6 +4,7 @@ import { Camera, Flashlight, RefreshCw, X, HelpCircle } from 'lucide-react';
 interface ScannerControlsBarProps {
   hasTorchCapability: boolean;
   torchActive: boolean;
+  isFlipDisabled?: boolean;
   onToggleTorch: () => void;
   onToggleFacingMode: () => void;
   onOpenHelp?: () => void;
@@ -13,6 +14,7 @@ interface ScannerControlsBarProps {
 export const ScannerControlsBar: React.FC<ScannerControlsBarProps> = ({
   hasTorchCapability,
   torchActive,
+  isFlipDisabled = false,
   onToggleTorch,
   onToggleFacingMode,
   onOpenHelp,
@@ -52,14 +54,16 @@ export const ScannerControlsBar: React.FC<ScannerControlsBarProps> = ({
           </button>
         )}
 
-        <button
-          type="button"
-          onClick={onToggleFacingMode}
-          className="p-2 rounded-full bg-black/50 text-white/80 hover:text-white backdrop-blur-md border border-white/10 transition shadow-sm cursor-pointer"
-          title="Flip camera"
-        >
-          <RefreshCw className="w-4 h-4" />
-        </button>
+        {!isFlipDisabled && (
+          <button
+            type="button"
+            onClick={onToggleFacingMode}
+            className="p-2 rounded-full bg-black/50 text-white/80 hover:text-white backdrop-blur-md border border-white/10 transition shadow-sm cursor-pointer"
+            title="Flip camera"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+        )}
 
         <button
           type="button"

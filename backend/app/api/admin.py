@@ -821,7 +821,7 @@ def get_department_enrolled_students(
 
 # --- Departments, Years, Sections, Subjects ---
 @router.get("/departments")
-def get_departments(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def get_departments(db: Session = Depends(get_db), current_user: User = Depends(require_admin)):
     return db.query(Department).all()
 
 @router.post("/departments")
@@ -1322,79 +1322,24 @@ def admin_sync_assignment_roster_from_sheet(
     if not section:
         raise HTTPException(status_code=400, detail="No section associated with this class assignment.")
 
-    from app.services.gsheets_service import GoogleSheetsService
-    from app.core.config import settings
-    from app.models.models import Student, User, UserRole
-    from app.core.security import get_password_hash
-
-    creds_file = settings.GOOGLE_CREDENTIALS_FILE or os.path.join(settings.BACKEND_DIR, "credentials.json")
+    from app.services.gsheet_reconciliation_service import GSheetReconciliationService
     try:
-        client = GoogleSheetsService._get_client(creds_file)
-        spreadsheet = client.open_by_key(target_sheet_id)
-        try:
-            worksheet = spreadsheet.worksheet("Attendance Register")
-        except Exception:
-            worksheet = spreadsheet.sheet1
-
-        vals = worksheet.get_all_values()
-        if len(vals) < 7:
-            raise HTTPException(status_code=400, detail="Sheet has no student rows (expected student rows starting row 7)")
-
-        synced_count = 0
-        for r_idx in range(6, len(vals)):
-            row = vals[r_idx]
-            if len(row) < 2:
-                continue
-            roll = str(row[1]).strip().upper()
-            if not roll or roll in ["ROLL NO", "ROLL NUMBER", "SNO", "TOTAL", "S.NO"]:
-                continue
-            name = str(row[2]).strip() if len(row) > 2 and row[2] else f"Student {roll}"
-            agency = str(row[3]).strip() if len(row) > 3 and row[3] else "Regular"
-
-            existing = db.query(Student).filter(Student.roll_number == roll).first()
-            if existing:
-                existing.section_id = section.id
-                existing.name = name
-                existing.agency = agency
-                synced_count += 1
-            else:
-                user = db.query(User).filter(User.username == roll).first()
-                if not user:
-                    user = User(
-                        username=roll,
-                        email=f"{roll.lower()}@snist.edu.in",
-                        password_hash=get_password_hash("student123"),
-                        role=UserRole.STUDENT
-                    )
-                    db.add(user)
-                    db.flush()
-                st = Student(
-                    user_id=user.id,
-                    roll_number=roll,
-                    name=name,
-                    department_id=section.department_id,
-                    academic_year_id=section.academic_year_id,
-                    section_id=section.id,
-                    email=f"{roll.lower()}@snist.edu.in",
-                    agency=agency
-                )
-                db.add(st)
-                synced_count += 1
-
-        db.commit()
-        return {
-            "status": "SUCCESS",
-            "message": f"Successfully synchronized {synced_count} students into {section.name} from class Google Sheet!",
-            "synced_count": synced_count,
-            "section_name": section.name,
-            "google_sheet_id": target_sheet_id
-        }
+        res = GSheetReconciliationService.reconcile_class_assignment(
+            db=db,
+            assignment_id=assignment.id,
+            target_sheet_id=target_sheet_id,
+            notify_students=True
+        )
+        return res
     except HTTPException:
         raise
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         db.rollback()
         logger.error(f"Admin sync roster from sheet failed for assignment {assignment_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to sync roster from Google Sheet: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to reconcile roster from Google Sheet: {str(e)}")
+
 
 @router.post("/assignments/{assignment_id}/format-sheet")
 def admin_format_assignment_google_sheet(
@@ -2573,5 +2518,40 @@ try:
     router.include_router(operations_router)
 except Exception as ops_err:  # pragma: no cover
     logger.error(f"Failed to register Admin Operations router: {ops_err}", exc_info=True)
+
+
+# --- Phase 10 Multi-Target Attendance Reconciliation Service Endpoints ---
+@router.get("/reconciliation/run")
+def run_attendance_reconciliation(
+    session_id: Optional[int] = None,
+    date: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin)
+):
+    """
+    On-demand administrative endpoint to execute multi-target reconciliation.
+    Detects drift between authoritative MySQL and Frappe ERP, Google Sheets, and Excel registers.
+    """
+    from app.services.reconciliation_service import MultiTargetReconciliationEngine
+    report = MultiTargetReconciliationEngine.run_reconciliation_audit(
+        db=db,
+        session_id=session_id,
+        date_str=date
+    )
+    return report
+
+
+@router.get("/reconciliation/status")
+def get_reconciliation_status(
+    current_user: User = Depends(require_admin)
+):
+    """Returns the operational health and readiness of the multi-target reconciliation auditor."""
+    return {
+        "status": "OPERATIONAL",
+        "auditor_version": "1.0.0",
+        "supported_targets": ["frappe", "gsheets", "excel"],
+        "governance": "JNTUH R25 Legal Compliance"
+    }
+
 
 

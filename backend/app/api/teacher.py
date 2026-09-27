@@ -1133,6 +1133,13 @@ def delete_session(
     if session.teacher_id != current_teacher.id and current_teacher.user.role != UserRole.SUPER_ADMIN:
         raise HTTPException(status_code=403, detail="Not authorized to delete this session")
 
+    # Invariant: A finalized/LOCKED session is an official institutional record and cannot be deleted by faculty
+    if session.status == SessionStatus.LOCKED and current_teacher.user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete a LOCKED session. Attendance has already been finalized and synced to institutional registers."
+        )
+
     subject_name = session.subject.name if session.subject else f"Subject #{session.subject_id}"
     section_name = session.section.name if session.section else f"Section #{session.section_id}"
     session_date = session.session_date
@@ -1274,9 +1281,8 @@ def sync_roster_from_sheet(
     target_assignment = None
     if req.assignment_id:
         target_assignment = db.query(TeacherAssignment).filter(TeacherAssignment.id == req.assignment_id).first()
-        if target_assignment:
-            if not req.section_id:
-                req.section_id = target_assignment.section_id
+        if target_assignment and not req.section_id:
+            req.section_id = target_assignment.section_id
 
     target_sheet_id = extract_spreadsheet_id(req.google_sheet_id or "")
     if not target_sheet_id and target_assignment and target_assignment.google_sheet_id:
@@ -1286,93 +1292,45 @@ def sync_roster_from_sheet(
     if not target_sheet_id:
         raise HTTPException(status_code=400, detail="Google Sheet ID or URL required")
 
-    # If assignment sheet was updated or newly set, persist it
-    if target_assignment and target_sheet_id and target_assignment.google_sheet_id != target_sheet_id:
-        target_assignment.google_sheet_id = target_sheet_id
-        db.commit()
-
     target_section_id = req.section_id
     if not target_section_id and target_assignment:
         target_section_id = target_assignment.section_id
     if not target_section_id:
         assignment = db.query(TeacherAssignment).filter(TeacherAssignment.teacher_id == current_teacher.id).first()
         if assignment:
+            target_assignment = assignment
             target_section_id = assignment.section_id
 
     if not target_section_id:
         raise HTTPException(status_code=400, detail="No section specified or assigned to sync roster into")
 
-    section = db.query(Section).filter(Section.id == target_section_id).first()
-    if not section:
-        raise HTTPException(status_code=404, detail="Section not found")
+    if not target_assignment:
+        target_assignment = db.query(TeacherAssignment).filter(
+            TeacherAssignment.teacher_id == current_teacher.id,
+            TeacherAssignment.section_id == target_section_id
+        ).first()
 
-    creds_file = settings.GOOGLE_CREDENTIALS_FILE or os.path.join(settings.BACKEND_DIR, "credentials.json")
+    if not target_assignment:
+        raise HTTPException(status_code=404, detail="No class assignment found for this section")
+
+    from app.services.gsheet_reconciliation_service import GSheetReconciliationService
     try:
-        client = GoogleSheetsService._get_client(creds_file)
-        spreadsheet = client.open_by_key(target_sheet_id)
-        try:
-            worksheet = spreadsheet.worksheet("Attendance Register")
-        except Exception:
-            worksheet = spreadsheet.sheet1
-
-        vals = worksheet.get_all_values()
-        if len(vals) < 7:
-            raise HTTPException(status_code=400, detail="Sheet has no student rows (expected students starting row 7)")
-
-        synced_count = 0
-
-        for r_idx in range(6, len(vals)):
-            row = vals[r_idx]
-            if len(row) < 2:
-                continue
-            roll = str(row[1]).strip().upper()
-            if not roll or roll in ["ROLL NO", "ROLL NUMBER", "SNO", "TOTAL", "S.NO"]:
-                continue
-            name = str(row[2]).strip() if len(row) > 2 and row[2] else f"Student {roll}"
-            agency = str(row[3]).strip() if len(row) > 3 and row[3] else "Regular"
-
-            existing = db.query(Student).filter(Student.roll_number == roll).first()
-            if existing:
-                existing.section_id = section.id
-                existing.name = name
-                existing.agency = agency
-                synced_count += 1
-            else:
-                user = db.query(User).filter(User.username == roll).first()
-                if not user:
-                    user = User(
-                        username=roll,
-                        email=f"{roll.lower()}@snist.edu.in",
-                        password_hash=get_password_hash("student123"),
-                        role=UserRole.STUDENT
-                    )
-                    db.add(user)
-                    db.flush()
-                st = Student(
-                    user_id=user.id,
-                    roll_number=roll,
-                    name=name,
-                    department_id=section.department_id,
-                    academic_year_id=section.academic_year_id,
-                    section_id=section.id,
-                    email=f"{roll.lower()}@snist.edu.in",
-                    agency=agency
-                )
-                db.add(st)
-                synced_count += 1
-
-        db.commit()
-        return {
-            "status": "SUCCESS",
-            "message": f"Successfully synchronized {synced_count} students into {section.name} from Google Sheet!",
-            "synced_count": synced_count,
-            "section_name": section.name
-        }
+        res = GSheetReconciliationService.reconcile_class_assignment(
+            db=db,
+            assignment_id=target_assignment.id,
+            target_sheet_id=target_sheet_id,
+            notify_students=True
+        )
+        return res
     except HTTPException:
         raise
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
+        logger.error(f"Error in sync_roster_from_sheet: {e}", exc_info=True)
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Failed to sync roster from Google Sheet: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to reconcile roster from Google Sheet: {str(e)}")
+
 
 @router.get("/assignments/{assignment_id}/download-register")
 def download_teacher_class_register(

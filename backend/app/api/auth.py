@@ -117,6 +117,42 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
         with _AUTH_USER_CACHE_LOCK:
             _AUTH_USER_CACHE[username] = (user, time.time())
 
+    # Phase 10 Fix F-068: Server-side must_change_password enforcement
+    # Previously UI-only — a user could call any protected endpoint despite the flag.
+    # Now returns 403 with machine-readable code so the frontend MUST redirect to password-change.
+    # Whitelist: /auth/change-password (so they CAN change it) and /auth/me (so frontend can read the flag).
+    if getattr(user, "must_change_password", False):
+        # This import is safe to defer; it's already loaded at module scope in FastAPI middleware
+        from starlette.requests import Request as _StReq
+        import inspect
+        # Walk up the call stack to find the Request object and check the path
+        frame = inspect.currentframe()
+        request_path = None
+        try:
+            while frame is not None:
+                for val in frame.f_locals.values():
+                    if isinstance(val, _StReq):
+                        request_path = getattr(val, "url", None)
+                        if request_path:
+                            request_path = str(request_path.path)
+                        break
+                if request_path:
+                    break
+                frame = frame.f_back
+        finally:
+            del frame
+
+        # Allow change-password and me endpoints through
+        _WHITELISTED_PATHS = {"/api/v1/auth/change-password", "/api/v1/auth/me"}
+        if request_path not in _WHITELISTED_PATHS:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "must_change_password",
+                    "message": "You must change your password before accessing any other endpoint."
+                },
+            )
+
     return user
 
 def require_teacher(request: Request, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> User:

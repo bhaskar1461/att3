@@ -23,6 +23,13 @@ export interface QrEngineConfig {
 export type FallbackListener = (detail: { error: string; action: string; fallbackEngine: ScannerEngine }) => void;
 const fallbackListeners: FallbackListener[] = [];
 
+type TelemetryHandler = (event: string, details?: any) => void;
+let telemetryHandler: TelemetryHandler = () => {};
+
+export function registerTelemetry(fn: TelemetryHandler): void {
+  telemetryHandler = fn;
+}
+
 export function onScannerFallback(listener: FallbackListener): () => void {
   fallbackListeners.push(listener);
   return () => {

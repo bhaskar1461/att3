@@ -23,7 +23,13 @@ from app.core.device_security import (
     record_audit_log,
     is_demo_account
 )
-from app.services.email_service import send_single_email, render_email_template
+from app.services.email_service import (
+    send_single_email,
+    render_email_template,
+    resolve_otp_recipient,
+    send_otp_with_retry_and_logging,
+    OTPRecipientUnresolved
+)
 from app.core.config import settings
 
 router = APIRouter(prefix="/devices", tags=["Device Binding Security"])
@@ -61,14 +67,16 @@ import logging
 logger = logging.getLogger("snist_erp.devices_api")
 
 def mask_email(email: str) -> str:
+    """FIX-5: Masks username preserving real domain (e.g. 2••••••1@cse.sreenidhi.edu.in)."""
     if not email or "@" not in email:
         return "***@***"
     user_part, domain = email.split("@", 1)
     if len(user_part) <= 2:
-        masked_user = user_part[0] + "***"
+        masked_user = user_part[0] + "•"
     else:
-        masked_user = user_part[0] + "***" + user_part[-1]
+        masked_user = user_part[0] + "••••••" + user_part[-1]
     return f"{masked_user}@{domain}"
+
 
 @router.post("/register")
 def register_device_endpoint(
@@ -332,10 +340,14 @@ def request_device_reset(
     ).update({"is_consumed": True})
     db.commit()
 
-    # 6. Determine target email
-    target_email = student.email or user.email
-    if not target_email or "@" not in target_email:
-        target_email = f"{clean_roll.lower()}@sreenidhi.edu.in"
+    # 6. Determine target email via canonical resolution (FIX-5)
+    try:
+        target_email = resolve_otp_recipient(student)
+    except OTPRecipientUnresolved:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"error_code": "otp_delivery_failed", "message": "No valid student recipient email found."}
+        )
 
     # 7. Generate 6-digit OTP code & hash
     if is_demo_account(clean_roll):
@@ -357,7 +369,7 @@ def request_device_reset(
     db.add(reset_otp)
     db.commit()
 
-    # 8. Send OTP via email using existing OTP channel
+    # 8. Send OTP via email using resilient retry dispatch (FIX-5)
     try:
         html_body = render_email_template("otp_email.html", {
             "otp_code": otp_code,
@@ -375,12 +387,16 @@ def request_device_reset(
         </body></html>
         """
 
-    send_single_email(
-        to_email=target_email,
+    send_otp_with_retry_and_logging(
+        db=db,
+        student=student,
+        otp_code=otp_code,
         subject=f"SNIST ERP — Device Reset Code: {otp_code}",
         html_body=html_body,
-        channel="OTP"
+        channel="EMAIL",
+        enforce_cooldown=True
     )
+
 
     record_audit_log(
         db=db,

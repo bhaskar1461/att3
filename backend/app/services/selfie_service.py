@@ -53,6 +53,7 @@ def _get_image_metadata(data: bytes) -> Tuple[str, int, int]:
         return mime_type, width, height
 
 
+# sync-only — run via run_in_threadpool
 def store_attendance_selfie(
     db: Session,
     attendance_id: int,
@@ -68,6 +69,9 @@ def store_attendance_selfie(
     Organized by Roll Number and Student Name for AI model training:
         data/selfies/<ROLL>_<NAME>/<ROLL>_<NAME>_s<session_id>_<timestamp>_f<frame>_<uuid>.jpg
     """
+    import time
+    t_selfie_start = time.perf_counter()
+
     if not image_bytes or len(image_bytes) == 0:
         raise ValueError("Selfie image payload cannot be empty.")
 
@@ -86,17 +90,13 @@ def store_attendance_selfie(
             AttendanceRecord.student_id == student_id
         ).first()
 
-    # Fallback lookup by session_id & student_id (with retry for async writer queue)
+    # FIX-2: Remove 5x 0.15s event-loop-blocking sleep.
+    # Committed attendance_id is passed directly from FIX-3. Keep at most ONE fallback re-query.
     if not record and session_id:
-        import time as _t
-        for _ in range(5):
-            record = db.query(AttendanceRecord).filter(
-                AttendanceRecord.session_id == session_id,
-                AttendanceRecord.student_id == student_id
-            ).order_by(AttendanceRecord.id.desc()).first()
-            if record:
-                break
-            _t.sleep(0.15)
+        record = db.query(AttendanceRecord).filter(
+            AttendanceRecord.session_id == session_id,
+            AttendanceRecord.student_id == student_id
+        ).order_by(AttendanceRecord.id.desc()).first()
 
     if not record:
         raise ValueError(f"Attendance record {attendance_id} for student {student_id} not found.")
@@ -159,12 +159,19 @@ def store_attendance_selfie(
     except Exception:
         pass
 
+    duration_ms = (time.perf_counter() - t_selfie_start) * 1000
+    logger.info(
+        f"[SELFIE_STORE] student_id={student_id} attendance_id={record.id} selfie_id={selfie.id} "
+        f"selfie_store_duration_ms={duration_ms:.2f} status=ACCEPTED"
+    )
+
     return {
         "status": "ACCEPTED",
         "selfie_id": selfie.id,
         "object_storage_key": selfie.object_storage_key,
         "file_size": len(image_bytes),
         "frame_index": frame_index,
+        "selfie_store_duration_ms": duration_ms,
         "roll_number": roll_number,
         "student_name": clean_name
     }

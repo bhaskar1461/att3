@@ -12,6 +12,16 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
+# Phase 10 Fix F-067: CWE-1236 CSV/Excel formula injection sanitization
+# Prefixes dangerous leading characters with ' to prevent formula execution in Excel/LibreOffice
+_FORMULA_INJECTION_CHARS = frozenset({"=", "+", "-", "@"})
+
+def _sanitize_csv_cell(value: Any) -> Any:
+    """Escapes values starting with formula injection characters for safe CSV/Excel export."""
+    if isinstance(value, str) and value and value[0] in _FORMULA_INJECTION_CHARS:
+        return "'" + value
+    return value
+
 class ReportService:
     @staticmethod
     def generate_weekly_register(data: List[Dict[str, Any]], title: str = "Weekly Attendance Register") -> bytes:
@@ -134,12 +144,12 @@ class ReportService:
         for i, item in enumerate(data_iter, 1):
             writer.writerow({
                 "S.No": i,
-                "Roll Number": item.get("roll_number", ""),
-                "Student Name": item.get("student_name", ""),
-                "Department": item.get("department", ""),
-                "Section": item.get("section", ""),
-                "Subject": item.get("subject", ""),
-                "Status": item.get("status", ""),
+                "Roll Number": _sanitize_csv_cell(item.get("roll_number", "")),
+                "Student Name": _sanitize_csv_cell(item.get("student_name", "")),
+                "Department": _sanitize_csv_cell(item.get("department", "")),
+                "Section": _sanitize_csv_cell(item.get("section", "")),
+                "Subject": _sanitize_csv_cell(item.get("subject", "")),
+                "Status": _sanitize_csv_cell(item.get("status", "")),
                 "Date": item.get("date", "")
             })
             yield output.getvalue()
@@ -159,12 +169,12 @@ class ReportService:
         for i, item in enumerate(data, 1):
             writer.writerow({
                 "S.No": i,
-                "Roll Number": item.get("roll_number", ""),
-                "Student Name": item.get("student_name", ""),
-                "Department": item.get("department", ""),
-                "Section": item.get("section", ""),
-                "Subject": item.get("subject", ""),
-                "Status": item.get("status", ""),
+                "Roll Number": _sanitize_csv_cell(item.get("roll_number", "")),
+                "Student Name": _sanitize_csv_cell(item.get("student_name", "")),
+                "Department": _sanitize_csv_cell(item.get("department", "")),
+                "Section": _sanitize_csv_cell(item.get("section", "")),
+                "Subject": _sanitize_csv_cell(item.get("subject", "")),
+                "Status": _sanitize_csv_cell(item.get("status", "")),
                 "Date": item.get("date", "")
             })
         return output.getvalue()

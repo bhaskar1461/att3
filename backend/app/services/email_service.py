@@ -12,7 +12,7 @@ import threading
 import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
 from app.core.config import settings
@@ -253,6 +253,7 @@ def dispatch_email_batch_background(
 
     This function returns immediately — the actual dispatch runs in a daemon thread.
     """
+    # sync-only — run via run_in_threadpool
     def _worker():
         """Inner worker function running in a background thread."""
         from app.core.database import SessionLocal
@@ -552,4 +553,224 @@ def send_teacher_class_allotment_notification(
     except Exception as exc:
         logger.error(f"Failed to send teacher class allotment email to {teacher_email}: {exc}", exc_info=True)
         return {"status": "FAILED", "to": teacher_email, "error": str(exc)}
+
+
+# ============================================================
+# FIX-5: CANONICAL RECIPIENT RESOLUTION & RESILIENT OTP DISPATCH
+# ============================================================
+
+import random
+
+
+class OTPRecipientUnresolved(Exception):
+    """Raised when student recipient cannot be resolved from student record."""
+    def __init__(self, student_id: int):
+        super().__init__(f"Unable to resolve OTP recipient for student ID {student_id}")
+        self.student_id = student_id
+
+
+def resolve_otp_recipient(student) -> str:
+    """
+    FIX-5: Canonical recipient resolution strictly from the student record.
+    Priority 1: Canonical roll number -> <roll>@cse.sreenidhi.edu.in
+    Priority 2: Valid email from student record with @
+    Raises OTPRecipientUnresolved on failure. NEVER falls back to dev/test identities.
+    """
+    roll = (getattr(student, "roll_number", None) or getattr(student, "roll_no", None) or "").strip().lower()
+    if roll:
+        return f"{roll}@cse.sreenidhi.edu.in"
+    email = (getattr(student, "email", None) or "").strip().lower()
+    if "@" in email:
+        return email
+    raise OTPRecipientUnresolved(student_id=getattr(student, "id", 0))
+
+
+def is_banned_recipient(recipient: str) -> bool:
+    """
+    INV & FIX-5: Checks against banned test/dev identities (alice, s1, demostudent, example.com, bare usernames).
+    """
+    rec = (recipient or "").strip().lower()
+    if not rec or "@" not in rec:
+        return True
+    user_part, domain_part = rec.split("@", 1)
+    if user_part in ("alice", "s1", "demostudent") or "example.com" in domain_part:
+        return True
+    return False
+
+
+# sync-only — run via run_in_threadpool
+def send_otp_with_retry_and_logging(
+    db,
+    student,
+    otp_code: str,
+    subject: Optional[str] = None,
+    html_body: Optional[str] = None,
+    channel: str = "EMAIL",
+    enforce_cooldown: bool = True
+) -> Dict[str, Any]:
+    """
+    FIX-5: Sends OTP with:
+    - Guaranteed recipient resolution via resolve_otp_recipient
+    - 30s cooldown enforcement (HTTP 429 otp_cooldown with retry_after_s)
+    - 24h bounce suppression (HTTP 502 otp_delivery_failed)
+    - Up to 3 attempts with exponential backoff 1s / 2s / 4s (+ jitter) for transient SMTP errors
+    - Immutable audit persistence in qr_otp_delivery_log table per attempt
+    - Never silently swallows SMTP exceptions
+    """
+    from app.models.models import OTPDeliveryLog
+    from fastapi import HTTPException, status
+
+    recipient = resolve_otp_recipient(student)
+    if is_banned_recipient(recipient):
+        logger.error(f"[FIX-5] Rejected banned/dev recipient literal: {recipient}")
+        raise OTPRecipientUnresolved(student_id=getattr(student, "id", 0))
+
+    now = datetime.utcnow()
+    student_id = getattr(student, "id", 0)
+
+    # 1. Cooldown check (default 30 seconds)
+    if enforce_cooldown:
+        cooldown_s = int(getattr(settings, "OTP_RESEND_COOLDOWN_S", 30))
+        recent_log = db.query(OTPDeliveryLog).filter(
+            OTPDeliveryLog.student_id == student_id,
+            OTPDeliveryLog.channel == channel
+        ).order_by(OTPDeliveryLog.created_at.desc()).first()
+
+        if recent_log:
+            elapsed = (now - recent_log.created_at).total_seconds()
+            if elapsed < cooldown_s:
+                retry_after_s = max(1, int(cooldown_s - elapsed))
+                logger.warning(f"[FIX-5] OTP resend cooldown triggered for student {student_id} ({retry_after_s}s remaining)")
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail={
+                        "error_code": "otp_cooldown",
+                        "message": f"Resend too soon. Please wait {retry_after_s}s.",
+                        "retry_after_s": retry_after_s
+                    }
+                )
+
+    # 2. Bounce suppression check (24-hour suppression window)
+    one_day_ago = now - timedelta(hours=24)
+    bounced_log = db.query(OTPDeliveryLog).filter(
+        OTPDeliveryLog.recipient == recipient,
+        OTPDeliveryLog.status == "bounced",
+        OTPDeliveryLog.created_at >= one_day_ago
+    ).first()
+    if bounced_log:
+        logger.error(f"[FIX-5] OTP delivery suppressed for previously bounced recipient: {recipient}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail={
+                "error_code": "otp_delivery_failed",
+                "message": "Delivery to this email previously bounced. Please use an alternate channel."
+            }
+        )
+
+    # 3. Prepare Subject & HTML Body
+    student_name = getattr(student, "name", "Student")
+    if not subject:
+        subject = f"SNIST ERP — Device Rebind Verification Code: {otp_code}"
+    if not html_body:
+        html_body = render_email_template("otp_email.html", {
+            "student_name": student_name,
+            "otp_code": otp_code,
+            "expiry_minutes": 10
+        })
+        if "Template rendering unavailable" in html_body or "Template rendering error" in html_body:
+            html_body = f"""
+            <html><body>
+            <h3>SNIST ERP — Device Rebind Verification Code</h3>
+            <p>Dear {student_name},</p>
+            <p>Your verification code to link a new attendance device is: <strong>{otp_code}</strong></p>
+            <p>This code expires in 10 minutes. If you did not initiate this request, contact support immediately.</p>
+            </body></html>
+            """
+
+    # 4. Delivery Attempt Loop (3 attempts, backoff 1s/2s/4s + jitter)
+    backoff_delays = [1.0, 2.0, 4.0]
+    last_error_text = None
+
+    for attempt in range(1, 4):
+        delivery_status = "failed"
+        message_id = None
+        error_text = None
+
+        try:
+            res = send_single_email(
+                to_email=recipient,
+                subject=subject,
+                html_body=html_body,
+                channel="OTP"
+            )
+            res_status = res.get("status")
+            if res_status in ("SENT", "DEV_MODE"):
+                delivery_status = "sent"
+                message_id = res.get("message_id") or f"otp_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+                log_entry = OTPDeliveryLog(
+                    student_id=student_id,
+                    channel=channel,
+                    recipient=recipient,
+                    status=delivery_status,
+                    message_id=message_id,
+                    error_text=None,
+                    attempt=attempt,
+                    created_at=datetime.utcnow()
+                )
+                db.add(log_entry)
+                db.commit()
+                logger.info(f"[FIX-5] OTP delivered to {recipient} on attempt {attempt} (channel={channel})")
+                return {
+                    "status": "SENT",
+                    "recipient": recipient,
+                    "channel": channel,
+                    "message_id": message_id,
+                    "attempt": attempt
+                }
+            else:
+                error_text = res.get("error", "SMTP send returned non-SENT status")
+                last_error_text = error_text
+                err_lower = str(error_text).lower()
+                if "550" in err_lower or "user unknown" in err_lower or "mailbox unavailable" in err_lower or "recipient rejected" in err_lower:
+                    delivery_status = "bounced"
+        except Exception as ex:
+            error_text = str(ex)
+            last_error_text = error_text
+            err_lower = error_text.lower()
+            if "550" in err_lower or "user unknown" in err_lower or "recipient rejected" in err_lower:
+                delivery_status = "bounced"
+
+        # Record failed/bounced attempt in db
+        log_entry = OTPDeliveryLog(
+            student_id=student_id,
+            channel=channel,
+            recipient=recipient,
+            status=delivery_status,
+            message_id=None,
+            error_text=error_text,
+            attempt=attempt,
+            created_at=datetime.utcnow()
+        )
+        db.add(log_entry)
+        db.commit()
+
+        if delivery_status == "bounced":
+            logger.warning(f"[FIX-5] Hard bounce detected for {recipient} on attempt {attempt}: {error_text}")
+            break
+
+        if attempt < 3:
+            sleep_s = backoff_delays[attempt - 1] + random.uniform(0.1, 0.4)
+            logger.warning(f"[FIX-5] Transient OTP delivery failure on attempt {attempt} to {recipient}: {error_text}. Retrying in {sleep_s:.2f}s...")
+            time.sleep(sleep_s)
+
+    logger.error(f"[FIX-5] All OTP delivery attempts failed for student {student_id} ({recipient}): {last_error_text}")
+    raise HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail={
+            "error_code": "otp_delivery_failed",
+            "message": f"Code not delivered. {last_error_text or 'All send attempts failed'}",
+            "recipient": recipient
+        }
+    )
+
 

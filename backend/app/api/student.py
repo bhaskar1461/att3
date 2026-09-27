@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Request, status, BackgroundTasks, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy.exc import IntegrityError
 from typing import Dict, Any, List, Optional, Tuple, Union
@@ -8,6 +9,7 @@ import time
 import threading
 import logging
 import asyncio
+import json
 
 logger = logging.getLogger("snist_erp.scan_telemetry")
 
@@ -17,7 +19,7 @@ from app.api.auth import get_current_user
 from app.models.models import (
     User, UserRole, Student, AttendanceRecord, AttendanceSession, 
     Subject, Teacher, Section, SessionStatus, DeviceRegistration, 
-    DeviceBinding, TeacherAssignment
+    DeviceBinding, TeacherAssignment, ScanIdempotencyRecord
 )
 from app.services.qr_service import QRService
 from app.core.security import get_server_ist_date
@@ -435,6 +437,10 @@ class StudentScanSessionRequest(BaseModel):
     binding_signature: Optional[str] = None
     device_signature: Optional[str] = None
     device_verified: Optional[bool] = None  # Untrusted client assertion; backend independently verifies
+    # FIX-10 Canonical QR Payload fields
+    qr_type: Optional[str] = None
+    exp: Optional[Union[float, int]] = None
+    issued_at: Optional[Union[float, int]] = None
 
 
 def _verify_binding_proof(
@@ -821,6 +827,8 @@ class AsyncAttendanceWriter:
         self._started = False
         self._lock = threading.Lock()
         self._results = {}
+        self._job_waiters = {}  # job_id -> (asyncio.Future, asyncio.AbstractEventLoop)
+        self._job_created_at = {}  # job_id -> float timestamp
         self._fast_cache = set()  # (session_id, roll_number)
         self._fast_cache_lock = threading.Lock()
 
@@ -833,6 +841,62 @@ class AsyncAttendanceWriter:
                 t = threading.Thread(target=self._worker_loop, daemon=True, name=f"att_writer_{i}")
                 t.start()
 
+    def create_waiter(self, job_id: str):
+        """Creates and registers an asyncio.Future for this job on the caller's running event loop."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.get_event_loop()
+        fut = loop.create_future()
+        with self._lock:
+            self._job_waiters[job_id] = (fut, loop)
+            self._job_created_at[job_id] = time.time()
+            self._clean_expired_jobs()
+        return fut
+
+    def resolve_waiter(self, job_id: str, status: str, attendance_id: Optional[int] = None, error_code: Optional[str] = None):
+        """Authoritatively resolves any pending asyncio.Future and records the terminal job status."""
+        with self._lock:
+            self._results[job_id] = {
+                "job_id": job_id,
+                "status": status,  # "pending" | "committed" | "failed"
+                "attendance_id": attendance_id,
+                "error_code": error_code,
+                "created_at": time.time()
+            }
+            waiter = self._job_waiters.pop(job_id, None)
+        if waiter:
+            fut, loop = waiter
+            if not fut.done():
+                if status == "failed":
+                    loop.call_soon_threadsafe(fut.set_exception, RuntimeError(error_code or "Attendance commit failed"))
+                else:
+                    loop.call_soon_threadsafe(fut.set_result, attendance_id)
+
+    def _clean_expired_jobs(self):
+        """Evicts job records older than 10 minutes (600s TTL per Section 3.3)."""
+        now = time.time()
+        expired = [jid for jid, t in self._job_created_at.items() if now - t > 600]
+        for jid in expired:
+            self._job_created_at.pop(jid, None)
+            self._results.pop(jid, None)
+            self._job_waiters.pop(jid, None)
+
+    def get_job_status(self, job_id: str) -> Optional[dict]:
+        """Returns Section 3.3 Job API payload or None if expired/not found."""
+        with self._lock:
+            self._clean_expired_jobs()
+            res = self._results.get(job_id)
+            if not res:
+                return None
+            return {
+                "job_id": job_id,
+                "status": res.get("status", "pending"),
+                "attendance_id": res.get("attendance_id"),
+                "error_code": res.get("error_code")
+            }
+
+    # sync-only — run via run_in_threadpool
     def _worker_loop(self):
         from app.core.database import SessionLocal
         from app.models.models import AttendanceRecord, AttendanceStatus
@@ -909,10 +973,13 @@ class AsyncAttendanceWriter:
                             pass
                         with self._lock:
                             self._results[job_id] = {
-                                "status": "SUCCESS",
+                                "status": "committed",
                                 "attendance_id": rec_id,
-                                "message": "Recorded in database."
+                                "message": "Recorded in database.",
+                                "error_code": None,
+                                "created_at": time.time()
                             }
+                        self.resolve_waiter(job_id, status="committed", attendance_id=rec_id)
 
                         # 3. Post-scan sync executed inside isolated worker thread
                         if payload.get("sync_meta"):
@@ -941,14 +1008,18 @@ class AsyncAttendanceWriter:
                             AttendanceRecord.session_id == payload["session_id"],
                             AttendanceRecord.student_id == payload["student_id"]
                         ).first()
+                        existing_id = existing.id if existing else None
                         with self._fast_cache_lock:
                             self._fast_cache.add((payload["session_id"], payload["roll_number"]))
                         with self._lock:
                             self._results[job_id] = {
-                                "status": "ALREADY_MARKED",
-                                "attendance_id": existing.id if existing else None,
-                                "message": "Already marked present."
+                                "status": "committed",
+                                "attendance_id": existing_id,
+                                "message": "Already marked present.",
+                                "error_code": None,
+                                "created_at": time.time()
                             }
+                        self.resolve_waiter(job_id, status="committed", attendance_id=existing_id)
                         try:
                             from app.services.attendance_engine import invalidate_attendance_cache
                             invalidate_attendance_cache(student_id=payload["student_id"], roll_number=payload["roll_number"])
@@ -956,13 +1027,20 @@ class AsyncAttendanceWriter:
                             pass
                     except Exception as rollback_err:
                         logging.getLogger("snist_erp.student").warning(f"Error resolving race condition for {payload.get('roll_number')}: {rollback_err}")
+                        self.resolve_waiter(job_id, status="failed", error_code=str(rollback_err))
                 except Exception as ex:
                     import logging
                     logging.getLogger("snist_erp.student").error(f"Async attendance writer error for {payload.get('roll_number')}: {ex}")
                     with self._fast_cache_lock:
                         self._fast_cache.discard((payload.get("session_id"), payload.get("roll_number")))
                     with self._lock:
-                        self._results[job_id] = {"status": "ERROR", "message": str(ex)}
+                        self._results[job_id] = {
+                            "status": "failed",
+                            "message": str(ex),
+                            "error_code": "commit_failed",
+                            "created_at": time.time()
+                        }
+                    self.resolve_waiter(job_id, status="failed", error_code=str(ex))
                 finally:
                     self._queue.task_done()
             except Exception:
@@ -982,7 +1060,12 @@ class AsyncAttendanceWriter:
         try:
             self._queue.put_nowait((job_id, payload))
             with self._lock:
-                self._results[job_id] = {"status": "QUEUED", "message": "Attendance queued for database write."}
+                self._results[job_id] = {
+                    "job_id": job_id,
+                    "status": "pending",
+                    "message": "Attendance queued for database write.",
+                    "created_at": time.time()
+                }
             return True
         except queue.Full:
             return False
@@ -1020,6 +1103,25 @@ async def student_scan_session(
     tracker_key = f"{ip_addr or 'unknown'}_{device_id or clean_roll}"
     device_bucket = classify_device(request.headers.get("user-agent", ""))
 
+
+    # Section 3.2 Idempotency Contract: Idempotency-Key replay check
+    idempotency_key = (request.headers.get("Idempotency-Key") or request.headers.get("idempotency-key") or "").strip()
+    if idempotency_key:
+        try:
+            cached_idem = db.query(ScanIdempotencyRecord).filter(
+                ScanIdempotencyRecord.idempotency_key == idempotency_key
+            ).first()
+            if cached_idem:
+                if (datetime.utcnow() - cached_idem.created_at).total_seconds() < 86400:
+                    logger.info(f"[IDEMPOTENCY] Replaying cached response for key={idempotency_key}")
+                    return Response(
+                        content=cached_idem.response_body,
+                        status_code=cached_idem.status_code,
+                        media_type="application/json",
+                        headers={"Idempotent-Replay": "true"}
+                    )
+        except Exception as idem_check_err:
+            logger.warning(f"Error checking scan idempotency: {idem_check_err}")
 
     # Step 0a: Fast-fail if this client is under active cooldown from invalid token flooding
     failed_token_tracker.check_rate_limit(tracker_key)
@@ -1078,7 +1180,7 @@ async def student_scan_session(
 
         # Step 3: Record or enqueue attendance (AM-200 fast async writer or bounded concurrency sync writer)
         scan_mode_val = req.scan_mode or ("QR_OFFLINE_SYNC" if req.is_offline_submission else "PROJECTOR_SCAN")
-        return await record_scan_attendance(
+        scan_res = await record_scan_attendance(
             db=db,
             req=req,
             current_student=current_student,
@@ -1109,6 +1211,32 @@ async def student_scan_session(
             async_scan_telemetry_fn=_async_scan_telemetry,
             async_post_scan_tasks_fn=_async_post_scan_tasks
         )
+
+        # Section 3.2: Persist successful scan response under Idempotency-Key
+        if idempotency_key:
+            try:
+                status_c = 200
+                if hasattr(scan_res, "status_code"):
+                    status_c = scan_res.status_code
+                    body_str = scan_res.body.decode() if hasattr(scan_res, "body") else json.dumps(scan_res)
+                else:
+                    body_str = json.dumps(scan_res)
+                
+                new_idem = ScanIdempotencyRecord(
+                    idempotency_key=idempotency_key,
+                    student_id=current_student.id,
+                    session_id=token_data.get("session_id", 0),
+                    status_code=status_c,
+                    response_body=body_str,
+                    created_at=datetime.utcnow()
+                )
+                db.add(new_idem)
+                db.commit()
+            except Exception as idem_save_err:
+                db.rollback()
+                logger.warning(f"Error persisting scan idempotency: {idem_save_err}")
+
+        return scan_res
     except Exception:
         if claim_consumed_here and req.claim_token:
             try:

@@ -242,3 +242,40 @@ class TestClassWiseGSheets(unittest.TestCase):
         refreshed_clear = self.db.query(TeacherAssignment).filter(TeacherAssignment.id == self.asgn2.id).first()
         self.assertIsNone(refreshed_clear.google_sheet_id)
 
+    def test_multi_tab_worksheet_resolution(self):
+        """Verify GoogleSheetsService._get_worksheet resolves tabs by section name and roll number."""
+        from unittest.mock import MagicMock
+        from app.services.gsheets_service import GoogleSheetsService
+
+        ws_a = MagicMock()
+        ws_a.title = "IT-A LATEST"
+        ws_a.col_values.return_value = ["ROLL NO", "23311A1261", "24311A1201"]
+
+        ws_b = MagicMock()
+        ws_b.title = "IT-B LATEST"
+        ws_b.col_values.return_value = ["ROLL NO", "23311A12G7", "24311A1266"]
+
+        ws_c = MagicMock()
+        ws_c.title = "IT-C LATEST"
+        ws_c.col_values.return_value = ["ROLL NO", "24311A12C9"]
+
+        ws_d = MagicMock()
+        ws_d.title = "IT-D LATEST"
+        ws_d.col_values.return_value = ["ROLL NO", "24311A12K7"]
+
+        mock_sheet = MagicMock()
+        mock_sheet.worksheets.return_value = [ws_a, ws_b, ws_c, ws_d]
+        mock_sheet.sheet1 = ws_a
+
+        # 1. By section name
+        self.assertEqual(GoogleSheetsService._get_worksheet(mock_sheet, section_name="IT-A"), ws_a)
+        self.assertEqual(GoogleSheetsService._get_worksheet(mock_sheet, section_name="IT-B"), ws_b)
+        self.assertEqual(GoogleSheetsService._get_worksheet(mock_sheet, section_name="IT-C"), ws_c)
+        self.assertEqual(GoogleSheetsService._get_worksheet(mock_sheet, section_name="IT-D"), ws_d)
+
+        # 2. By roll number
+        self.assertEqual(GoogleSheetsService._get_worksheet(mock_sheet, roll_number="23311A1261"), ws_a)
+        self.assertEqual(GoogleSheetsService._get_worksheet(mock_sheet, roll_number="23311A12G7"), ws_b)
+        self.assertEqual(GoogleSheetsService._get_worksheet(mock_sheet, roll_number="24311A12C9"), ws_c)
+        self.assertEqual(GoogleSheetsService._get_worksheet(mock_sheet, roll_number="24311A12K7"), ws_d)
+
