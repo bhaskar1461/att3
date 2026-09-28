@@ -17,6 +17,7 @@ export interface ScannerFeedbackOverlayProps {
   rateLimitSecondsLeft: number;
   scanError: string | null;
   scanErrorCode: string | null;
+  upgradeTicket?: string | null;
   isInlineEnrolling: boolean;
   rebindMaskedEmail: string;
   onCancelSubmitting: () => void;
@@ -28,6 +29,8 @@ export interface ScannerFeedbackOverlayProps {
   onShowRollCard: () => void;
   onClose: () => void;
 }
+
+import { useRenderCounter } from '../../../dev/diagnostics';
 
 export const ScannerFeedbackOverlay: React.FC<ScannerFeedbackOverlayProps> = ({
   flowState,
@@ -43,6 +46,7 @@ export const ScannerFeedbackOverlay: React.FC<ScannerFeedbackOverlayProps> = ({
   rateLimitSecondsLeft,
   scanError,
   scanErrorCode,
+  upgradeTicket,
   isInlineEnrolling,
   rebindMaskedEmail,
   onCancelSubmitting,
@@ -54,6 +58,7 @@ export const ScannerFeedbackOverlay: React.FC<ScannerFeedbackOverlayProps> = ({
   onShowRollCard,
   onClose
 }) => {
+  useRenderCounter('ScannerFeedbackOverlay');
   return (
     <>
       {/* 1. Submitting Staged Progress Overlay */}
@@ -191,6 +196,7 @@ export interface ScannerBottomPanelProps {
   rateLimitSecondsLeft: number;
   scanError: string | null;
   scanErrorCode: string | null;
+  upgradeTicket?: string | null;
   isInlineEnrolling: boolean;
   rebindMaskedEmail: string;
   onResetAfterTimeoutOrStale: () => void;
@@ -201,6 +207,357 @@ export interface ScannerBottomPanelProps {
   onShowRollCard: () => void;
   onClose: () => void;
 }
+
+export type ScanErrorCode = ErrorCode | 'unknown';
+
+export interface CardCtx {
+  ticket?: string | null;
+  requestId?: string;
+  retryAfterSeconds?: number;
+  message?: string;
+  isInlineEnrolling?: boolean;
+  onEnroll: () => void;
+  onLater: () => void;
+  onRescan: () => void;
+  onRetrySubmit?: () => void;
+  onRetryCamera?: () => void;
+  onReLogin?: () => void;
+  onContactSupport?: () => void;
+}
+
+export const UpgradeRequiredCard: React.FC<CardCtx> = ({ onEnroll, onLater, isInlineEnrolling }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-indigo-50 border border-indigo-200 text-indigo-900 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <ShieldCheck className="w-4 h-4 text-indigo-600 shrink-0" />
+      <span>One-time device security upgrade</span>
+    </div>
+    <div className="flex gap-2">
+      <button
+        type="button"
+        onClick={onEnroll}
+        disabled={isInlineEnrolling}
+        className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+      >
+        <ShieldCheck className="w-3.5 h-3.5" />
+        <span>{isInlineEnrolling ? 'Enrolling…' : 'Enroll now'}</span>
+      </button>
+      <button
+        type="button"
+        onClick={onLater}
+        className="px-3 py-1.5 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded-lg text-xs font-bold transition cursor-pointer"
+      >
+        <span>Later</span>
+      </button>
+    </div>
+  </div>
+);
+
+export const NoActiveBindingCard: React.FC<CardCtx> = ({ onEnroll, onLater, isInlineEnrolling }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-cyan-50 border border-cyan-200 text-cyan-900 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <Smartphone className="w-4 h-4 text-cyan-600 shrink-0" />
+      <span>Device not enrolled — enroll to mark attendance</span>
+    </div>
+    <p className="text-[10px] text-cyan-700 leading-relaxed">
+      This device hasn't been linked to your account yet. Tap "Enroll now" to register it (takes ~3 seconds).
+    </p>
+    <div className="flex gap-2">
+      <button
+        type="button"
+        onClick={onEnroll}
+        disabled={isInlineEnrolling}
+        className="flex-1 py-1.5 bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+      >
+        <Smartphone className="w-3.5 h-3.5" />
+        <span>{isInlineEnrolling ? 'Enrolling…' : 'Enroll now'}</span>
+      </button>
+      <button
+        type="button"
+        onClick={onLater}
+        className="px-3 py-1.5 bg-cyan-100 hover:bg-cyan-200 text-cyan-800 rounded-lg text-xs font-bold transition cursor-pointer"
+      >
+        <span>Later</span>
+      </button>
+    </div>
+  </div>
+);
+
+export const QrExpiredCard: React.FC<CardCtx> = ({ onRescan }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-blue-50 border border-blue-200 text-blue-800 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <RefreshCw className="w-3.5 h-3.5 text-blue-600 shrink-0 animate-spin" />
+      <span>QR expired — rescan</span>
+    </div>
+    <button
+      type="button"
+      onClick={onRescan}
+      className="w-full py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 shadow-sm"
+    >
+      <RefreshCw className="w-3 h-3" />
+      <span>Rescan</span>
+    </button>
+  </div>
+);
+
+export const ClientAbortCard: React.FC<CardCtx> = ({ onRetrySubmit, onRescan }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-300 text-amber-900 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+      <span>Taking longer than usual</span>
+    </div>
+    <div className="flex gap-2">
+      <button
+        type="button"
+        onClick={onRetrySubmit || onRescan}
+        className="flex-1 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+      >
+        <RefreshCw className="w-3 h-3" />
+        <span>Retry submit</span>
+      </button>
+      <button
+        type="button"
+        onClick={onRescan}
+        className="flex-1 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+      >
+        <span>Rescan QR</span>
+      </button>
+    </div>
+  </div>
+);
+
+export const ServerTokenExpiredCard: React.FC<CardCtx> = ({ onReLogin }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-800 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+      <span>Session expired — sign in again</span>
+    </div>
+    <button
+      type="button"
+      onClick={onReLogin || (() => { window.location.href = '/login?reason=token_expired'; })}
+      className="w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+    >
+      <span>Re-login</span>
+    </button>
+  </div>
+);
+
+export const BindingRevokedCard: React.FC<CardCtx> = ({ onEnroll, onContactSupport, requestId }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-300 text-rose-900 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+      <span>This device must be re-enrolled</span>
+    </div>
+    {requestId && (
+      <p className="text-[10px] text-rose-700 font-mono">Request ID: {requestId}</p>
+    )}
+    <div className="flex gap-2">
+      <button
+        type="button"
+        onClick={onEnroll}
+        className="flex-1 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition cursor-pointer active:scale-95"
+      >
+        <span>Re-enroll</span>
+      </button>
+      <button
+        type="button"
+        onClick={onContactSupport}
+        className="flex-1 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-800 rounded-lg text-xs font-bold transition cursor-pointer"
+      >
+        <span>Contact support</span>
+      </button>
+    </div>
+  </div>
+);
+
+export const QrTypeInvalidCard: React.FC<CardCtx> = ({ onRescan }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-200 text-amber-900 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+      <span>Wrong QR — scan the live session QR</span>
+    </div>
+    <button
+      type="button"
+      onClick={onRescan}
+      className="w-full py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+    >
+      <RefreshCw className="w-3 h-3" />
+      <span>Rescan</span>
+    </button>
+  </div>
+);
+
+export const SessionNotActiveCard: React.FC<CardCtx> = ({ onRescan }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-200 text-amber-900 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+      <span>Session ended server-side</span>
+    </div>
+    <button
+      type="button"
+      onClick={onRescan}
+      className="w-full py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+    >
+      <RefreshCw className="w-3 h-3" />
+      <span>Rescan</span>
+    </button>
+  </div>
+);
+
+export const OtpCooldownCard: React.FC<CardCtx> = ({ retryAfterSeconds }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-300 text-amber-900 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0 animate-pulse" />
+      <span>Resend too soon; please wait {retryAfterSeconds || 30}s</span>
+    </div>
+  </div>
+);
+
+export const OtpDeliveryFailedCard: React.FC<CardCtx> = ({ onEnroll, onContactSupport }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-800 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <Mail className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+      <span>Code not delivered</span>
+    </div>
+    <div className="flex gap-2">
+      <button
+        type="button"
+        onClick={onEnroll}
+        className="flex-1 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition cursor-pointer active:scale-95"
+      >
+        <span>Resend email</span>
+      </button>
+      <button
+        type="button"
+        onClick={onContactSupport}
+        className="flex-1 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-800 rounded-lg text-xs font-bold transition cursor-pointer"
+      >
+        <span>Send SMS</span>
+      </button>
+    </div>
+  </div>
+);
+
+export const SelfieStoreFailedCard: React.FC<CardCtx> = ({ onRescan }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-800 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <Camera className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+      <span>Photo didn't save</span>
+    </div>
+    <button
+      type="button"
+      onClick={onRescan}
+      className="w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+    >
+      <RefreshCw className="w-3 h-3" />
+      <span>Retry upload</span>
+    </button>
+  </div>
+);
+
+export const JobNotFoundCard: React.FC<CardCtx> = ({ onRescan }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-200 text-amber-900 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+      <span>Attendance verification expired</span>
+    </div>
+    <button
+      type="button"
+      onClick={onRescan}
+      className="w-full py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+    >
+      <RefreshCw className="w-3 h-3" />
+      <span>Rescan QR</span>
+    </button>
+  </div>
+);
+
+export const NetworkErrorCard: React.FC<CardCtx> = ({ onRescan }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-700 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+      <span>No connection</span>
+    </div>
+    <button
+      type="button"
+      onClick={onRescan}
+      className="w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+    >
+      <RefreshCw className="w-3 h-3" />
+      <span>Retry</span>
+    </button>
+  </div>
+);
+
+export const CameraErrorCard: React.FC<CardCtx> = ({ onRetryCamera, onRescan }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-700 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <Camera className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+      <span>Camera unavailable</span>
+    </div>
+    <button
+      type="button"
+      onClick={onRetryCamera || onRescan}
+      className="w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+    >
+      <RefreshCw className="w-3 h-3" />
+      <span>Retry</span>
+    </button>
+  </div>
+);
+
+export const GenericErrorCard: React.FC<CardCtx> = ({ message, onRescan }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-700 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+      <span>{message || 'An error occurred during scanning'}</span>
+    </div>
+    <button
+      type="button"
+      onClick={onRescan}
+      className="w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+    >
+      <RefreshCw className="w-3 h-3" />
+      <span>Retry</span>
+    </button>
+  </div>
+);
+
+export const UnknownCard: React.FC<CardCtx> = ({ message, onRescan }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-700 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+      <span>{message || 'Something went wrong'}</span>
+    </div>
+    <button
+      type="button"
+      onClick={onRescan}
+      className="w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+    >
+      <RefreshCw className="w-3 h-3" />
+      <span>Retry</span>
+    </button>
+  </div>
+);
+
+// Compiler-enforced totality: Adding a code to ScanErrorCode without adding it here = red build!
+export const ERROR_CARDS: Record<ScanErrorCode, (ctx: CardCtx) => JSX.Element> = {
+  binding_upgrade_required: (ctx) => <UpgradeRequiredCard {...ctx} />,
+  no_active_binding: (ctx) => <NoActiveBindingCard {...ctx} />,
+  qr_expired: (ctx) => <QrExpiredCard {...ctx} />,
+  client_abort: (ctx) => <ClientAbortCard {...ctx} />,
+  server_token_expired: (ctx) => <ServerTokenExpiredCard {...ctx} />,
+  binding_revoked_post_grace: (ctx) => <BindingRevokedCard {...ctx} />,
+  qr_type_invalid: (ctx) => <QrTypeInvalidCard {...ctx} />,
+  session_not_active: (ctx) => <SessionNotActiveCard {...ctx} />,
+  otp_cooldown: (ctx) => <OtpCooldownCard {...ctx} />,
+  otp_delivery_failed: (ctx) => <OtpDeliveryFailedCard {...ctx} />,
+  selfie_store_failed: (ctx) => <SelfieStoreFailedCard {...ctx} />,
+  job_not_found: (ctx) => <JobNotFoundCard {...ctx} />,
+  network_error: (ctx) => <NetworkErrorCard {...ctx} />,
+  camera_error: (ctx) => <CameraErrorCard {...ctx} />,
+  generic_error: (ctx) => <GenericErrorCard {...ctx} />,
+  unknown: (ctx) => <UnknownCard {...ctx} />,
+};
 
 export const ScannerBottomPanel: React.FC<ScannerBottomPanelProps> = ({
   flowState,
@@ -215,6 +572,7 @@ export const ScannerBottomPanel: React.FC<ScannerBottomPanelProps> = ({
   rateLimitSecondsLeft,
   scanError,
   scanErrorCode,
+  upgradeTicket,
   isInlineEnrolling,
   rebindMaskedEmail,
   onResetAfterTimeoutOrStale,
@@ -228,21 +586,29 @@ export const ScannerBottomPanel: React.FC<ScannerBottomPanelProps> = ({
   const isCameraBlocked = !!cameraError || permissionState === 'denied';
 
   // Section 3.1 Taxonomy resolution
-  const effectiveCode: ErrorCode = (errorInfo?.code as ErrorCode) || (scanErrorCode as ErrorCode) || (
-    flowState === 'TIMEOUT' ? 'client_abort' :
-    flowState === 'STALE_QR' ? 'qr_expired' :
-    flowState === 'BLOCKED' ? 'binding_upgrade_required' :
-    'generic_error'
-  );
+  const effectiveCode: ScanErrorCode = (
+    (scanErrorCode as ScanErrorCode) ||
+    (errorInfo?.code as ScanErrorCode) ||
+    (flowState === 'BLOCKED' ? (scanErrorCode === 'no_active_binding' ? 'no_active_binding' : 'binding_upgrade_required') :
+     flowState === 'TIMEOUT' ? 'client_abort' :
+     flowState === 'STALE_QR' ? 'qr_expired' :
+     flowState === 'ERROR' ? 'generic_error' :
+     undefined)
+  ) || 'unknown';
 
-  const hasActiveCard =
-    flowState === 'TIMEOUT' ||
-    flowState === 'STALE_QR' ||
-    flowState === 'RATE_LIMITED' ||
-    flowState === 'BLOCKED' ||
-    flowState === 'ENROLLING' ||
-    flowState === 'REBIND_OTP' ||
-    (flowState === 'ERROR' && (scanError || errorInfo));
+  const cardCtx: CardCtx = {
+    ticket: upgradeTicket,
+    requestId: errorInfo?.requestId,
+    retryAfterSeconds: errorInfo?.retryAfterSeconds || rateLimitSecondsLeft,
+    message: scanError || errorInfo?.message,
+    isInlineEnrolling,
+    onEnroll: onInlineEnroll,
+    onLater: onResetAfterTimeoutOrStale,
+    onRescan: onResetAfterTimeoutOrStale,
+    onRetrySubmit,
+    onRetryCamera,
+    onContactSupport: onShowRollCard,
+  };
 
   return (
     <div 
@@ -341,189 +707,7 @@ export const ScannerBottomPanel: React.FC<ScannerBottomPanelProps> = ({
 
           {/* PERMANENTLY RESERVED SLOT (FIX-9: Stable Height Across All States) */}
           <div className="w-full min-h-[88px] flex flex-col justify-center">
-            {/* 1. client_abort / TIMEOUT Card */}
-            {(effectiveCode === 'client_abort' || flowState === 'TIMEOUT') && (
-              <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-300 text-amber-900 space-y-2 animate-in fade-in">
-                <div className="flex items-center justify-center gap-1.5">
-                  <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                  <span>Taking longer than usual</span>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={onRetrySubmit || onResetAfterTimeoutOrStale}
-                    className="flex-1 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>Retry submit</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onResetAfterTimeoutOrStale}
-                    className="flex-1 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
-                  >
-                    <span>Rescan QR</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* 2. server_token_expired Card */}
-            {effectiveCode === 'server_token_expired' && (
-              <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-800 space-y-2 animate-in fade-in">
-                <div className="flex items-center justify-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-                  <span>Session expired — sign in again</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => { window.location.href = '/login?reason=token_expired'; }}
-                  className="w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
-                >
-                  <span>Re-login</span>
-                </button>
-              </div>
-            )}
-
-            {/* 3. binding_upgrade_required / BLOCKED Card */}
-            {(effectiveCode === 'binding_upgrade_required' || flowState === 'BLOCKED') && (
-              <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-indigo-50 border border-indigo-200 text-indigo-900 space-y-2 animate-in fade-in">
-                <div className="flex items-center justify-center gap-1.5">
-                  <ShieldCheck className="w-4 h-4 text-indigo-600 shrink-0" />
-                  <span>One-time device security upgrade</span>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={onInlineEnroll}
-                    disabled={isInlineEnrolling}
-                    className="flex-1 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
-                  >
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    <span>{isInlineEnrolling ? 'Enrolling…' : 'Enroll now'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onClose}
-                    className="px-3 py-1.5 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 rounded-lg text-xs font-bold transition cursor-pointer"
-                  >
-                    <span>Later</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* 4. binding_revoked_post_grace Card */}
-            {effectiveCode === 'binding_revoked_post_grace' && (
-              <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-300 text-rose-900 space-y-2 animate-in fade-in">
-                <div className="flex items-center justify-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-                  <span>This device must be re-enrolled</span>
-                </div>
-                {errorInfo?.requestId && (
-                  <p className="text-[10px] text-rose-700 font-mono">Request ID: {errorInfo.requestId}</p>
-                )}
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={onInlineEnroll}
-                    className="flex-1 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition cursor-pointer active:scale-95"
-                  >
-                    <span>Re-enroll</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onShowRollCard}
-                    className="flex-1 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-800 rounded-lg text-xs font-bold transition cursor-pointer"
-                  >
-                    <span>Contact support</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* 5. qr_expired / STALE_QR Card */}
-            {(effectiveCode === 'qr_expired' || flowState === 'STALE_QR') && (
-              <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-blue-50 border border-blue-200 text-blue-800 space-y-2 animate-in fade-in">
-                <div className="flex items-center justify-center gap-1.5">
-                  <RefreshCw className="w-3.5 h-3.5 text-blue-600 shrink-0 animate-spin" />
-                  <span>QR expired — rescan</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={onResetAfterTimeoutOrStale}
-                  className="w-full py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 shadow-sm"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  <span>Rescan</span>
-                </button>
-              </div>
-            )}
-
-            {/* 6. qr_type_invalid / session_not_active Card */}
-            {(effectiveCode === 'qr_type_invalid' || effectiveCode === 'session_not_active') && (
-              <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-200 text-amber-900 space-y-2 animate-in fade-in">
-                <div className="flex items-center justify-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-                  <span>{effectiveCode === 'qr_type_invalid' ? 'Wrong QR — scan the live session QR' : 'Session ended server-side'}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={onResetAfterTimeoutOrStale}
-                  className="w-full py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  <span>Rescan</span>
-                </button>
-              </div>
-            )}
-
-            {/* 7. otp_delivery_failed Card */}
-            {effectiveCode === 'otp_delivery_failed' && (
-              <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-800 space-y-2 animate-in fade-in">
-                <div className="flex items-center justify-center gap-1.5">
-                  <Mail className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-                  <span>Code not delivered</span>
-                </div>
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={onInlineEnroll}
-                    className="flex-1 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition cursor-pointer active:scale-95"
-                  >
-                    <span>Resend email</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onShowRollCard}
-                    className="flex-1 py-1.5 bg-rose-100 hover:bg-rose-200 text-rose-800 rounded-lg text-xs font-bold transition cursor-pointer"
-                  >
-                    <span>Send SMS</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* 8. selfie_store_failed Card */}
-            {effectiveCode === 'selfie_store_failed' && (
-              <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-800 space-y-2 animate-in fade-in">
-                <div className="flex items-center justify-center gap-1.5">
-                  <Camera className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-                  <span>Photo didn't save</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={onResetAfterTimeoutOrStale}
-                  className="w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  <span>Retry upload</span>
-                </button>
-              </div>
-            )}
-
-            {/* 9. rate_limited Card */}
-            {flowState === 'RATE_LIMITED' && (
+            {flowState === 'RATE_LIMITED' ? (
               <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-300 text-amber-900 space-y-2 animate-in fade-in">
                 <div className="flex items-center justify-center gap-1.5">
                   <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0 animate-pulse" />
@@ -536,28 +720,14 @@ export const ScannerBottomPanel: React.FC<ScannerBottomPanelProps> = ({
                   />
                 </div>
               </div>
-            )}
-
-            {/* 10. Generic Error Fallback Card */}
-            {flowState === 'ERROR' && !hasActiveCard && (
-              <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-rose-50 border border-rose-200 text-rose-700 space-y-2 animate-in fade-in">
-                <div className="flex items-center justify-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                  <span>{scanError || 'An error occurred during scanning'}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={onResetAfterTimeoutOrStale}
-                  className="w-full py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
-                >
-                  <RefreshCw className="w-3 h-3" />
-                  <span>Retry</span>
-                </button>
+            ) : flowState === 'ENROLLING' ? (
+              <div className="w-full p-3 rounded-xl text-xs font-medium bg-cyan-50 border border-cyan-200 text-cyan-900 flex items-center justify-center gap-2 animate-in fade-in">
+                <RefreshCw className="w-4 h-4 animate-spin text-cyan-600 shrink-0" />
+                <span>Registering device keys with server…</span>
               </div>
-            )}
-
-            {/* 11. Empty Slot Placeholder: keeps height perfectly constant when no card is active (FIX-9) */}
-            {!hasActiveCard && (
+            ) : (flowState === 'ERROR' || flowState === 'BLOCKED' || flowState === 'TIMEOUT' || flowState === 'STALE_QR') && effectiveCode ? (
+              (ERROR_CARDS[effectiveCode] ?? ERROR_CARDS.unknown)(cardCtx)
+            ) : (
               <div className="w-full h-[62px] invisible pointer-events-none select-none" aria-hidden="true" />
             )}
           </div>
@@ -586,3 +756,4 @@ export const ScannerBottomPanel: React.FC<ScannerBottomPanelProps> = ({
     </div>
   );
 };
+

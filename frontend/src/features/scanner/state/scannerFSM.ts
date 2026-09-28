@@ -45,6 +45,7 @@ export type ErrorCode =
   | 'client_abort'
   | 'server_token_expired'
   | 'binding_upgrade_required'
+  | 'no_active_binding'
   | 'binding_revoked_post_grace'
   | 'qr_type_invalid'
   | 'qr_expired'
@@ -116,6 +117,7 @@ export type ScannerEvent =
   | { type: 'RETRY' }
   | { type: 'DISMISS' }
   | { type: 'NEXT_SCAN' }
+  | { type: 'TOKEN_EXPIRED' }
   | { type: 'SET_IN_FLIGHT'; inFlight: boolean };
 
 const SESSION_STORAGE_KEY = 'snist_scanner_fsm_state';
@@ -136,6 +138,11 @@ export const ERROR_CODE_TAXONOMY: Record<ErrorCode, { message: string; primary: 
   },
   binding_upgrade_required: {
     message: 'One-time device security upgrade',
+    primary: 'Enroll now',
+    secondary: 'Later'
+  },
+  no_active_binding: {
+    message: 'Device not enrolled — enroll to mark attendance',
     primary: 'Enroll now',
     secondary: 'Later'
   },
@@ -276,32 +283,34 @@ export function getInitialFsmContext(): FsmContext {
 /**
  * Pure transition function
  */
-export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent): FsmContext {
+export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent | { type: string; [key: string]: any } | string): FsmContext {
   const now = Date.now();
+  const evt: any = typeof event === 'string' ? { type: event } : event;
 
   // In-flight action guard: Reject event if another action is currently in flight
   if (
     ctx.isActionInFlight &&
-    event.type !== 'SET_IN_FLIGHT' &&
-    event.type !== 'SET_SUBMITTING_STAGE' &&
-    event.type !== 'SUBMIT_SUCCESS' &&
-    event.type !== 'SUBMIT_FAILED' &&
-    event.type !== 'ENROLL_FAILED' &&
-    event.type !== 'ENROLLED' &&
-    event.type !== 'LINK_UNBOUND_OR_LEGACY' &&
-    event.type !== 'TICKET_ISSUED' &&
-    event.type !== 'OTP_FAILED' &&
-    event.type !== 'OTP_VERIFIED'
+    evt.type !== 'SET_IN_FLIGHT' &&
+    evt.type !== 'SET_SUBMITTING_STAGE' &&
+    evt.type !== 'SUBMIT_SUCCESS' &&
+    evt.type !== 'SUBMIT_FAILED' &&
+    evt.type !== 'ENROLL_FAILED' &&
+    evt.type !== 'ENROLLED' &&
+    evt.type !== 'LINK_UNBOUND_OR_LEGACY' &&
+    evt.type !== 'TOKEN_EXPIRED' &&
+    evt.type !== 'TICKET_ISSUED' &&
+    evt.type !== 'OTP_FAILED' &&
+    evt.type !== 'OTP_VERIFIED'
   ) {
-    console.warn(`[ScannerFSM] Rejected event ${event.type} while action in flight from state ${ctx.state}`);
+    console.warn(`[ScannerFSM] Rejected event ${evt.type} while action in flight from state ${ctx.state}`);
     return ctx;
   }
 
-  switch (event.type) {
+  switch (evt.type) {
     case 'SET_IN_FLIGHT':
       return {
         ...ctx,
-        isActionInFlight: event.inFlight,
+        isActionInFlight: evt.inFlight,
         updatedAt: now
       };
 
@@ -324,7 +333,7 @@ export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent): FsmCont
           ...ctx,
           state: 'LINK_CHECK',
           cachedPayload: {
-            payload: event.payload,
+            payload: evt.payload,
             captured_at: now
           },
           errorInfo: undefined,
@@ -340,7 +349,7 @@ export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent): FsmCont
         const next: FsmContext = {
           ...ctx,
           state: 'ERROR',
-          errorInfo: event.error,
+          errorInfo: evt.error,
           updatedAt: now
         };
         persistFsmContext(next);
@@ -348,19 +357,29 @@ export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent): FsmCont
       }
       return ctx;
 
-    case 'LINK_UNBOUND_OR_LEGACY':
-      if (ctx.state === 'LINK_CHECK' || ctx.state === 'SUBMITTING') {
-        const next: FsmContext = {
-          ...ctx,
-          state: 'ENROLLING',
-          enrollmentTicket: event.ticket,
-          isActionInFlight: false,
-          updatedAt: now
-        };
-        persistFsmContext(next);
-        return next;
-      }
-      return ctx;
+    case 'LINK_UNBOUND_OR_LEGACY': {
+      const next: FsmContext = {
+        ...ctx,
+        state: 'ENROLLING',
+        enrollmentTicket: evt.ticket,
+        isActionInFlight: false,
+        updatedAt: now
+      };
+      persistFsmContext(next);
+      return next;
+    }
+
+    case 'TOKEN_EXPIRED': {
+      const next: FsmContext = {
+        ...ctx,
+        state: 'ERROR',
+        errorInfo: buildErrorInfo('qr_expired', 'QR expired — rescan'),
+        isActionInFlight: false,
+        updatedAt: now
+      };
+      persistFsmContext(next);
+      return next;
+    }
 
     case 'ENROLLED':
       if (ctx.state === 'ENROLLING' || ctx.state === 'OTP_VERIFY') {
@@ -405,7 +424,7 @@ export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent): FsmCont
       if (ctx.state === 'SUBMITTING') {
         return {
           ...ctx,
-          submittingStage: event.stage,
+          submittingStage: evt.stage,
           updatedAt: now
         };
       }
@@ -416,7 +435,7 @@ export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent): FsmCont
         const next: FsmContext = {
           ...ctx,
           state: 'OTP_VERIFY',
-          enrollmentTicket: event.ticket,
+          enrollmentTicket: evt.ticket,
           updatedAt: now
         };
         persistFsmContext(next);
@@ -429,7 +448,7 @@ export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent): FsmCont
         const next: FsmContext = {
           ...ctx,
           state: 'ERROR',
-          errorInfo: event.error,
+          errorInfo: evt.error,
           isActionInFlight: false,
           updatedAt: now
         };
@@ -479,7 +498,7 @@ export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent): FsmCont
         const next: FsmContext = {
           ...ctx,
           state: 'ERROR',
-          errorInfo: event.error,
+          errorInfo: evt.error,
           isActionInFlight: false,
           updatedAt: now
         };
@@ -493,7 +512,7 @@ export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent): FsmCont
         const next: FsmContext = {
           ...ctx,
           state: 'SUCCESS',
-          successData: event.result,
+          successData: evt.result,
           isActionInFlight: false,
           updatedAt: now
         };
@@ -507,7 +526,7 @@ export function scannerFsmReducer(ctx: FsmContext, event: ScannerEvent): FsmCont
         const next: FsmContext = {
           ...ctx,
           state: 'ERROR',
-          errorInfo: event.error,
+          errorInfo: evt.error,
           isActionInFlight: false,
           updatedAt: now
         };
