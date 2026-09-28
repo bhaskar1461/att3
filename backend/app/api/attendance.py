@@ -1558,6 +1558,14 @@ class SelfieSkipRequest(BaseModel):
     session_id: Optional[int] = None
 
 
+class SelfieAuditPayload(BaseModel):
+    image_b64: Optional[str] = None
+    roll_number: Optional[str] = None
+    session_id: Optional[int] = None
+    detected_face_count: Optional[int] = 1
+    liveness_score: Optional[float] = 0.95
+
+
 def _require_student(current_user: User = Depends(get_current_user)) -> Student:
     if current_user.role != UserRole.STUDENT or not current_user.student_profile:
         raise HTTPException(
@@ -1708,6 +1716,66 @@ async def upload_attendance_selfie(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
     except Exception as ex:
         logger.error(f"Error saving attendance selfie: {ex}", exc_info=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to store selfie.")
+
+
+@router.post("/records/{attendance_id}/selfie-audit")
+async def upload_attendance_selfie_audit(
+    attendance_id: int,
+    payload: SelfieAuditPayload,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    current_student: Student = Depends(_require_student)
+):
+    """
+    JSON base64 post-attendance selfie audit endpoint.
+    Accepts base64 encoded selfie from client scanner.
+    """
+    import base64
+    from app.services.selfie_service import store_attendance_selfie
+    ip_addr = request.client.host if request and request.client else None
+
+    if not payload.image_b64:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No selfie image data provided.")
+
+    b64_str = payload.image_b64
+    if "," in b64_str:
+        b64_str = b64_str.split(",", 1)[1]
+
+    try:
+        image_bytes = base64.b64decode(b64_str)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid base64 image data.")
+
+    try:
+        from starlette.concurrency import run_in_threadpool
+        res = await run_in_threadpool(
+            store_attendance_selfie,
+            db=db,
+            attendance_id=attendance_id,
+            student_id=current_student.id,
+            image_bytes=image_bytes,
+            frame_index=1,
+            total_frames=1,
+            ip_address=ip_addr,
+            session_id=payload.session_id
+        )
+        return {
+            "status": "ACCEPTED",
+            "selfie_id": res["selfie_id"],
+            "object_storage_key": res["object_storage_key"],
+            "file_size": res["file_size"],
+            "frames_stored": 1,
+            "all_storage_keys": [res["object_storage_key"]],
+            "roll_number": res.get("roll_number"),
+            "student_name": res.get("student_name")
+        }
+    except HTTPException:
+        raise
+    except ValueError as ve:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as ex:
+        logger.error(f"Error saving attendance selfie audit: {ex}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to store selfie.")
 
 

@@ -46,6 +46,7 @@ export type ErrorCode =
   | 'server_token_expired'
   | 'binding_upgrade_required'
   | 'no_active_binding'
+  | 'device_replaced'
   | 'binding_revoked_post_grace'
   | 'qr_type_invalid'
   | 'qr_expired'
@@ -144,6 +145,11 @@ export const ERROR_CODE_TAXONOMY: Record<ErrorCode, { message: string; primary: 
   no_active_binding: {
     message: 'Device not enrolled — enroll to mark attendance',
     primary: 'Enroll now',
+    secondary: 'Later'
+  },
+  device_replaced: {
+    message: 'Device replaced — move attendance to this phone',
+    primary: 'Move attendance here',
     secondary: 'Later'
   },
   binding_revoked_post_grace: {

@@ -114,6 +114,14 @@ Every subsystem in the codebase enforces the following seven global invariants:
 * **Principle**: The backend server must refuse to boot if required configuration parameters are missing or contradictory.
 * **Mechanism**: The FastAPI lifespan startup hook validates email template dry-renders and configuration variables. If `BINDING_V2 = False`, the server strictly asserts that `LEGACY_BINDING_GRACE_UNTIL` is configured and parses as a valid ISO-8601 timestamp; otherwise, it raises a fatal `RuntimeError`.
 
+### INV-8: Single Navigation Authority (Route Guards Own Redirects)
+* **Principle**: Component lifecycle effects (`useEffect`) must NEVER imperatively navigate or trigger redirects in response to authentication state changes. Competing navigation authorities cause fatal infinite redirect loops.
+* **Mechanism**: Declarative Route Guards (`ProtectedRoute` for authenticated routes, `AnonymousOnlyRoute` for public/login routes, and `RoleBasedRedirect` at root `/`) are the sole and exclusive authorities for path transitions. Component effects never call `navigate` or `performAuthRedirect` in response to auth state. Circuit breaker trips halt without navigating.
+
+### INV-9: Single Camera Manager & Lifecycle Registry
+* **Principle**: Zero raw `navigator.mediaDevices.getUserMedia` calls outside the unified camera hook (`useCameraStream.ts`). No component may spawn unmanaged media tracks or parallel stream instances.
+* **Mechanism**: Camera streams are strictly single-flight, managed by `useCameraStream`, and cleaned up deterministically upon modal close or transition to selfie verification. All tracks must be stopped before secondary camera initialization. Monitored in dev via the diagnostic Stream Registry (`diagState.activeStreams === 0` invariant).
+
 ---
 
 ## 3. End-to-End Operational Lifecycle (Start to End)
@@ -519,8 +527,8 @@ When verifying or modifying code within this application, execute the following 
 # 1. Backend Verification Suite (FastAPI + SQLAlchemy)
 pytest tests/test_binding_phase4_scan.py tests/test_fix2_fix3_concurrency.py tests/test_fix5_otp_routing.py
 
-# 2. Frontend Unit & FSM State Suite (Vitest)
-npx vitest run src/features/scanner/__tests__/scannerFSM.test.ts
+# 2. Frontend Unit, FSM State & Auth Redirect Invariant Suite (Vitest)
+npx vitest run src/features/scanner/__tests__/scannerFSM.test.ts src/services/__tests__/authRedirectLoop.test.ts
 
 # 3. Circular Dependency Architectural Gate (Madge)
 npx madge --circular --extensions "ts,tsx" src

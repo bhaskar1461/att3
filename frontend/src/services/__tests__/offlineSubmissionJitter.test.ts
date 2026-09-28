@@ -21,6 +21,8 @@ import {
 } from '../offlineSubmissionQueue';
 import { saveScanToOfflineQueue, getOfflineQueue, clearOfflineQueue, MAX_OFFLINE_QUEUE_SIZE } from '../offlineSync';
 
+import { describe, it, expect } from 'vitest';
+
 // Mock localStorage if not running in full browser
 if (typeof globalThis.localStorage === 'undefined') {
   const store = new Map<string, string>();
@@ -34,18 +36,21 @@ if (typeof globalThis.localStorage === 'undefined') {
   } as any;
 }
 
-let passed = 0;
-let failed = 0;
+describe('Phase 4 Verification: IndexedDB Bounded Queue & Reconnection Jitter Backoff', () => {
+  it('executes all jitter and queue assertions cleanly', () => {
+    let passed = 0;
+    let failed = 0;
 
-function assert(condition: boolean, testName: string, detail?: string) {
-  if (condition) {
-    passed++;
-    console.log(`  [PASS] ${testName}`);
-  } else {
-    failed++;
-    console.error(`  [FAIL] ${testName}${detail ? ` - ${detail}` : ''}`);
-  }
-}
+    function assert(condition: boolean, testName: string, detail?: string) {
+      expect(condition, `${testName}${detail ? ` - ${detail}` : ''}`).toBe(true);
+      if (condition) {
+        passed++;
+        console.log(`  [PASS] ${testName}`);
+      } else {
+        failed++;
+        console.error(`  [FAIL] ${testName}${detail ? ` - ${detail}` : ''}`);
+      }
+    }
 
 console.log('\n======================================================');
 console.log('RUNNING PHASE 4 OFFLINE QUEUE & JITTER TEST SUITE');
@@ -147,8 +152,7 @@ console.log('\n======================================================');
 console.log(`TEST RESULTS: ${passed} / ${passed + failed} PASSED (${failed === 0 ? '100% SUCCESS' : 'FAILURES DETECTED'})`);
 console.log('======================================================\n');
 
-if (failed > 0) {
-  process.exit(1);
-} else {
-  process.exit(0);
-}
+    expect(failed).toBe(0);
+    expect(passed).toBeGreaterThan(0);
+  });
+});

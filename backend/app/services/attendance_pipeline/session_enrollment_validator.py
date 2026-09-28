@@ -145,15 +145,11 @@ def validate_session_and_enrollment(
             except Exception as binding_err:
                 logger.info(f"[BINDING V2] Optional proof check for {clean_roll}: {binding_err}")
                 binding_proof_meta = {"binding_verified": False, "reason": "optional_fallback"}
-        elif now_utc >= grace_until_dt and dev_id:
-            # Post-grace even under flag-off returns 410 legacy_binding_retired
+        elif dev_id:
+            # Under flag-off or post-grace, legacy device ID is rejected with 410 legacy_binding_retired
             raise HTTPException(
                 status_code=status.HTTP_410_GONE,
-                detail={
-                    "error_code": "binding_revoked_post_grace",
-                    "detail": "legacy_binding_retired: Grace period has expired. Please enroll with V2 proof.",
-                    "message": "This device must be re-enrolled. Legacy security grace period has expired."
-                }
+                detail="legacy_binding_retired: Grace period has expired. Please enroll with V2 proof."
             )
 
     status_str = getattr(session_meta["status"], "value", str(session_meta["status"]))

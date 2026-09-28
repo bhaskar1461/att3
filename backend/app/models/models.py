@@ -442,6 +442,7 @@ class DeviceBinding(Base):
     last_verified_at = Column(DateTime, nullable=True)
     revoked_at = Column(DateTime, nullable=True)
     revoked_reason = Column(String(30), nullable=True)  # rebind | admin_reset | churn_limit | student_request
+    superseded_by = Column(Integer, nullable=True)  # Pointer to new DeviceBinding.id on rebind
 
     # Informational audit metadata (strictly telemetry only; NEVER for authorization/identity)
     device_label = Column(String(100), nullable=True)

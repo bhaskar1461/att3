@@ -282,6 +282,36 @@ export const NoActiveBindingCard: React.FC<CardCtx> = ({ onEnroll, onLater, isIn
   </div>
 );
 
+export const DeviceReplacedCard: React.FC<CardCtx> = ({ onEnroll, onLater, isInlineEnrolling, message }) => (
+  <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-amber-50 border border-amber-200 text-amber-900 space-y-2 animate-in fade-in">
+    <div className="flex items-center justify-center gap-1.5">
+      <Smartphone className="w-4 h-4 text-amber-600 shrink-0" />
+      <span>Device Replaced</span>
+    </div>
+    <p className="text-[10px] text-amber-700 leading-relaxed text-center">
+      {message || 'This account was moved to another device. Move attendance back to this phone via a one-time verification code.'}
+    </p>
+    <div className="flex gap-2">
+      <button
+        type="button"
+        onClick={onEnroll}
+        disabled={isInlineEnrolling}
+        className="flex-1 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold transition flex items-center justify-center gap-1.5 cursor-pointer active:scale-95"
+      >
+        <Smartphone className="w-3.5 h-3.5" />
+        <span>{isInlineEnrolling ? 'Sending code…' : 'Move attendance here'}</span>
+      </button>
+      <button
+        type="button"
+        onClick={onLater}
+        className="px-3 py-1.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg text-xs font-bold transition cursor-pointer"
+      >
+        <span>Later</span>
+      </button>
+    </div>
+  </div>
+);
+
 export const QrExpiredCard: React.FC<CardCtx> = ({ onRescan }) => (
   <div className="w-full p-2.5 rounded-xl text-xs font-medium bg-blue-50 border border-blue-200 text-blue-800 space-y-2 animate-in fade-in">
     <div className="flex items-center justify-center gap-1.5">
@@ -543,6 +573,7 @@ export const UnknownCard: React.FC<CardCtx> = ({ message, onRescan }) => (
 export const ERROR_CARDS: Record<ScanErrorCode, (ctx: CardCtx) => JSX.Element> = {
   binding_upgrade_required: (ctx) => <UpgradeRequiredCard {...ctx} />,
   no_active_binding: (ctx) => <NoActiveBindingCard {...ctx} />,
+  device_replaced: (ctx) => <DeviceReplacedCard {...ctx} />,
   qr_expired: (ctx) => <QrExpiredCard {...ctx} />,
   client_abort: (ctx) => <ClientAbortCard {...ctx} />,
   server_token_expired: (ctx) => <ServerTokenExpiredCard {...ctx} />,

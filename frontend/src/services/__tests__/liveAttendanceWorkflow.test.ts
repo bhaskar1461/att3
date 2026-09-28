@@ -20,20 +20,23 @@ import {
   STANDARD_PERIODS 
 } from '../../utils/dateUtils.ts';
 import type { CurrentClassInfo } from '../../components/teacher/CurrentClassHeroCard.tsx';
+import { describe, it, expect } from 'vitest';
 
-let totalTests = 0;
-let passedTests = 0;
+describe('Live Attendance Workflow Client Tests', () => {
+  it('passes all live attendance workflow invariants', () => {
+    let totalTests = 0;
+    let passedTests = 0;
 
-function assert(condition: boolean, testName: string, detail?: string) {
-  totalTests++;
-  if (condition) {
-    passedTests++;
-    console.log(`  [PASS] ${testName}`);
-  } else {
-    console.error(`  [FAIL] ${testName} - ${detail || 'Assertion failed'}`);
-    process.exitCode = 1;
-  }
-}
+    function assert(condition: boolean, testName: string, detail?: string) {
+      totalTests++;
+      expect(condition, `${testName} - ${detail || 'Assertion failed'}`).toBe(true);
+      if (condition) {
+        passedTests++;
+        console.log(`  [PASS] ${testName}`);
+      } else {
+        console.error(`  [FAIL] ${testName} - ${detail || 'Assertion failed'}`);
+      }
+    }
 
 console.log('\n======================================================');
 console.log('RUNNING PHASE 5 LIVE ATTENDANCE CLIENT TEST SUITE');
@@ -216,3 +219,7 @@ inFlight = false; // Request completes
 console.log('\n======================================================');
 console.log(`TEST RESULTS: ${passedTests} / ${totalTests} PASSED (100% SUCCESS)`);
 console.log('======================================================\n');
+    expect(totalTests).toBeGreaterThan(0);
+    expect(passedTests).toBe(totalTests);
+  });
+});

@@ -95,6 +95,8 @@ describe('T1: FSM transitions and error mapping', () => {
       'client_abort',
       'server_token_expired',
       'binding_upgrade_required',
+      'no_active_binding',
+      'device_replaced',
       'binding_revoked_post_grace',
       'qr_type_invalid',
       'qr_expired',

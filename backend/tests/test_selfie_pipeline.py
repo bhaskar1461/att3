@@ -326,6 +326,35 @@ class TestSelfiePipeline(unittest.TestCase):
         self.assertEqual(record.status, AttendanceStatus.PRESENT)
         self.assertEqual(record.selfie_status, "FAILED")
 
+    def test_selfie_audit_base64_upload_succeeds(self):
+        """Verify JSON base64 selfie audit upload succeeds and marks record ACCEPTED."""
+        import base64
+        jpeg_data = generate_test_jpeg(width=320, height=240)
+        b64_img = "data:image/jpeg;base64," + base64.b64encode(jpeg_data).decode("utf-8")
+
+        headers = {
+            "Authorization": f"Bearer {self.token_s1}",
+            "X-Device-Id": "test-dev-uuid-1",
+        }
+        res = self.client.post(
+            f"/api/v1/attendance/records/{self.att1.id}/selfie-audit",
+            headers=headers,
+            json={
+                "image_b64": b64_img,
+                "roll_number": "23KT1A0501",
+                "session_id": self.sess.id,
+                "detected_face_count": 1,
+                "liveness_score": 0.98
+            }
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        data = res.json()
+        self.assertEqual(data["status"], "ACCEPTED")
+        self.assertIn("selfie_id", data)
+
+        record = self.db.query(AttendanceRecord).filter(AttendanceRecord.id == self.att1.id).first()
+        self.assertEqual(record.selfie_status, "ACCEPTED")
+
 
 if __name__ == "__main__":
     unittest.main()

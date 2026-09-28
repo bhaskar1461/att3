@@ -20,6 +20,7 @@ import { adaptSessionsToCalendarEvents, groupEventsByDate } from '../services/ca
 import { clearCalendarSummaryCache } from '../services/calendarService.ts';
 import { getTodayIST } from '../utils/dateUtils.ts';
 import type { TeacherClassEvent } from '../types/calendar.ts';
+import { useRenderCounter } from '../dev/diagnostics.ts';
 
 const PERIOD_LIST = [
   { num: 1, label: 'Period 1', time: '09:10 - 10:00' },
@@ -83,6 +84,7 @@ const getInstitutionalErrorMessage = (err: any, fallback: string): string => {
 };
 
 export const TeacherDashboard: React.FC = () => {
+  useRenderCounter('TeacherDashboard');
   const [activeTab, setActiveTab] = useState<'calendar' | 'today' | 'historical' | 'defaulters' | 'settings'>('calendar');
   const [academicYear, setAcademicYear] = useState<string>('2025-26');
   const [globalSearch, setGlobalSearch] = useState<string>('');

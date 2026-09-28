@@ -570,15 +570,56 @@ def _verify_binding_proof(
         ).first()
 
     if not active_binding:
+        # Check if student previously had a binding that was replaced on another phone
+        previous_binding = db.query(DeviceBinding).filter(
+            DeviceBinding.student_id == student.id
+        ).order_by(DeviceBinding.id.desc()).first()
+
+        if previous_binding and previous_binding.revoked_reason == "rebind":
+            replaced_str = previous_binding.revoked_at.strftime("%Y-%m-%d %H:%M") if previous_binding.revoked_at else "recently"
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "device_replaced",
+                    "detail": f"device_replaced: This device was replaced on {replaced_str}. Move attendance back to this device to continue.",
+                    "message": f"This device was replaced on {replaced_str}. Move attendance back to this device to continue.",
+                    "replaced_at": previous_binding.revoked_at.isoformat() if previous_binding.revoked_at else None,
+                    "serverNow": time.time()
+                }
+            )
+
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="no_active_binding: BINDING_REQUIRED: No active device binding found. Please enroll your device."
+            detail={
+                "code": "no_active_binding",
+                "detail": "no_active_binding: BINDING_REQUIRED: No active device binding found. Please enroll your device.",
+                "message": "no_active_binding: BINDING_REQUIRED: No active device binding found. Please enroll your device.",
+                "serverNow": time.time()
+            }
         )
 
     if active_binding.status == "REVOKED" or active_binding.revoked_at is not None:
+        if active_binding.revoked_reason == "rebind":
+            replaced_str = active_binding.revoked_at.strftime("%Y-%m-%d %H:%M") if active_binding.revoked_at else "recently"
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "device_replaced",
+                    "detail": f"device_replaced: This device was replaced on {replaced_str}. Move attendance back to this device to continue.",
+                    "message": f"This device was replaced on {replaced_str}. Move attendance back to this device to continue.",
+                    "replaced_at": active_binding.revoked_at.isoformat() if active_binding.revoked_at else None,
+                    "serverNow": time.time()
+                }
+            )
+
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="DEVICE_REVOKED: This device has been revoked and cannot participate in attendance."
+            detail={
+                "code": "binding_revoked_post_grace",
+                "detail": "DEVICE_REVOKED: This device has been revoked and cannot participate in attendance.",
+                "message": "This device has been revoked. Please re-enroll to mark attendance.",
+                "serverNow": time.time()
+            }
         )
 
     # 7. Verify ECDSA P-256 signature

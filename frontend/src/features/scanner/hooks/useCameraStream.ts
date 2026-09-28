@@ -607,6 +607,19 @@ export function useCameraStream({
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
 
+    const handlePageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) {
+        console.log('[Scanner] BFCache restore detected via pageshow');
+        const stream = mediaStreamRef.current || _sessionMediaStream;
+        const tracksDead = stream ? stream.getVideoTracks().some(t => t.readyState === 'ended') : true;
+        if (tracksDead && isMountedRef.current) {
+          _sessionMediaStream = null;
+          startCamera(1);
+        }
+      }
+    };
+    window.addEventListener('pageshow', handlePageShow);
+
     return () => {
       isMountedRef.current = false;
       if (permStatusRef.current) {
@@ -616,6 +629,7 @@ export function useCameraStream({
         permStatusRef.current = null;
       }
       document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pageshow', handlePageShow);
       stopCamera();
     };
   }, [facingMode, startCamera, stopCamera]);

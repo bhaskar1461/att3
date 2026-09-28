@@ -154,14 +154,14 @@ def send_single_email(
             "use_tls": True,
             "sender": os.getenv("FALLBACK_SMTP_SENDER", fallback_user),
             "sender_name": "SNIST ERP System",
-            "reply_to": reply_to or fallback_user,
+            "reply_to": reply_to or os.getenv("SMTP_REPLY_TO", fallback_user),
         }
 
-        # Sequence channels based on dispatch intent
+        # Sequence channels based on dispatch intent (Gmail primary for zero-delay delivery)
         if is_otp_channel:
-            channels_to_try = [brevo_2_cfg, brevo_1_cfg, fallback_cfg]
+            channels_to_try = [fallback_cfg, brevo_2_cfg, brevo_1_cfg]
         else:
-            channels_to_try = [brevo_1_cfg, brevo_2_cfg, fallback_cfg]
+            channels_to_try = [fallback_cfg, brevo_1_cfg, brevo_2_cfg]
 
         def _attempt_send(cfg: dict) -> Dict[str, Any]:
             if not cfg.get("password"):

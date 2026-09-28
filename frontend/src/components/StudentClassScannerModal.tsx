@@ -26,12 +26,15 @@ export interface StudentClassScannerModalProps {
   studentRoll?: string;
 }
 
+import { useRenderCounter, useEffectTracer } from '../dev/diagnostics';
+
 export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> = ({
   onClose,
   onScanComplete,
   displayType = 'projector',
   studentRoll
 }) => {
+  const instanceId = useRenderCounter('StudentClassScannerModal');
   const [showFallbackInput, setShowFallbackInput] = useState<boolean>(false);
   const [showHelpSheet, setShowHelpSheet] = useState<boolean>(false);
   const [showRollCard, setShowRollCard] = useState<boolean>(false);
@@ -72,6 +75,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
     isDebugMode
   });
 
+  useEffectTracer('StudentClassScannerModal', instanceId, 'cameraActiveSync', [camera.cameraActive]);
   useEffect(() => {
     if (camera.cameraActive) {
       scanner.startScanning();
@@ -173,6 +177,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                   rateLimitSecondsLeft={submission.rateLimitSecondsLeft}
                   scanError={submission.scanError}
                   scanErrorCode={submission.scanErrorCode}
+                  upgradeTicket={submission.upgradeTicket}
                   isInlineEnrolling={submission.isInlineEnrolling}
                   rebindMaskedEmail={submission.rebindMaskedEmail}
                   onCancelSubmitting={submission.cancelSubmission}
@@ -196,6 +201,7 @@ export const StudentClassScannerModal: React.FC<StudentClassScannerModalProps> =
                 rateLimitSecondsLeft={submission.rateLimitSecondsLeft}
                 scanError={submission.scanError}
                 scanErrorCode={submission.scanErrorCode}
+                upgradeTicket={submission.upgradeTicket}
                 isInlineEnrolling={submission.isInlineEnrolling}
                 rebindMaskedEmail={submission.rebindMaskedEmail}
                 onResetAfterTimeoutOrStale={submission.resetAfterTimeoutOrStale}

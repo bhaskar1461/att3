@@ -371,6 +371,18 @@ def _run_defensive_schema_migrations():
                     except Exception as err:
                         logger.warning(f"Failed to add google_sheet_id: {err}")
 
+        # Check device_bindings for superseded_by column (Phase 4 Rebind Tracking)
+        if "device_bindings" in tables:
+            bind_cols = [col["name"] for col in inspector.get_columns("device_bindings")]
+            with engine.connect() as conn:
+                if "superseded_by" not in bind_cols:
+                    logger.info("Migrating schema: adding superseded_by to device_bindings")
+                    try:
+                        conn.execute(text("ALTER TABLE device_bindings ADD COLUMN superseded_by INT NULL"))
+                        conn.commit()
+                    except Exception as err:
+                        logger.warning(f"Failed to add superseded_by to device_bindings: {err}")
+
         # Defensive indexes for Week 9 scale optimization (telemetry rollups and historical session lists)
         try:
             with engine.connect() as conn:

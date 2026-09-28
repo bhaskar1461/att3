@@ -19,6 +19,7 @@ class TokenLifecycleManager {
   private lastRefreshTime: number = Date.now();
   private activeRefreshPromise: Promise<string | null> | null = null;
   private redirectHandler: RedirectCallback | null = null;
+  private pendingRedirect: string | null = null;
   private isVisibilityListenerAttached = false;
 
   constructor() {
@@ -27,20 +28,41 @@ class TokenLifecycleManager {
 
   /**
    * Registers custom redirect handler from AuthContext or navigation shell.
+   * Flushes any buffered redirect pending delegate registration.
    */
   public setRedirectHandler(handler: RedirectCallback | null): void {
     this.redirectHandler = handler;
+    if (handler && this.pendingRedirect) {
+      const target = this.pendingRedirect;
+      this.pendingRedirect = null;
+      handler(target);
+    }
   }
 
   /**
    * Performs an authorized navigation or fallback window redirect.
+   * Buffers target if router delegate is still mounting to avoid full reload loop.
    */
   public triggerRedirect(targetUrl: string): void {
     if (this.redirectHandler) {
       this.redirectHandler(targetUrl);
-    } else if (typeof window !== 'undefined') {
-      window.history.replaceState({}, '', targetUrl);
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      return;
+    }
+
+    // Buffer redirect if delegate hasn't registered yet
+    this.pendingRedirect = targetUrl;
+
+    if (typeof window !== 'undefined') {
+      setTimeout(() => {
+        if (this.pendingRedirect === targetUrl && !this.redirectHandler) {
+          const current = window.location.pathname + window.location.search;
+          if (current !== targetUrl) {
+            console.warn('[auth] router delegate not ready — fallback replace');
+            this.pendingRedirect = null;
+            window.location.replace(targetUrl);
+          }
+        }
+      }, 150);
     }
   }
 

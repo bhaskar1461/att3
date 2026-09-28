@@ -42,11 +42,33 @@ export {
   getCorroborationDetails
 };
 
+export type BindingServerState =
+  | 'active'
+  | 'no_binding'
+  | 'binding_exists_mismatch'
+  | 'legacy_binding'
+  | 'revoked'
+  | 'device_locked';
+
+export type BindingRecoveryFlow =
+  | 'NONE_PROCEED_TO_SCAN'
+  | 'FIRST_TIME_ENROLLMENT'
+  | 'OTP_REBIND_TAKEOVER'
+  | 'UPGRADE_ENROLLMENT'
+  | 'DEVICE_REPLACED_REBIND'
+  | 'ADMIN_CONTACT';
+
 export interface ServerBindingStatus {
   enrolled: boolean;
   status: 'BOUND' | 'MISMATCH' | 'NOT_ENROLLED';
+  state?: BindingServerState;
+  flow?: BindingRecoveryFlow;
   roll_number?: string;
   active_key_id?: string | null;
+  active_device_name?: string | null;
+  enrolled_at?: string | null;
+  replaced_at?: string | null;
+  superseded_by?: string | null;
   device_matches?: boolean | null;
 }
 
@@ -62,6 +84,87 @@ export async function checkServerBindingStatus(keyId?: string): Promise<ServerBi
   } catch (err) {
     console.warn('[Binding] Server status check skipped or failed:', err);
     return null;
+  }
+}
+
+/**
+ * Enrolls the current device for the given student roll.
+ */
+export async function enrollCurrentDevice(studentRoll: string): Promise<{
+  success: boolean;
+  requiresOtp?: boolean;
+  maskedEmail?: string;
+  error?: string;
+}> {
+  try {
+    const payload = await generateKeyPair(studentRoll, false);
+    const res: any = await apiRequest('/binding/enroll', {
+      method: 'POST',
+      body: JSON.stringify({
+        public_key_spki_b64: payload.public_key_spki_b64,
+        key_id: payload.key_id,
+        corroboration_nonce: (payload as any).nonce || undefined
+      })
+    });
+    if (res?.status === 'REBIND_REQUIRED' && res?.otp_required) {
+      return { success: false, requiresOtp: true, maskedEmail: res.email_masked };
+    }
+    if (res?.status === 'DEVICE_ENROLLED' || res?.message?.toLowerCase().includes('enrolled')) {
+      if (payload.stored_record) {
+        await commitBindingRecord(payload.stored_record);
+      }
+      return { success: true };
+    }
+    return { success: false, error: res?.detail?.message || res?.message || 'Enrollment failed' };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Enrollment request failed' };
+  }
+}
+
+/**
+ * Explicitly requests an OTP for device rebind takeover.
+ */
+export async function requestRebindOtp(): Promise<{
+  success: boolean;
+  maskedEmail?: string;
+  error?: string;
+}> {
+  try {
+    const res: any = await apiRequest('/binding/rebind/request-otp', {
+      method: 'POST'
+    });
+    return { success: true, maskedEmail: res?.email_masked };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Failed to request verification code' };
+  }
+}
+
+/**
+ * Verifies OTP and performs atomic takeover swap for the current device.
+ */
+export async function verifyRebindOtp(
+  otp: string,
+  studentRoll: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const payload = await generateKeyPair(studentRoll, false);
+    const res: any = await apiRequest('/binding/rebind/verify', {
+      method: 'POST',
+      body: JSON.stringify({
+        otp: otp.trim(),
+        public_key_spki_b64: payload.public_key_spki_b64,
+        key_id: payload.key_id
+      })
+    });
+    if (res?.status === 'DEVICE_REBOUND' || res?.status === 'DEVICE_ENROLLED' || res?.message?.toLowerCase().includes('success')) {
+      if (payload.stored_record) {
+        await commitBindingRecord(payload.stored_record);
+      }
+      return { success: true };
+    }
+    return { success: false, error: res?.detail?.message || res?.message || 'Verification failed' };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Verification request failed' };
   }
 }
 

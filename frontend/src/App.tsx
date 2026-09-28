@@ -46,7 +46,8 @@ const AuthNavigationSync: React.FC = () => {
 };
 
 const RoleBasedRedirect: React.FC = () => {
-  const { user } = useAuth();
+  const { user, isLoading } = useAuth();
+  if (isLoading) return <RouteLoader />;
   if (!user) {
     const nextPath = typeof window !== 'undefined' ? window.location.pathname + window.location.search : '';
     const nextQuery = nextPath && nextPath !== '/login' && nextPath !== '/' && !nextPath.startsWith('/login')
@@ -61,9 +62,25 @@ const RoleBasedRedirect: React.FC = () => {
   return <Navigate to="/student" replace />;
 };
 
+const AnonymousOnlyRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { user, isLoading } = useAuth();
+  if (isLoading) return <RouteLoader />;
+  if (user) {
+    const safeNext = getSafeNextDestination(typeof window !== 'undefined' ? window.location.search : '', user.role);
+    if (safeNext) return <Navigate to={safeNext} replace />;
+    if (user.role === 'SUPER_ADMIN') return <Navigate to="/overview" replace />;
+    if (user.role === 'TEACHER') return <Navigate to="/teacher" replace />;
+    return <Navigate to="/student?scan=true" replace />;
+  }
+  return <>{children}</>;
+};
+
 import { cleanupLegacyDeviceStorage } from './services/deviceCredential';
+import { useRenderCounter } from './dev/diagnostics';
 
 export const App: React.FC = () => {
+  useRenderCounter('App');
+
   React.useEffect(() => {
     // Migration hygiene: silently clean up stale legacy soft-binding storage keys on app boot
     cleanupLegacyDeviceStorage();
@@ -80,7 +97,7 @@ export const App: React.FC = () => {
             <main className="flex-1">
               <React.Suspense fallback={<RouteLoader />}>
                 <Routes>
-                  <Route path="/login" element={<Login />} />
+                  <Route path="/login" element={<AnonymousOnlyRoute><Login /></AnonymousOnlyRoute>} />
 
                   {/* Phase 1 Dashboard Shell: Direct Standalone Route (Super Admin Only) */}
                   <Route

@@ -19,9 +19,14 @@ const StudentClassScannerModal = React.lazy(() =>
   import('../components/StudentClassScannerModal').then(m => ({ default: m.StudentClassScannerModal }))
 );
 
+import { DeviceEnrollmentModal } from '../components/DeviceEnrollmentModal';
+import { useRenderCounter, useEffectTracer } from '../dev/diagnostics';
+
 export const StudentPortal: React.FC = () => {
+  const instanceId = useRenderCounter('StudentPortal');
   const [showSubjectModal, setShowSubjectModal] = useState<boolean>(false);
   const [showClassScannerModal, setShowClassScannerModal] = useState<boolean>(false);
+  const [showEnrollmentModal, setShowEnrollmentModal] = useState<boolean>(false);
   const [activeNavTab, setActiveNavTab] = useState<'home' | 'attendance' | 'timetable'>('home');
 
   const {
@@ -55,14 +60,36 @@ export const StudentPortal: React.FC = () => {
     periodCount,
     handleScanComplete,
     fetchStudentData,
+    bindingStatusInfo,
+    checkDeviceBinding,
   } = useStudentPortalData();
 
+  // Pre-scan Gate: If student is not bound or needs takeover, open enrollment modal instead of camera
+  const handleOpenScanner = () => {
+    if (isDeviceBound === false) {
+      setShowEnrollmentModal(true);
+    } else {
+      setShowClassScannerModal(true);
+    }
+  };
+
+  const handleEnrollmentComplete = () => {
+    setShowEnrollmentModal(false);
+    checkDeviceBinding();
+    setShowClassScannerModal(true);
+  };
+
+  useEffectTracer('StudentPortal', instanceId, 'scanQueryParamEffect', [isDeviceBound]);
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (params.get('scan') === 'true' || params.get('openScanner') === '1') {
-      setShowClassScannerModal(true);
+      if (isDeviceBound === false) {
+        setShowEnrollmentModal(true);
+      } else if (isDeviceBound === true) {
+        setShowClassScannerModal(true);
+      }
     }
-  }, []);
+  }, [isDeviceBound]);
 
   return (
     <div className="bg-[#FBFBFD] text-[#1b1b1d] min-h-screen flex flex-col font-sans">
@@ -115,7 +142,7 @@ export const StudentPortal: React.FC = () => {
             primarySubject={primarySubject}
             periodCount={periodCount}
             isDeviceBound={isDeviceBound}
-            onOpenScanner={() => setShowClassScannerModal(true)}
+            onOpenScanner={handleOpenScanner}
           />
 
           <StudentAttendanceOverviewCard
@@ -127,7 +154,7 @@ export const StudentPortal: React.FC = () => {
             presentCount={presentCount}
             displayAbsent={displayAbsent}
             compAgg={compAgg}
-            onOpenScanner={() => setShowClassScannerModal(true)}
+            onOpenScanner={handleOpenScanner}
             onOpenSubjectModal={() => setShowSubjectModal(true)}
           />
 
@@ -157,11 +184,19 @@ export const StudentPortal: React.FC = () => {
       <StudentMobileNav
         activeNavTab={activeNavTab}
         setActiveNavTab={setActiveNavTab}
-        onOpenScanner={() => setShowClassScannerModal(true)}
+        onOpenScanner={handleOpenScanner}
         onOpenAttendance={() => setShowSubjectModal(true)}
         onOpenTimetable={() => {
           document.getElementById('timetable-section')?.scrollIntoView({ behavior: 'smooth' });
         }}
+      />
+
+      <DeviceEnrollmentModal
+        isOpen={showEnrollmentModal}
+        onClose={() => setShowEnrollmentModal(false)}
+        onEnrolled={handleEnrollmentComplete}
+        studentRoll={profile?.roll_number || (localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user') || '{}').roll_number : undefined)}
+        initialStatus={bindingStatusInfo}
       />
 
       {showClassScannerModal && (

@@ -4,7 +4,10 @@ import { RoleGate } from '../core/components/RoleGate';
 import { useAuth } from '../context/AuthContext';
 import { Role } from '../core/types';
 
+import { useRenderCounter } from '../dev/diagnostics';
+
 export const DashboardPage: React.FC = () => {
+  useRenderCounter('DashboardPage');
   const { user } = useAuth();
   let currentRole: Role | undefined;
   if (user?.role) {

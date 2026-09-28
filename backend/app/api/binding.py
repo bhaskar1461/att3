@@ -123,6 +123,15 @@ class RebindOtpRequest(BaseModel):
     pass
 
 
+class RebindVerifyRequest(BaseModel):
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit verification code")
+    public_key: Optional[str] = Field(None, description="SPKI DER Base64 public key")
+    public_key_spki_b64: Optional[str] = Field(None, description="SubjectPublicKeyInfo DER Base64 (124 chars)")
+    key_id: Optional[str] = Field(None, description="SHA-256 hex digest of SPKI")
+    storage_persist_granted: Optional[bool] = False
+    browser_profile_tag: Optional[str] = None
+
+
 class AdminHardwareResetRequest(BaseModel):
     student_id: Optional[int] = Field(None, description="Internal database student ID")
     roll_number: Optional[str] = Field(None, description="Student institutional roll number")
@@ -241,6 +250,51 @@ def dispatch_rebind_otp_email_bg(
         logger.error(f"[REBIND OTP BG] Failed to send OTP email to {email}: {ex}")
 
 
+def dispatch_rebind_notification_email_bg(
+    student_id: int,
+    user_id: int,
+    roll_number: str,
+    name: str,
+    email: str,
+    new_key_id: str,
+    ip_addr: str = "unknown"
+):
+    """
+    Background worker task: Dispatches security alert email to student when their device binding is replaced.
+    Serves as the vital hijack signal (Phase 4 requirement).
+    """
+    try:
+        from app.core.database import SessionLocal
+        html_body = f"""
+        <html><body>
+        <h3>SNIST ERP — Security Alert: Attendance Device Changed</h3>
+        <p>Dear {name},</p>
+        <p>Your registered attendance device was recently updated to a new device (Key ID: {new_key_id[:12]}...).</p>
+        <p><strong>Time:</strong> {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}<br><strong>IP Address:</strong> {ip_addr}</p>
+        <p style="color: #b91c1c; font-weight: bold;">If you did not initiate this change, your account may be compromised. Please contact college support immediately.</p>
+        </body></html>
+        """
+        send_single_email(
+            to_email=email,
+            subject="SNIST ERP — Security Alert: Attendance Device Changed",
+            html_body=html_body,
+            channel="SECURITY"
+        )
+        with SessionLocal() as bg_db:
+            audit = AuditLog(
+                user_id=user_id,
+                roll_number=roll_number,
+                event_type="REBIND_HIJACK_ALERT_SENT",
+                action="REBIND_NOTIFY",
+                details=f"Device change notification sent to {mask_email(email)} (IP={ip_addr})",
+                created_at=datetime.utcnow()
+            )
+            bg_db.add(audit)
+            bg_db.commit()
+    except Exception as ex:
+        logger.error(f"[REBIND NOTIFY BG] Failed to send device change notification to {email}: {ex}")
+
+
 def dispatch_rebind_otp_internal(student: Student, db: Session) -> Tuple[bool, str]:
     """
     Synchronous OTP generation & dispatch (maintained for backward-compatible test calls).
@@ -270,9 +324,14 @@ def get_device_binding_status(
     db: Session = Depends(get_db)
 ):
     """
-    Server-authoritative binding inspection.
-    Validates whether the student has an active non-revoked binding in the database,
-    and checks if the client's current key_id matches the enrolled key.
+    Server-authoritative binding inspection (Phase 2).
+    Returns structured states:
+    - active: client key matches server active binding -> routes to scanner
+    - no_binding: student has no binding anywhere -> routes to first-time enrollment
+    - binding_exists_mismatch: student has an active binding on another device -> routes to OTP rebind
+    - legacy_binding: student has a legacy UUID binding -> routes to upgrade enrollment
+    - revoked: binding was revoked -> routes to rebind
+    - device_locked: account/device locked -> routes to admin/support
     """
     student = db.query(Student).filter(Student.user_id == current_user.id).first()
     if not student:
@@ -281,31 +340,98 @@ def get_device_binding_status(
             detail="Only students can query device binding status."
         )
 
+    clean_roll = student.roll_number.strip().upper()
+    is_locked, failures, remaining_sec = check_verify_lockout(clean_roll)
+    if is_locked or not current_user.is_active:
+        return {
+            "enrolled": False,
+            "status": "NOT_ENROLLED",
+            "state": "device_locked",
+            "flow": "device_locked_help",
+            "roll_number": student.roll_number,
+            "active_key_id": None,
+            "device_matches": False,
+            "lockout_remaining_seconds": remaining_sec if is_locked else None,
+            "message": f"Account verification locked. Please wait {remaining_sec}s or contact department administrator."
+        }
+
     active_binding = db.query(DeviceBinding).filter(
         DeviceBinding.student_id == student.id,
         DeviceBinding.revoked_at.is_(None),
         DeviceBinding.status == "ACTIVE"
     ).first()
 
-    if not active_binding:
+    clean_key_id = key_id.strip().upper() if key_id else None
+
+    if active_binding:
+        device_matches = bool(clean_key_id and active_binding.key_id == clean_key_id)
+        if clean_key_id is None or device_matches:
+            state = "active"
+            flow = "scanner"
+            legacy_status = "BOUND"
+        else:
+            state = "binding_exists_mismatch"
+            flow = "rebind_otp"
+            legacy_status = "MISMATCH"
+
+        return {
+            "enrolled": True,
+            "status": legacy_status,
+            "state": state,
+            "flow": flow,
+            "roll_number": student.roll_number,
+            "active_key_id": active_binding.key_id,
+            "device_matches": device_matches if clean_key_id else True,
+            "enrolled_at": active_binding.enrolled_at.isoformat() if active_binding.enrolled_at else None,
+            "superseded_by": active_binding.superseded_by
+        }
+
+    legacy_binding = db.query(DeviceAccountBinding).filter(
+        DeviceAccountBinding.roll_number == student.roll_number,
+        DeviceAccountBinding.status == BindingStatus.ACTIVE
+    ).first()
+
+    if legacy_binding:
         return {
             "enrolled": False,
             "status": "NOT_ENROLLED",
+            "state": "legacy_binding",
+            "flow": "upgrade_enrollment",
             "roll_number": student.roll_number,
             "active_key_id": None,
-            "device_matches": False
+            "device_matches": False,
+            "legacy_device_id": legacy_binding.device_id,
+            "message": "One-time security upgrade required to link this device."
         }
 
-    clean_key_id = key_id.strip().upper() if key_id else None
-    device_matches = bool(clean_key_id and active_binding.key_id == clean_key_id)
+    last_revoked = db.query(DeviceBinding).filter(
+        DeviceBinding.student_id == student.id,
+        DeviceBinding.revoked_at.isnot(None)
+    ).order_by(DeviceBinding.revoked_at.desc()).first()
+
+    if last_revoked:
+        return {
+            "enrolled": False,
+            "status": "NOT_ENROLLED",
+            "state": "revoked",
+            "flow": "rebind_otp",
+            "roll_number": student.roll_number,
+            "active_key_id": None,
+            "device_matches": False,
+            "revoked_at": last_revoked.revoked_at.isoformat() if last_revoked.revoked_at else None,
+            "revoked_reason": last_revoked.revoked_reason,
+            "message": "Device binding has been revoked. Please re-enroll."
+        }
 
     return {
-        "enrolled": True,
-        "status": "BOUND" if (not clean_key_id or device_matches) else "MISMATCH",
+        "enrolled": False,
+        "status": "NOT_ENROLLED",
+        "state": "no_binding",
+        "flow": "enrollment",
         "roll_number": student.roll_number,
-        "active_key_id": active_binding.key_id,
-        "device_matches": device_matches if clean_key_id else True,
-        "enrolled_at": active_binding.enrolled_at.isoformat() if active_binding.enrolled_at else None
+        "active_key_id": None,
+        "device_matches": False,
+        "message": "Device not enrolled. Tap to enroll this device."
     }
 
 
@@ -682,6 +808,7 @@ def verify_binding_signature(
 # ============================================================
 
 @router.post("/request-rebind-otp", dependencies=[Depends(check_binding_v2_enabled)])
+@router.post("/rebind/request-otp", dependencies=[Depends(check_binding_v2_enabled)])
 def request_rebind_otp(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -714,6 +841,167 @@ def request_rebind_otp(
         "email_masked": mask_email(recipient),
         "expires_in_minutes": 10,
         "message": f"Verification code sent to {mask_email(recipient)}"
+    }
+
+
+@router.post("/rebind/verify", dependencies=[Depends(check_binding_v2_enabled)])
+def verify_and_swap_rebind(
+    req: RebindVerifyRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Phase 4: Performs the atomic swap of student device bindings in ONE database transaction.
+    Old binding -> REVOKED (superseded_by=new_binding.id, reason='rebind')
+    New binding -> ACTIVE
+    Enforces honest delivery status, replay protection, attempt caps, and background hijack alert.
+    """
+    student = db.query(Student).filter(Student.user_id == current_user.id).first()
+    if not student:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only students can perform device rebind.")
+
+    raw_spki = (req.public_key or req.public_key_spki_b64 or "").strip()
+    if not raw_spki:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="public_key (SPKI DER Base64) is required.")
+
+    key_id_val = req.key_id.strip().upper() if req.key_id else hashlib.sha256(raw_spki.encode("utf-8")).hexdigest()[:32].upper()
+    now_utc = datetime.utcnow()
+    clean_roll = student.roll_number.strip().upper()
+
+    # 1. Churn limit check (max 2 rebinds per rolling 30 days)
+    thirty_days_ago = now_utc - timedelta(days=30)
+    rebind_count = db.query(DeviceBinding).filter(
+        DeviceBinding.student_id == student.id,
+        DeviceBinding.enrolled_at >= thirty_days_ago,
+        DeviceBinding.revoked_reason == "rebind"
+    ).count()
+
+    if rebind_count >= settings.ENROLL_LIMIT_30_DAYS:
+        audit = AuditLog(
+            user_id=current_user.id,
+            roll_number=clean_roll,
+            event_type="CHURN_LIMIT_EXCEEDED",
+            action="ENROLLMENT_BLOCKED",
+            details=f"Student exceeded 30-day device rebind limit ({rebind_count}/{settings.ENROLL_LIMIT_30_DAYS})",
+            created_at=now_utc
+        )
+        db.add(audit)
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": "churn_limit_exceeded",
+                "error_type": "CHURN_LIMIT_EXCEEDED",
+                "message": f"Device registration limit reached (maximum {settings.ENROLL_LIMIT_30_DAYS} per 30 days). Contact your department HOD for authorization."
+            }
+        )
+
+    # 2. Validate OTP
+    otp_hash = hashlib.sha256(req.otp.strip().encode("utf-8")).hexdigest()
+    otp_record = db.query(DeviceRebindOTP).filter(
+        DeviceRebindOTP.student_id == student.id,
+        DeviceRebindOTP.is_verified == False,
+        DeviceRebindOTP.expires_at > now_utc
+    ).order_by(DeviceRebindOTP.created_at.desc()).first()
+
+    if not otp_record:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "otp_invalid", "error_type": "INVALID_OTP", "message": "No active verification code found. Please request a new code."}
+        )
+
+    if otp_record.attempts >= 5:
+        otp_record.is_verified = True
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "otp_invalid", "error_type": "INVALID_OTP", "message": "Maximum verification attempts exceeded. Please request a new code."}
+        )
+
+    otp_record.attempts += 1
+    if otp_record.otp_hash != otp_hash:
+        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "otp_invalid", "error_type": "INVALID_OTP", "message": "Invalid verification code."}
+        )
+
+    # 3. OTP Validated! Mark consumed
+    otp_record.is_verified = True
+
+    # 4. Atomic Swap in a single transaction
+    active_binding = db.query(DeviceBinding).filter(
+        DeviceBinding.student_id == student.id,
+        DeviceBinding.revoked_at.is_(None)
+    ).first()
+
+    new_binding = DeviceBinding(
+        student_id=student.id,
+        public_key=raw_spki,
+        key_id=key_id_val,
+        enrolled_at=now_utc,
+        enrolled_via="rebind",
+        storage_persist_granted=bool(req.storage_persist_granted),
+        browser_profile_tag=req.browser_profile_tag,
+        status="ACTIVE",
+        revoked_at=None,
+        revoked_reason=None
+    )
+    db.add(new_binding)
+    db.flush()
+
+    old_id = None
+    if active_binding:
+        old_id = active_binding.id
+        active_binding.revoked_at = now_utc
+        active_binding.revoked_reason = "rebind"
+        active_binding.superseded_by = new_binding.id
+        active_binding.status = "REVOKED"
+
+    client_ip = request.client.host if request.client else "unknown"
+    audit = AuditLog(
+        user_id=current_user.id,
+        roll_number=clean_roll,
+        event_type="DEVICE_REBOUND",
+        action="DEVICE_REBOUND",
+        details=f"Rebind atomic swap: old_binding_id={old_id} -> new_binding_id={new_binding.id}, key={key_id_val[:8]}..., channel={otp_record.delivery_channel}, IP={client_ip}",
+        created_at=now_utc
+    )
+    db.add(audit)
+
+    try:
+        db.commit()
+    except IntegrityError as race_err:
+        db.rollback()
+        logger.error(f"[REBIND INVARIANT VIOLATION] Database rejected concurrent rebind for {clean_roll}: {race_err}")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A concurrent device enrollment or rebind was already processed."
+        )
+
+    # 5. Background hijack notification email
+    background_tasks.add_task(
+        dispatch_rebind_notification_email_bg,
+        student_id=student.id,
+        user_id=current_user.id,
+        roll_number=clean_roll,
+        name=student.name,
+        email=student.email,
+        new_key_id=key_id_val,
+        ip_addr=client_ip
+    )
+
+    logger.info(f"[DEVICE_REBOUND] Student {clean_roll} rebound device: old={old_id}, new={new_binding.id}")
+
+    return {
+        "status": "DEVICE_ENROLLED",
+        "action": "DEVICE_REBOUND",
+        "key_id": key_id_val,
+        "binding_id": new_binding.id,
+        "superseded_binding_id": old_id,
+        "message": "This is now your attendance device. Point camera at classroom QR to mark attendance."
     }
 
 

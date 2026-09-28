@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { apiRequest } from '../../services/api';
-import { getBindingState } from '../../services/binding';
+import { getBindingState, checkServerBindingStatus, ServerBindingStatus } from '../../services/binding';
 
 export function useStudentPortalData() {
   const [profile, setProfile] = useState<any>(null);
@@ -10,6 +10,7 @@ export function useStudentPortalData() {
   const [schedule, setSchedule] = useState<any>(null);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [isDeviceBound, setIsDeviceBound] = useState<boolean | null>(null);
+  const [bindingStatusInfo, setBindingStatusInfo] = useState<ServerBindingStatus | null>(null);
 
   const fetchStudentData = async () => {
     try {
@@ -66,7 +67,9 @@ export function useStudentPortalData() {
     try {
       const storedUser = localStorage.getItem('user');
       const roll = profile?.roll_number || (storedUser ? JSON.parse(storedUser).roll_number : undefined);
-      const serverBoundKeyId = profile?.bound_device_key_id ?? (profile?.has_active_binding === false ? null : undefined);
+      const serverStatus = await checkServerBindingStatus();
+      setBindingStatusInfo(serverStatus);
+      const serverBoundKeyId = serverStatus?.active_key_id ?? (profile?.bound_device_key_id ?? (profile?.has_active_binding === false ? null : undefined));
       const state = await getBindingState(roll, {
         verifyWithServer: true,
         serverBoundKeyId
@@ -83,7 +86,9 @@ export function useStudentPortalData() {
       try {
         const storedUser = localStorage.getItem('user');
         const roll = profile?.roll_number || (storedUser ? JSON.parse(storedUser).roll_number : undefined);
-        const serverBoundKeyId = profile?.bound_device_key_id ?? (profile?.has_active_binding === false ? null : undefined);
+        const serverStatus = await checkServerBindingStatus();
+        if (!cancelled) setBindingStatusInfo(serverStatus);
+        const serverBoundKeyId = serverStatus?.active_key_id ?? (profile?.bound_device_key_id ?? (profile?.has_active_binding === false ? null : undefined));
         const state = await getBindingState(roll, {
           verifyWithServer: true,
           serverBoundKeyId
@@ -224,6 +229,7 @@ export function useStudentPortalData() {
     toast,
     setToast,
     isDeviceBound,
+    bindingStatusInfo,
     checkDeviceBinding,
     fetchStudentData,
     compAgg,

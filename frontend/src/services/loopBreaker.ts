@@ -10,22 +10,37 @@ const LOOP_BREAKER_FLAG_KEY = 'snist_auth_loop_breaker_tripped';
 const WINDOW_MS = 5000;
 const MAX_ALLOWED_REDIRECTS = 2;
 
-interface RedirectRecord {
-  timestamps: number[];
+interface RedirectEntry {
+  url: string;
+  at: number;
+}
+
+let onResetHandler: (() => void) | null = null;
+
+export function setLoopBreakerResetHandler(handler: (() => void) | null): void {
+  onResetHandler = handler;
 }
 
 /**
- * Reads the current list of redirect timestamps from sessionStorage.
+ * Reads the current list of redirect history entries from sessionStorage.
  */
-function getRedirectTimestamps(): number[] {
+function getRedirectHistory(): RedirectEntry[] {
   if (typeof sessionStorage === 'undefined') return [];
   try {
     const raw = sessionStorage.getItem(REDIRECT_TRACKER_KEY);
     if (!raw) return [];
-    const parsed: RedirectRecord = JSON.parse(raw);
+    const parsed = JSON.parse(raw);
     const now = Date.now();
-    // Prune timestamps older than WINDOW_MS (5 seconds)
-    return (parsed.timestamps || []).filter(ts => (now - ts) < WINDOW_MS);
+    let entries: RedirectEntry[] = [];
+    if (Array.isArray(parsed)) {
+      entries = parsed;
+    } else if (Array.isArray(parsed.history)) {
+      entries = parsed.history;
+    } else if (Array.isArray(parsed.timestamps)) {
+      entries = parsed.timestamps.map((ts: number) => ({ url: '', at: ts }));
+    }
+    // Prune entries older than WINDOW_MS (5 seconds)
+    return entries.filter(e => (now - e.at) < WINDOW_MS);
   } catch {
     return [];
   }
@@ -33,22 +48,45 @@ function getRedirectTimestamps(): number[] {
 
 /**
  * Records an auth redirect attempt.
+ * Semantics:
+ * - Duplicate same-target redirect within 1s is collapsed (treated as same intent fired twice).
+ * - Trips only on genuine oscillation: 4 or more distinct destination URLs in a 5s window.
+ * 
  * Returns `true` if the redirect is safe to proceed.
- * Returns `false` if the loop breaker has tripped (2+ redirects within 5s).
+ * Returns `false` if the loop breaker has tripped.
  */
-export function recordAuthRedirect(): boolean {
+export function recordAuthRedirect(url: string = ''): boolean {
   if (typeof sessionStorage === 'undefined') return true;
 
   const now = Date.now();
-  const recent = getRedirectTimestamps();
-  recent.push(now);
+  let history = getRedirectHistory();
+
+  // Same target twice within 1s = one intent fired twice -> collapse, don't count
+  const last = history.length > 0 ? history[history.length - 1] : undefined;
+  if (last && last.url === url && now - last.at < 1000) {
+    return true;
+  }
+
+  history.push({ url, at: now });
+  history = history.filter((h) => now - h.at < WINDOW_MS);
 
   try {
-    sessionStorage.setItem(REDIRECT_TRACKER_KEY, JSON.stringify({ timestamps: recent }));
+    sessionStorage.setItem(REDIRECT_TRACKER_KEY, JSON.stringify(history));
   } catch {}
 
-  // If 2 or more redirects happened within the 5-second window, trip the circuit breaker!
-  if (recent.length >= MAX_ALLOWED_REDIRECTS) {
+  // Trip on:
+  // 1. Pathological same-target loop (>3 hits to the SAME url in 5s window)
+  const sameTargetCount = history.filter((h) => h.url === url).length;
+  if (sameTargetCount >= 4) {
+    try {
+      sessionStorage.setItem(LOOP_BREAKER_FLAG_KEY, 'true');
+    } catch {}
+    return false;
+  }
+
+  // 2. Genuine oscillation (>=4 total redirects or >=4 distinct destinations in the window)
+  const distinctTargets = new Set(history.map((h) => h.url));
+  if (distinctTargets.size >= 4 || history.length >= 4) {
     try {
       sessionStorage.setItem(LOOP_BREAKER_FLAG_KEY, 'true');
     } catch {}
@@ -75,13 +113,21 @@ export function resetLoopBreaker(): void {
     sessionStorage.removeItem(REDIRECT_TRACKER_KEY);
     sessionStorage.removeItem(LOOP_BREAKER_FLAG_KEY);
   } catch {}
+  if (onResetHandler) {
+    onResetHandler();
+  }
 }
 
 /**
  * Emergency wipe: purges all stored auth state from localStorage,
+ * resets the loop breaker (unless preserveBreakerFlag is true),
  * and calls the backend logout endpoint to clear httpOnly cookies.
  */
-export function emergencyWipeAuthState(): void {
+export function emergencyWipeAuthState(preserveBreakerFlag: boolean = false): void {
+  if (!preserveBreakerFlag) {
+    resetLoopBreaker();
+  }
+
   if (typeof localStorage !== 'undefined') {
     const authKeys = [
       'token',

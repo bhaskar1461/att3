@@ -203,23 +203,6 @@ function detectFaceUniversal(
     };
   }
 
-  // Detect separate vertical columns of skin to identify multiple faces
-  let peakCount = 0;
-  let inPeak = false;
-  const colThreshold = (height / STEP) * 0.12;
-  for (let x = 0; x < width; x += STEP) {
-    if (colCounts[x] > colThreshold) {
-      if (!inPeak) {
-        peakCount++;
-        inPeak = true;
-      }
-    } else {
-      inPeak = false;
-    }
-  }
-
-  const faceCount = Math.max(1, peakCount);
-
   // Compute normalized face bounding box
   const boxW = Math.max(20, maxX - minX);
   const boxH = Math.max(20, maxY - minY);
@@ -227,6 +210,37 @@ function detectFaceUniversal(
   const normY = minY / height;
   const normW = boxW / width;
   const normH = boxH / height;
+
+  // Detect separate distinct faces:
+  // In a single selfie, hair bangs, facial hair, nose bridge, or glasses frequently dip column counts.
+  // If the total bounding box width is <= 65% of the viewport, it is physically impossible
+  // for two adults to be present — it is a single face.
+  let faceCount = 1;
+  if (normW > 0.65) {
+    let distinctPeaks = 0;
+    let currentPeakWidth = 0;
+    let valleyWidth = 0;
+    const minPeakWidth = (width / STEP) * 0.12;
+    const minValleyWidth = (width / STEP) * 0.15;
+    const colThreshold = (height / STEP) * 0.15;
+
+    for (let x = minX; x <= maxX; x += STEP) {
+      if (colCounts[x] > colThreshold) {
+        if (valleyWidth >= minValleyWidth && currentPeakWidth >= minPeakWidth) {
+          distinctPeaks++;
+          currentPeakWidth = 0;
+        }
+        currentPeakWidth++;
+        valleyWidth = 0;
+      } else {
+        valleyWidth++;
+      }
+    }
+    if (currentPeakWidth >= minPeakWidth) {
+      distinctPeaks++;
+    }
+    faceCount = Math.max(1, distinctPeaks);
+  }
 
   const boxCenterX = normX + normW / 2;
   const boxCenterY = normY + normH / 2;

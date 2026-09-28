@@ -7,7 +7,7 @@ import { IosInstallGuideModal } from '../components/IosInstallGuideModal';
 import { initPwaTelemetryListeners } from '../services/telemetryService';
 import { usePwaInstall } from '../hooks/usePwaInstall';
 import { getOrCreateDeviceCredentials, getDeviceHeaders } from '../services/deviceCredential';
-import { performAuthRedirect } from '../services/api';
+import { resetAuthRedirectDone } from '../services/api';
 import { isLoopBreakerTripped, resetLoopBreaker, emergencyWipeAuthState } from '../services/loopBreaker';
 
 export function isRouteAllowedForRole(path: string, role?: string): boolean {
@@ -61,7 +61,10 @@ export function getSafeNextDestination(search: string, role?: string): string | 
   }
 }
 
+import { useRenderCounter, useEffectTracer } from '../dev/diagnostics';
+
 export const Login: React.FC = () => {
+  const instanceId = useRenderCounter('Login');
   const { login, user: authUser, isLoading: authLoading } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -99,6 +102,7 @@ export const Login: React.FC = () => {
   const [showNewPassword, setShowNewPassword] = useState(false);
 
   React.useEffect(() => {
+    resetAuthRedirectDone();
     const params = new URLSearchParams(window.location.search);
     const reason = params.get('reason');
     const loopTripped = isLoopBreakerTripped() || reason === 'loop_breaker_tripped';
@@ -143,28 +147,18 @@ export const Login: React.FC = () => {
         });
     }
   }, []);
- 
-  // Single source of truth: redirect if already authenticated in AuthContext
+
+  // PD6: Handle iOS Safari BFCache restore (back-swipe from portal to login)
   React.useEffect(() => {
-    if (!authLoading && authUser) {
-      const params = new URLSearchParams(window.location.search);
-      const reason = params.get('reason');
-      const loopTripped = isLoopBreakerTripped() || reason === 'loop_breaker_tripped';
-      if (!loopTripped) {
-        const safeNext = getSafeNextDestination(window.location.search, authUser.role);
+    const handlePageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) {
+        resetAuthRedirectDone();
         resetLoopBreaker();
-        if (safeNext) {
-          performAuthRedirect(safeNext);
-        } else if (authUser.role === 'SUPER_ADMIN') {
-          performAuthRedirect('/overview');
-        } else if (authUser.role === 'TEACHER') {
-          performAuthRedirect('/teacher');
-        } else {
-          performAuthRedirect('/student?scan=true');
-        }
       }
-    }
-  }, [authUser, authLoading]);
+    };
+    window.addEventListener('pageshow', handlePageShow);
+    return () => window.removeEventListener('pageshow', handlePageShow);
+  }, []);
 
   // Live lockout countdown timer
   useEffect(() => {
@@ -233,18 +227,6 @@ export const Login: React.FC = () => {
       }
 
       resetLoopBreaker();
-      const safeNext = getSafeNextDestination(window.location.search, data.role);
-      setTimeout(() => {
-        if (safeNext) {
-          performAuthRedirect(safeNext);
-        } else if (data.role === 'SUPER_ADMIN') {
-          performAuthRedirect('/overview');
-        } else if (data.role === 'TEACHER') {
-          performAuthRedirect('/teacher');
-        } else {
-          performAuthRedirect('/student?scan=true');
-        }
-      }, 400);
 
     } catch (err: any) {
       setToast({ message: err.message || 'Login failed', type: 'error' });
@@ -355,16 +337,6 @@ export const Login: React.FC = () => {
       }, response.refresh_token);
 
       resetLoopBreaker();
-      const safeNext = getSafeNextDestination(window.location.search, response.role);
-      if (safeNext) {
-        performAuthRedirect(safeNext);
-      } else if (response.role === 'SUPER_ADMIN') {
-        performAuthRedirect('/overview');
-      } else if (response.role === 'TEACHER') {
-        performAuthRedirect('/teacher');
-      } else {
-        performAuthRedirect('/student?scan=true');
-      }
 
     } catch (err: any) {
       let message = err?.message || 'Login failed';

@@ -1,24 +1,47 @@
 import { getDeviceHeaders } from './deviceCredential';
-import { emergencyWipeAuthState, recordAuthRedirect } from './loopBreaker';
+import { emergencyWipeAuthState, recordAuthRedirect, setLoopBreakerResetHandler } from './loopBreaker';
 import { tokenLifecycleManager } from './tokenLifecycle';
 
 const API_BASE = '/api/v1';
 
 type AuthRedirectHandler = (url: string) => void;
 
+let lastRedirectUrl: string | null = null;
+let lastRedirectTimestamp = 0;
+
+export function resetAuthRedirectDone(): void {
+  lastRedirectUrl = null;
+  lastRedirectTimestamp = 0;
+}
+
+// Reset redirect deduplication whenever loop breaker is reset
+setLoopBreakerResetHandler(() => {
+  resetAuthRedirectDone();
+});
+
 export function setAuthRedirectHandler(handler: AuthRedirectHandler | null) {
   tokenLifecycleManager.setRedirectHandler(handler);
 }
 
 export function performAuthRedirect(url: string) {
-  const isSafe = recordAuthRedirect();
-  const targetUrl = isSafe ? url : '/login?reason=loop_breaker_tripped';
+  const now = Date.now();
+  // Transient deduplication: ignore rapid double-fire to the exact same URL within 500ms
+  if (lastRedirectUrl === url && (now - lastRedirectTimestamp) < 500) {
+    return;
+  }
+  lastRedirectUrl = url;
+  lastRedirectTimestamp = now;
+
+  const isSafe = recordAuthRedirect(url);
   if (!isSafe) {
-    emergencyWipeAuthState();
+    // Loop breaker tripped: HALT navigation immediately to break the cycle!
+    emergencyWipeAuthState(true); // wipe auth but keep breaker flag
     tokenLifecycleManager.cancelAutoRefresh();
+    console.error('[auth] Loop breaker tripped — halting navigation to prevent cycle.');
+    return;
   }
 
-  tokenLifecycleManager.triggerRedirect(targetUrl);
+  tokenLifecycleManager.triggerRedirect(url);
 }
 
 /**

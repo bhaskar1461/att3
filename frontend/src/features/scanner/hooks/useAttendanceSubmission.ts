@@ -112,6 +112,8 @@ export function toApiError(err: unknown): NormalizedApiError {
       code = 'binding_upgrade_required';
     } else if (status === 403 && (lowerMsg.includes('no_active_binding') || lowerMsg.includes('binding_required'))) {
       code = 'no_active_binding';
+    } else if (status === 403 && (lowerMsg.includes('device_replaced') || lowerMsg.includes('replaced'))) {
+      code = 'device_replaced';
     } else if (status === 410 || lowerMsg.includes('re-enroll') || lowerMsg.includes('grace period')) {
       code = 'binding_revoked_post_grace';
     } else if (status === 401 || lowerMsg.includes('session expired') || lowerMsg.includes('token expired')) {
@@ -138,6 +140,8 @@ export function toApiError(err: unknown): NormalizedApiError {
   // Normalize server code strings that contain embedded codes (e.g. "no_active_binding")
   if (code === 'no_active_binding' || (typeof code === 'string' && code.includes('no_active_binding'))) {
     code = 'no_active_binding';
+  } else if (code === 'device_replaced' || (typeof code === 'string' && code.includes('device_replaced'))) {
+    code = 'device_replaced';
   }
 
   const rawTicket = (
@@ -233,6 +237,7 @@ export function useAttendanceSubmission({
     switch (apiErr.code) {
       case 'binding_upgrade_required':
       case 'no_active_binding':
+      case 'device_replaced':
         // Both codes route to the same enrollment flow:
         // Preserve STRUCTURE — code + ticket, never a flattened string
         setScanErrorCode(apiErr.code);
@@ -247,7 +252,13 @@ export function useAttendanceSubmission({
           } : undefined)
         });
         setFlowState('BLOCKED'); // Dismisses the spinner immediately!
-        onGuideChange(apiErr.code === 'no_active_binding' ? 'Device not enrolled — enroll to continue' : 'One-time security upgrade required');
+        onGuideChange(
+          apiErr.code === 'device_replaced'
+            ? 'Device replaced — move attendance here'
+            : apiErr.code === 'no_active_binding'
+            ? 'Device not enrolled — enroll to continue'
+            : 'One-time security upgrade required'
+        );
         return;
 
       case 'qr_expired':

@@ -17,6 +17,8 @@ interface SelfieCameraViewportProps {
   onRetryCamera: () => void;
 }
 
+import { useRenderCounter } from '../../../dev/diagnostics';
+
 export const SelfieCameraViewport: React.FC<SelfieCameraViewportProps> = ({
   selfieState,
   guidanceMessage,
@@ -30,12 +32,13 @@ export const SelfieCameraViewport: React.FC<SelfieCameraViewportProps> = ({
   onRetake,
   onRetryCamera,
 }) => {
+  useRenderCounter('SelfieCameraViewport');
   const isLocked = selfieState === 'FACE_DETECTED' || selfieState === 'COUNTDOWN';
   const isMultipleFaces = detectionMetrics && detectionMetrics.faceCount > 1;
-  const isErrorState =
+  const isCameraPermissionError =
     selfieState === 'CAMERA_PERMISSION_DENIED' ||
-    selfieState === 'CAMERA_PERMISSION_PERMANENTLY_DENIED' ||
-    selfieState === 'UPLOAD_FAILED';
+    selfieState === 'CAMERA_PERMISSION_PERMANENTLY_DENIED';
+  const isUploadFailed = selfieState === 'UPLOAD_FAILED';
 
   return (
     <div className="relative mt-4 w-full aspect-square max-w-[300px] mx-auto rounded-3xl overflow-hidden bg-black/60 border border-white/10 shadow-inner flex items-center justify-center">
@@ -63,7 +66,7 @@ export const SelfieCameraViewport: React.FC<SelfieCameraViewportProps> = ({
       />
 
       {/* ── Oval Head Guide Overlay ── */}
-      {!capturedPreview && !isErrorState && (
+      {!capturedPreview && !isCameraPermissionError && (
         <div className="absolute inset-0 pointer-events-none z-10 flex items-center justify-center">
           <div
             className={`w-[56%] h-[74%] rounded-[50%] border-2 transition-all duration-300 relative ${
@@ -105,8 +108,8 @@ export const SelfieCameraViewport: React.FC<SelfieCameraViewportProps> = ({
         </div>
       )}
 
-      {/* Error / Permission Denied Overlay */}
-      {isErrorState && (
+      {/* Camera Permission Denied Overlay */}
+      {isCameraPermissionError && (
         <div className="absolute inset-0 z-30 bg-black/90 p-4 flex flex-col items-center justify-center text-center gap-2 text-xs">
           <AlertTriangle className="w-8 h-8 text-amber-400" />
           <span className="font-semibold text-white">Camera Access Required</span>
@@ -120,6 +123,18 @@ export const SelfieCameraViewport: React.FC<SelfieCameraViewportProps> = ({
           >
             Retry Camera
           </button>
+        </div>
+      )}
+
+      {/* Upload Failed Notification Badge Over Preview */}
+      {isUploadFailed && capturedPreview && (
+        <div className="absolute top-3 inset-x-3 z-30 bg-black/85 backdrop-blur-md border border-emerald-500/40 rounded-2xl p-2.5 text-center text-xs text-white shadow-xl animate-in fade-in">
+          <p className="font-bold text-[11px] text-emerald-400 flex items-center justify-center gap-1">
+            <Check className="w-3.5 h-3.5" /> Photo Captured Locally
+          </p>
+          <p className="text-[10px] text-slate-300 mt-0.5">
+            Cloud sync queued. Tap <span className="text-emerald-400 font-bold">Done</span> to complete attendance.
+          </p>
         </div>
       )}
 

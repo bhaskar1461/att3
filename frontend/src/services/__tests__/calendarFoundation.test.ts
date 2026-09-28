@@ -38,20 +38,23 @@ import type {
   HistoricalAttendanceSession, 
   TeacherAssignment 
 } from '../../types/index.ts';
+import { describe, it, expect } from 'vitest';
 
-let passedTests = 0;
-let totalTests = 0;
+describe('Calendar Foundation & Data Adapter', () => {
+  it('passes all 57 calendar mapping tests', () => {
+    let passedTests = 0;
+    let totalTests = 0;
 
-function assert(condition: boolean, testName: string, detail?: string) {
-  totalTests++;
-  if (condition) {
-    passedTests++;
-    console.log(`  [PASS] ${testName}`);
-  } else {
-    console.error(`  [FAIL] ${testName} - ${detail || 'Assertion failed'}`);
-    process.exitCode = 1;
-  }
-}
+    function assert(condition: boolean, testName: string, detail?: string) {
+      totalTests++;
+      expect(condition, `${testName} - ${detail || 'Assertion failed'}`).toBe(true);
+      if (condition) {
+        passedTests++;
+        console.log(`  [PASS] ${testName}`);
+      } else {
+        console.error(`  [FAIL] ${testName} - ${detail || 'Assertion failed'}`);
+      }
+    }
 
 console.log('\n======================================================');
 console.log('RUNNING PHASE 2 CALENDAR FOUNDATION TEST SUITE');
@@ -283,3 +286,7 @@ assert(merged.length === 2, 'Merges session events and unscheduled events cleanl
 console.log('\n======================================================');
 console.log(`TEST RESULTS: ${passedTests} / ${totalTests} PASSED (100% SUCCESS)`);
 console.log('======================================================\n');
+    expect(totalTests).toBe(57);
+    expect(passedTests).toBe(57);
+  });
+});
